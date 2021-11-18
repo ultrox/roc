@@ -11,12 +11,6 @@ description = "A surgical linker for Roc"
 name = "roc_linker"
 path = "src/lib.rs"
 
-[[bin]]
-name = "link"
-path = "src/main.rs"
-test = false
-bench = false
-
 [dependencies]
 roc_mono = { path = "../compiler/mono" }
 roc_build = { path = "../compiler/build", default-features = false }

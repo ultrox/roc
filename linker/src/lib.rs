@@ -1,6 +1,4 @@
 use bincode::{deserialize_from, serialize_into};
-use clap::{App, AppSettings, Arg, ArgMatches};
-use core::str::FromStr;
 use iced_x86::{Decoder, DecoderOptions, Instruction, OpCodeOperandKind, OpKind};
 use memmap2::{Mmap, MmapMut};
 use object::write;
@@ -32,18 +30,6 @@ use tempfile::Builder;
 mod metadata;
 use metadata::VirtualOffset;
 
-pub const CMD_PREPROCESS: &str = "preprocess";
-pub const CMD_SURGERY: &str = "surgery";
-pub const FLAG_VERBOSE: &str = "verbose";
-pub const FLAG_TIME: &str = "time";
-pub const FLAG_TARGET: &str = "target";
-
-pub const EXEC: &str = "EXEC";
-pub const METADATA: &str = "METADATA";
-pub const SHARED_LIB: &str = "SHARED_LIB";
-pub const APP: &str = "APP";
-pub const OUT: &str = "OUT";
-
 const MIN_SECTION_ALIGNMENT: usize = 0x40;
 
 // TODO: Analyze if this offset is always correct.
@@ -66,100 +52,6 @@ struct MachoDynamicDeps {
 
 fn report_timing(label: &str, duration: Duration) {
     println!("\t{:9.3} ms   {}", duration.as_secs_f64() * 1000.0, label,);
-}
-
-pub fn build_app<'a>() -> App<'a> {
-    App::new("link")
-        .about("Preprocesses a platform and surgically links it to an application.")
-        .setting(AppSettings::SubcommandRequiredElseHelp)
-        .subcommand(
-            App::new(CMD_PREPROCESS)
-                .about("Preprocesses a dynamically linked platform to prepare for linking.")
-                .arg(
-                    Arg::new(EXEC)
-                        .about("The dynamically linked platform executable")
-                        .required(true),
-                )
-                .arg(
-                    Arg::new(METADATA)
-                        .about("Where to save the metadata from preprocessing")
-                        .required(true),
-                )
-                .arg(
-                    Arg::new(OUT)
-                        .about("The modified version of the dynamically linked platform executable")
-                        .required(true),
-                )
-                .arg(
-                    Arg::new(SHARED_LIB)
-                        .about("The name of the shared library used in building the platform")
-                        .default_value("libapp.so"),
-                )
-                .arg(
-                    Arg::new(FLAG_TARGET)
-                        .long(FLAG_TARGET)
-                        .help("The target triple for linking")
-                        .takes_value(true)
-                        .required(false),
-                )
-                .arg(
-                    Arg::new(FLAG_VERBOSE)
-                        .long(FLAG_VERBOSE)
-                        .short('v')
-                        .about("Enable verbose printing")
-                        .required(false),
-                )
-                .arg(
-                    Arg::new(FLAG_TIME)
-                        .long(FLAG_TIME)
-                        .short('t')
-                        .about("Print timing information")
-                        .required(false),
-                ),
-        )
-        .subcommand(
-            App::new(CMD_SURGERY)
-                .about("Links a preprocessed platform with a Roc application.")
-                .arg(
-                    Arg::new(APP)
-                        .about("The Roc application object file waiting to be linked")
-                        .required(true),
-                )
-                .arg(
-                    Arg::new(METADATA)
-                        .about("The metadata created by preprocessing the platform")
-                        .required(true),
-                )
-                .arg(
-                    Arg::new(OUT)
-                        .about(
-                            "The modified version of the dynamically linked platform. \
-                                It will be consumed to make linking faster.",
-                        )
-                        .required(true),
-                )
-                .arg(
-                    Arg::new(FLAG_TARGET)
-                        .long(FLAG_TARGET)
-                        .help("The target triple for linking")
-                        .takes_value(true)
-                        .required(false),
-                )
-                .arg(
-                    Arg::new(FLAG_VERBOSE)
-                        .long(FLAG_VERBOSE)
-                        .short('v')
-                        .about("Enable verbose printing")
-                        .required(false),
-                )
-                .arg(
-                    Arg::new(FLAG_TIME)
-                        .long(FLAG_TIME)
-                        .short('t')
-                        .about("Print timing information")
-                        .required(false),
-                ),
-        )
 }
 
 pub fn supported(link_type: LinkType, target: &Triple) -> bool {
@@ -190,7 +82,8 @@ pub fn build_and_preprocess_host(
     let dynhost = host_input_path.with_file_name("dynhost");
     let metadata = host_input_path.with_file_name("metadata");
     let prehost = host_input_path.with_file_name("preprocessedhost");
-    if preprocess_impl(
+
+    if preprocess(
         target,
         dynhost.to_str().unwrap(),
         metadata.to_str().unwrap(),
@@ -212,7 +105,7 @@ pub fn link_preprocessed_host(
     binary_path: &Path,
 ) -> io::Result<()> {
     let metadata = host_input_path.with_file_name("metadata");
-    if surgery_impl(
+    if surgery(
         roc_app_obj.to_str().unwrap(),
         metadata.to_str().unwrap(),
         binary_path.to_str().unwrap(),
@@ -327,30 +220,9 @@ fn generate_dynamic_lib(
     Ok(())
 }
 
-pub fn preprocess(matches: &ArgMatches) -> io::Result<i32> {
-    let triple = if matches.is_present(FLAG_TARGET) {
-        matches
-            .value_of(FLAG_TARGET)
-            .and_then(|str| Triple::from_str(str).ok())
-            // TODO give this a nicer err print out.
-            .expect("Failed to parse target triple")
-    } else {
-        Triple::host()
-    };
-    preprocess_impl(
-        &triple,
-        matches.value_of(EXEC).unwrap(),
-        matches.value_of(METADATA).unwrap(),
-        matches.value_of(OUT).unwrap(),
-        Path::new(matches.value_of(SHARED_LIB).unwrap()),
-        matches.is_present(FLAG_VERBOSE),
-        matches.is_present(FLAG_TIME),
-    )
-}
-
 // TODO: Most of this file is a mess of giant functions just to check if things work.
 // Clean it all up and refactor nicely.
-fn preprocess_impl(
+pub fn preprocess(
     target: &Triple,
     exec_filename: &str,
     metadata_filename: &str,
@@ -1865,17 +1737,7 @@ fn scan_elf_dynamic_deps(
     })
 }
 
-pub fn surgery(matches: &ArgMatches) -> io::Result<i32> {
-    surgery_impl(
-        matches.value_of(APP).unwrap(),
-        matches.value_of(METADATA).unwrap(),
-        matches.value_of(OUT).unwrap(),
-        matches.is_present(FLAG_VERBOSE),
-        matches.is_present(FLAG_TIME),
-    )
-}
-
-fn surgery_impl(
+pub fn surgery(
     app_filename: &str,
     metadata_filename: &str,
     out_filename: &str,
