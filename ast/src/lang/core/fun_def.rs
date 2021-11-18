@@ -14,17 +14,17 @@ use super::{
 #[derive(Debug)]
 pub enum FunctionDef {
     WithAnnotation {
-        name: Symbol,                           // 8B
-        arguments: PoolVec<(PatternId, Type2)>, // 8B
-        rigids: NodeId<Rigids>,                 // 4B
-        return_type: TypeId,                    // 4B
-        body: ExprId,                           // 4B
+        name: Symbol,                                   // 8B
+        arguments: PoolVec<(NodeId<Type2>, PatternId)>, // 8B
+        rigids: NodeId<Rigids>,                         // 4B
+        return_type: TypeId,                            // 4B
+        body_id: ExprId,                                // 4B
     },
     NoAnnotation {
         name: Symbol,                              // 8B
-        arguments: PoolVec<(PatternId, Variable)>, // 8B
+        arguments: PoolVec<(Variable, PatternId)>, // 8B
         return_var: Variable,                      // 4B
-        body: ExprId,                              // 4B
+        body_id: ExprId,                           // 4B
     },
 }
 
@@ -36,25 +36,25 @@ impl ShallowClone for FunctionDef {
                 arguments,
                 rigids,
                 return_type,
-                body,
+                body_id,
             } => Self::WithAnnotation {
                 name: *name,
                 arguments: arguments.shallow_clone(),
                 rigids: *rigids,
                 return_type: *return_type,
-                body: *body,
+                body_id: *body_id,
             },
 
             Self::NoAnnotation {
                 name,
                 arguments,
                 return_var,
-                body,
+                body_id,
             } => Self::NoAnnotation {
                 name: *name,
                 arguments: arguments.shallow_clone(),
                 return_var: *return_var,
-                body: *body,
+                body_id: *body_id,
             },
         }
     }

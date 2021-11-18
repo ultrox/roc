@@ -7,7 +7,7 @@ use roc_module::operator::CalledVia;
 use roc_module::symbol::{Interns, ModuleId, Symbol};
 use roc_mono::ir::ProcLayout;
 use roc_mono::layout::{union_sorted_tags_help, Builtin, Layout, UnionLayout, UnionVariant};
-use roc_parse::ast::{AssignedField, Expr, StrLiteral};
+use roc_parse::ast::{AssignedField, Collection, Expr, StrLiteral};
 use roc_region::all::{Located, Region};
 use roc_types::subs::{Content, FlatType, GetSubsSlice, RecordFields, Subs, UnionTags, Variable};
 
@@ -133,10 +133,7 @@ fn jit_to_ast_help<'a>(
         ),
         Layout::Builtin(Builtin::EmptyList) => {
             Ok(run_jit_function!(lib, main_fn_name, &'static str, |_| {
-                Expr::List {
-                    items: &[],
-                    final_comments: &[],
-                }
+                Expr::List(Collection::empty())
             }))
         }
         Layout::Builtin(Builtin::List(elem_layout)) => Ok(run_jit_function!(
@@ -431,10 +428,7 @@ fn ptr_to_ast<'a>(
 
             num_to_ast(env, number_literal_to_ast(env.arena, num), content)
         }
-        Layout::Builtin(Builtin::EmptyList) => Expr::List {
-            items: &[],
-            final_comments: &[],
-        },
+        Layout::Builtin(Builtin::EmptyList) => Expr::List(Collection::empty()),
         Layout::Builtin(Builtin::List(elem_layout)) => {
             // Turn the (ptr, len) wrapper struct into actual ptr and len values.
             let len = unsafe { *(ptr.offset(env.ptr_bytes as isize) as *const usize) };
@@ -522,10 +516,7 @@ fn list_to_ast<'a>(
 
     let output = output.into_bump_slice();
 
-    Expr::List {
-        items: output,
-        final_comments: &[],
-    }
+    Expr::List(Collection::with_items(output))
 }
 
 fn single_tag_union_to_ast<'a>(
@@ -535,16 +526,21 @@ fn single_tag_union_to_ast<'a>(
     tag_name: &TagName,
     payload_vars: &[Variable],
 ) -> Expr<'a> {
-    debug_assert_eq!(field_layouts.len(), payload_vars.len());
-
     let arena = env.arena;
-
     let tag_expr = tag_name_to_expr(env, tag_name);
 
     let loc_tag_expr = &*arena.alloc(Located::at_zero(tag_expr));
 
-    let it = payload_vars.iter().copied().zip(field_layouts);
-    let output = sequence_of_expr(env, ptr as *const u8, it).into_bump_slice();
+    let output = if field_layouts.len() == payload_vars.len() {
+        let it = payload_vars.iter().copied().zip(field_layouts);
+        sequence_of_expr(env, ptr as *const u8, it).into_bump_slice()
+    } else if field_layouts.is_empty() && !payload_vars.is_empty() {
+        // happens for e.g. `Foo Bar` where unit structures are nested and the inner one is dropped
+        let it = payload_vars.iter().copied().zip([&Layout::Struct(&[])]);
+        sequence_of_expr(env, ptr as *const u8, it).into_bump_slice()
+    } else {
+        unreachable!()
+    };
 
     Expr::Apply(loc_tag_expr, output, CalledVia::Space)
 }
@@ -616,10 +612,7 @@ fn struct_to_ast<'a>(
 
         let output = env.arena.alloc([loc_field]);
 
-        Expr::Record {
-            fields: output,
-            final_comments: &[],
-        }
+        Expr::Record(Collection::with_items(output))
     } else {
         debug_assert_eq!(sorted_fields.len(), field_layouts.len());
 
@@ -653,10 +646,7 @@ fn struct_to_ast<'a>(
 
         let output = output.into_bump_slice();
 
-        Expr::Record {
-            fields: output,
-            final_comments: &[],
-        }
+        Expr::Record(Collection::with_items(output))
     }
 }
 
@@ -730,10 +720,7 @@ fn bool_to_ast<'a>(env: &Env<'a, '_>, value: bool, content: &Content) -> Expr<'a
                         region: Region::zero(),
                     };
 
-                    Expr::Record {
-                        fields: arena.alloc([loc_assigned_field]),
-                        final_comments: arena.alloc([]),
-                    }
+                    Expr::Record(Collection::with_items(arena.alloc([loc_assigned_field])))
                 }
                 FlatType::TagUnion(tags, _) if tags.len() == 1 => {
                     let (tag_name, payload_vars) = unpack_single_element_tag_union(env.subs, *tags);
@@ -845,10 +832,7 @@ fn byte_to_ast<'a>(env: &Env<'a, '_>, value: u8, content: &Content) -> Expr<'a> 
                         region: Region::zero(),
                     };
 
-                    Expr::Record {
-                        fields: arena.alloc([loc_assigned_field]),
-                        final_comments: &[],
-                    }
+                    Expr::Record(Collection::with_items(arena.alloc([loc_assigned_field])))
                 }
                 FlatType::TagUnion(tags, _) if tags.len() == 1 => {
                     let (tag_name, payload_vars) = unpack_single_element_tag_union(env.subs, *tags);
@@ -967,10 +951,7 @@ fn num_to_ast<'a>(env: &Env<'a, '_>, num_expr: Expr<'a>, content: &Content) -> E
                         region: Region::zero(),
                     };
 
-                    Expr::Record {
-                        fields: arena.alloc([loc_assigned_field]),
-                        final_comments: arena.alloc([]),
-                    }
+                    Expr::Record(Collection::with_items(arena.alloc([loc_assigned_field])))
                 }
                 FlatType::TagUnion(tags, _) => {
                     // This was a single-tag union that got unwrapped at runtime.

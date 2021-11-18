@@ -15,9 +15,10 @@ use roc_ast::lang::core::ast::{ASTNodeId, AST};
 use roc_ast::lang::env::Env;
 use roc_ast::mem_pool::pool_str::PoolStr;
 use roc_ast::parse::parse_ast;
-use roc_code_markup::markup::nodes::ast_to_mark_nodes;
+use roc_code_markup::markup::convert::from_ast::ast_to_mark_nodes;
 use roc_code_markup::slow_pool::{MarkNodeId, SlowPool};
 use roc_load::file::LoadedModule;
+use roc_module::symbol::Interns;
 use std::path::Path;
 
 #[derive(Debug)]
@@ -55,7 +56,8 @@ pub fn init_model<'a>(
     code_arena: &'a Bump,
     caret_pos: CaretPos, // to set caret position
 ) -> EdResult<EdModel<'a>> {
-    let mut module = EdModule::new(code_str, env, code_arena)?;
+    let mut owned_loaded_module = loaded_module;
+    let mut module = EdModule::new(code_str, env, &mut owned_loaded_module.interns, code_arena)?;
 
     let mut mark_node_pool = SlowPool::default();
 
@@ -63,11 +65,10 @@ pub fn init_model<'a>(
         EmptyCodeString {}.fail()
     } else {
         Ok(ast_to_mark_nodes(
-            code_arena,
             &mut module.env,
             &module.ast,
             &mut mark_node_pool,
-            &loaded_module.interns,
+            &owned_loaded_module.interns,
         )?)
     }?;
 
@@ -105,7 +106,7 @@ pub fn init_model<'a>(
         has_focus: true,
         caret_w_select_vec: NonEmpty::new((caret, None)),
         selected_block_opt: None,
-        loaded_module,
+        loaded_module: owned_loaded_module,
         show_debug_view: false,
         dirty: true,
     })
@@ -179,9 +180,14 @@ pub struct EdModule<'a> {
 //use crate::lang::ast::expr2_to_string;
 
 impl<'a> EdModule<'a> {
-    pub fn new(code_str: &'a str, mut env: Env<'a>, ast_arena: &'a Bump) -> EdResult<EdModule<'a>> {
+    pub fn new(
+        code_str: &'a str,
+        mut env: Env<'a>,
+        interns: &mut Interns,
+        ast_arena: &'a Bump,
+    ) -> EdResult<EdModule<'a>> {
         if !code_str.is_empty() {
-            let parse_res = parse_ast::parse_from_string(code_str, &mut env, ast_arena);
+            let parse_res = parse_ast::parse_from_string(code_str, &mut env, ast_arena, interns);
 
             match parse_res {
                 Ok(ast) => Ok(EdModule { env, ast }),
@@ -199,7 +205,6 @@ impl<'a> EdModule<'a> {
 #[cfg(test)]
 pub mod test_ed_model {
     use crate::editor::ed_error::EdResult;
-    use crate::editor::main::load_module;
     use crate::editor::mvc::ed_model;
     use crate::editor::resources::strings::HELLO_WORLD;
     use crate::ui::text::caret_w_select::test_caret_w_select::convert_dsl_to_selection;
@@ -212,6 +217,7 @@ pub mod test_ed_model {
     use ed_model::EdModel;
     use roc_ast::lang::env::Env;
     use roc_ast::mem_pool::pool::Pool;
+    use roc_ast::module::load_module;
     use roc_load::file::LoadedModule;
     use roc_module::symbol::IdentIds;
     use roc_module::symbol::ModuleIds;
@@ -284,14 +290,14 @@ pub mod test_ed_model {
             PathBuf::from([Uuid::new_v4().to_string(), ".roc".to_string()].join(""));
         let temp_file_full_path = temp_dir.path().join(temp_file_path_buf);
 
-        let mut file = File::create(temp_file_full_path.clone()).expect(&format!(
-            "Failed to create temporary file for path {:?}",
-            temp_file_full_path
-        ));
-        writeln!(file, "{}", clean_code_str).expect(&format!(
-            "Failed to write {:?} to file: {:?}",
-            clean_code_str, file
-        ));
+        let mut file = File::create(temp_file_full_path.clone()).unwrap_or_else(|_| {
+            panic!(
+                "Failed to create temporary file for path {:?}",
+                temp_file_full_path
+            )
+        });
+        writeln!(file, "{}", clean_code_str)
+            .unwrap_or_else(|_| panic!("Failed to write {:?} to file: {:?}", clean_code_str, file));
 
         let loaded_module = load_module(&temp_file_full_path);
 

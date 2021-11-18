@@ -4,11 +4,13 @@ use self::InProgressProc::*;
 use crate::exhaustive::{Ctor, Guard, RenderAs, TagId};
 use crate::layout::{
     Builtin, ClosureRepresentation, LambdaSet, Layout, LayoutCache, LayoutProblem,
-    RawFunctionLayout, UnionLayout, WrappedVariant,
+    RawFunctionLayout, TagIdIntType, UnionLayout, WrappedVariant,
 };
 use bumpalo::collections::Vec;
 use bumpalo::Bump;
-use roc_collections::all::{default_hasher, BumpMap, BumpMapDefault, BumpSet, MutMap, MutSet};
+use hashbrown::hash_map::Entry;
+use roc_can::expr::ClosureData;
+use roc_collections::all::{default_hasher, BumpMap, BumpMapDefault, MutMap};
 use roc_module::ident::{ForeignSymbol, Lowercase, TagName};
 use roc_module::low_level::LowLevel;
 use roc_module::symbol::{IdentIds, ModuleId, Symbol};
@@ -21,6 +23,24 @@ use std::collections::HashMap;
 use ven_pretty::{BoxAllocator, DocAllocator, DocBuilder};
 
 pub const PRETTY_PRINT_IR_SYMBOLS: bool = false;
+
+// if your changes cause this number to go down, great!
+// please change it to the lower number.
+// if it went up, maybe check that the change is really required
+
+// i128 alignment is different on arm
+#[cfg(target_arch = "aarch64")]
+static_assertions::assert_eq_size!([u8; 4 * 8], Literal);
+#[cfg(not(target_arch = "aarch64"))]
+static_assertions::assert_eq_size!([u8; 3 * 8], Literal);
+static_assertions::assert_eq_size!([u8; 10 * 8], Expr);
+#[cfg(not(target_arch = "aarch64"))]
+static_assertions::assert_eq_size!([u8; 19 * 8], Stmt);
+#[cfg(target_arch = "aarch64")]
+static_assertions::assert_eq_size!([u8; 20 * 8], Stmt);
+static_assertions::assert_eq_size!([u8; 6 * 8], ProcLayout);
+static_assertions::assert_eq_size!([u8; 8 * 8], Call);
+static_assertions::assert_eq_size!([u8; 6 * 8], CallType);
 
 macro_rules! return_on_layout_error {
     ($env:expr, $layout_result:expr) => {
@@ -70,6 +90,61 @@ pub struct EntryPoint<'a> {
     pub layout: ProcLayout<'a>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct PartialProcId(usize);
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PartialProcs<'a> {
+    /// maps a function name (symbol) to an index
+    symbols: Vec<'a, Symbol>,
+
+    partial_procs: Vec<'a, PartialProc<'a>>,
+}
+
+impl<'a> PartialProcs<'a> {
+    fn new_in(arena: &'a Bump) -> Self {
+        Self {
+            symbols: Vec::new_in(arena),
+            partial_procs: Vec::new_in(arena),
+        }
+    }
+    fn contains_key(&self, symbol: Symbol) -> bool {
+        self.symbol_to_id(symbol).is_some()
+    }
+
+    fn symbol_to_id(&self, symbol: Symbol) -> Option<PartialProcId> {
+        self.symbols
+            .iter()
+            .position(|s| *s == symbol)
+            .map(PartialProcId)
+    }
+
+    fn get_symbol(&self, symbol: Symbol) -> Option<&PartialProc<'a>> {
+        let id = self.symbol_to_id(symbol)?;
+
+        Some(self.get_id(id))
+    }
+
+    fn get_id(&self, id: PartialProcId) -> &PartialProc<'a> {
+        &self.partial_procs[id.0]
+    }
+
+    pub fn insert(&mut self, symbol: Symbol, partial_proc: PartialProc<'a>) -> PartialProcId {
+        debug_assert!(
+            !self.contains_key(symbol),
+            "The {:?} is inserted as a partial proc twice: that's a bug!",
+            symbol,
+        );
+
+        let id = PartialProcId(self.symbols.len());
+
+        self.symbols.push(symbol);
+        self.partial_procs.push(partial_proc);
+
+        id
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct PartialProc<'a> {
     pub annotation: Variable,
@@ -79,7 +154,56 @@ pub struct PartialProc<'a> {
     pub is_self_recursive: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+impl<'a> PartialProc<'a> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_named_function(
+        env: &mut Env<'a, '_>,
+        layout_cache: &mut LayoutCache<'a>,
+        annotation: Variable,
+        loc_args: std::vec::Vec<(Variable, Located<roc_can::pattern::Pattern>)>,
+        loc_body: Located<roc_can::expr::Expr>,
+        captured_symbols: CapturedSymbols<'a>,
+        is_self_recursive: bool,
+        ret_var: Variable,
+    ) -> PartialProc<'a> {
+        let number_of_arguments = loc_args.len();
+
+        match patterns_to_when(env, layout_cache, loc_args, ret_var, loc_body) {
+            Ok((_, pattern_symbols, body)) => {
+                // a named closure. Since these aren't specialized by the surrounding
+                // context, we can't add pending specializations for them yet.
+                // (If we did, all named polymorphic functions would immediately error
+                // on trying to convert a flex var to a Layout.)
+                let pattern_symbols = pattern_symbols.into_bump_slice();
+                PartialProc {
+                    annotation,
+                    pattern_symbols,
+                    captured_symbols,
+                    body: body.value,
+                    is_self_recursive,
+                }
+            }
+
+            Err(error) => {
+                let mut pattern_symbols = Vec::with_capacity_in(number_of_arguments, env.arena);
+
+                for _ in 0..number_of_arguments {
+                    pattern_symbols.push(env.unique_symbol());
+                }
+
+                PartialProc {
+                    annotation,
+                    pattern_symbols: pattern_symbols.into_bump_slice(),
+                    captured_symbols: CapturedSymbols::None,
+                    body: roc_can::expr::Expr::RuntimeError(error.value),
+                    is_self_recursive: false,
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CapturedSymbols<'a> {
     None,
     Captured(&'a [(Symbol, Variable)]),
@@ -100,7 +224,7 @@ impl<'a> Default for CapturedSymbols<'a> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct PendingSpecialization<'a> {
     solved_type: SolvedType,
     host_exposed_aliases: BumpMap<Symbol, SolvedType>,
@@ -137,6 +261,24 @@ impl<'a> PendingSpecialization<'a> {
             solved_type,
             host_exposed_aliases,
             _lifetime: std::marker::PhantomData,
+        }
+    }
+
+    /// Add a named function that will be publicly exposed to the host
+    pub fn from_exposed_function(
+        arena: &'a Bump,
+        subs: &Subs,
+        opt_annotation: Option<roc_can::def::Annotation>,
+        fn_var: Variable,
+    ) -> Self {
+        match opt_annotation {
+            None => PendingSpecialization::from_var(arena, subs, fn_var),
+            Some(annotation) => PendingSpecialization::from_var_host_exposed(
+                arena,
+                subs,
+                fn_var,
+                &annotation.introduced_variables.host_exposed_aliases,
+            ),
         }
     }
 }
@@ -246,40 +388,6 @@ impl<'a> Proc<'a> {
         }
     }
 
-    pub fn optimize_refcount_operations<'i, T>(
-        arena: &'a Bump,
-        home: ModuleId,
-        ident_ids: &'i mut IdentIds,
-        procs: &mut MutMap<T, Proc<'a>>,
-    ) {
-        use crate::expand_rc;
-
-        let deferred = expand_rc::Deferred {
-            inc_dec_map: Default::default(),
-            assignments: Vec::new_in(arena),
-            decrefs: Vec::new_in(arena),
-        };
-
-        let mut env = expand_rc::Env {
-            home,
-            arena,
-            ident_ids,
-            layout_map: Default::default(),
-            alias_map: Default::default(),
-            constructor_map: Default::default(),
-            deferred,
-        };
-
-        for (_, proc) in procs.iter_mut() {
-            let b = expand_rc::expand_and_cancel_proc(
-                &mut env,
-                arena.alloc(proc.body.clone()),
-                proc.args,
-            );
-            proc.body = b.clone();
-        }
-    }
-
     fn make_tail_recursive(&mut self, env: &mut Env<'a, '_>) {
         let mut args = Vec::with_capacity_in(self.args.len(), env.arena);
         let mut proc_args = Vec::with_capacity_in(self.args.len(), env.arena);
@@ -310,7 +418,8 @@ impl<'a> Proc<'a> {
 
 #[derive(Clone, Debug)]
 pub struct ExternalSpecializations<'a> {
-    pub specs: BumpMap<Symbol, MutSet<SolvedType>>,
+    /// Not a bumpalo vec because bumpalo is not thread safe
+    pub specs: BumpMap<Symbol, std::vec::Vec<SolvedType>>,
     _lifetime: std::marker::PhantomData<&'a u8>,
 }
 
@@ -326,11 +435,11 @@ impl<'a> ExternalSpecializations<'a> {
         use hashbrown::hash_map::Entry::{Occupied, Vacant};
 
         let existing = match self.specs.entry(symbol) {
-            Vacant(entry) => entry.insert(MutSet::default()),
+            Vacant(entry) => entry.insert(std::vec::Vec::new()),
             Occupied(entry) => entry.into_mut(),
         };
 
-        existing.insert(typ);
+        existing.push(typ);
     }
 
     pub fn extend(&mut self, other: Self) {
@@ -338,7 +447,7 @@ impl<'a> ExternalSpecializations<'a> {
 
         for (symbol, solved_types) in other.specs {
             let existing = match self.specs.entry(symbol) {
-                Vacant(entry) => entry.insert(MutSet::default()),
+                Vacant(entry) => entry.insert(std::vec::Vec::new()),
                 Occupied(entry) => entry.into_mut(),
             };
 
@@ -349,9 +458,9 @@ impl<'a> ExternalSpecializations<'a> {
 
 #[derive(Clone, Debug)]
 pub struct Procs<'a> {
-    pub partial_procs: BumpMap<Symbol, PartialProc<'a>>,
-    pub imported_module_thunks: BumpSet<Symbol>,
-    pub module_thunks: BumpSet<Symbol>,
+    pub partial_procs: PartialProcs<'a>,
+    pub imported_module_thunks: &'a [Symbol],
+    pub module_thunks: &'a [Symbol],
     pub pending_specializations:
         Option<BumpMap<Symbol, MutMap<ProcLayout<'a>, PendingSpecialization<'a>>>>,
     pub specialized: BumpMap<(Symbol, ProcLayout<'a>), InProgressProc<'a>>,
@@ -363,9 +472,9 @@ pub struct Procs<'a> {
 impl<'a> Procs<'a> {
     pub fn new_in(arena: &'a Bump) -> Self {
         Self {
-            partial_procs: BumpMap::new_in(arena),
-            imported_module_thunks: BumpSet::new_in(arena),
-            module_thunks: BumpSet::new_in(arena),
+            partial_procs: PartialProcs::new_in(arena),
+            imported_module_thunks: &[],
+            module_thunks: &[],
             pending_specializations: Some(BumpMap::new_in(arena)),
             specialized: BumpMap::new_in(arena),
             runtime_errors: BumpMap::new_in(arena),
@@ -382,13 +491,23 @@ pub enum InProgressProc<'a> {
 }
 
 impl<'a> Procs<'a> {
+    fn is_imported_module_thunk(&self, symbol: Symbol) -> bool {
+        self.imported_module_thunks.iter().any(|x| *x == symbol)
+    }
+
+    fn is_module_thunk(&self, symbol: Symbol) -> bool {
+        self.module_thunks.iter().any(|x| *x == symbol)
+    }
+
+    fn get_partial_proc<'b>(&'b self, symbol: Symbol) -> Option<&'b PartialProc<'a>> {
+        self.partial_procs.get_symbol(symbol)
+    }
+
     pub fn get_specialized_procs_without_rc(
         self,
         env: &mut Env<'a, '_>,
     ) -> MutMap<(Symbol, ProcLayout<'a>), Proc<'a>> {
         let mut result = MutMap::with_capacity_and_hasher(self.specialized.len(), default_hasher());
-
-        let cloned = self.specialized.clone();
 
         for (key, in_prog_proc) in self.specialized.into_iter() {
             match in_prog_proc {
@@ -398,14 +517,6 @@ impl<'a> Procs<'a> {
                         "The procedure {:?} should have be done by now:\n\n    {:?}",
                         symbol, layout
                     );
-
-                    eprintln!("other pending specializatons for this symbol:");
-
-                    for ((bsymbol, layout), _) in cloned {
-                        if bsymbol == symbol {
-                            eprintln!("{:?}: {:?}", symbol, layout);
-                        }
-                    }
 
                     panic!();
                 }
@@ -420,65 +531,9 @@ impl<'a> Procs<'a> {
         result
     }
 
-    // TODO trim down these arguments!
-    #[allow(clippy::too_many_arguments)]
-    pub fn insert_named(
-        &mut self,
-        env: &mut Env<'a, '_>,
-        layout_cache: &mut LayoutCache<'a>,
-        name: Symbol,
-        annotation: Variable,
-        loc_args: std::vec::Vec<(Variable, Located<roc_can::pattern::Pattern>)>,
-        loc_body: Located<roc_can::expr::Expr>,
-        captured_symbols: CapturedSymbols<'a>,
-        is_self_recursive: bool,
-        ret_var: Variable,
-    ) {
-        let number_of_arguments = loc_args.len();
-
-        match patterns_to_when(env, layout_cache, loc_args, ret_var, loc_body) {
-            Ok((_, pattern_symbols, body)) => {
-                // a named closure. Since these aren't specialized by the surrounding
-                // context, we can't add pending specializations for them yet.
-                // (If we did, all named polymorphic functions would immediately error
-                // on trying to convert a flex var to a Layout.)
-                let pattern_symbols = pattern_symbols.into_bump_slice();
-                self.partial_procs.insert(
-                    name,
-                    PartialProc {
-                        annotation,
-                        pattern_symbols,
-                        captured_symbols,
-                        body: body.value,
-                        is_self_recursive,
-                    },
-                );
-            }
-
-            Err(error) => {
-                let mut pattern_symbols = Vec::with_capacity_in(number_of_arguments, env.arena);
-
-                for _ in 0..number_of_arguments {
-                    pattern_symbols.push(env.unique_symbol());
-                }
-
-                self.partial_procs.insert(
-                    name,
-                    PartialProc {
-                        annotation,
-                        pattern_symbols: pattern_symbols.into_bump_slice(),
-                        captured_symbols: CapturedSymbols::None,
-                        body: roc_can::expr::Expr::RuntimeError(error.value),
-                        is_self_recursive: false,
-                    },
-                );
-            }
-        }
-    }
-
     // TODO trim these down
     #[allow(clippy::too_many_arguments)]
-    pub fn insert_anonymous(
+    fn insert_anonymous(
         &mut self,
         env: &mut Env<'a, '_>,
         symbol: Symbol,
@@ -504,51 +559,54 @@ impl<'a> Procs<'a> {
                 // by the surrounding context, so we can add pending specializations
                 // for them immediately.
 
-                let tuple = (symbol, top_level);
-                let already_specialized = self.specialized.contains_key(&tuple);
-                let (symbol, layout) = tuple;
+                let already_specialized = self
+                    .specialized
+                    .keys()
+                    .any(|(s, t)| *s == symbol && *t == top_level);
+
+                let layout = top_level;
 
                 // if we've already specialized this one, no further work is needed.
-                //
-                // NOTE: this #[allow(clippy::map_entry)] here is for correctness!
-                // Changing it to use .entry() would necessarily make it incorrect.
-                #[allow(clippy::map_entry)]
                 if !already_specialized {
-                    let pending = PendingSpecialization::from_var(env.arena, env.subs, annotation);
-
-                    let partial_proc;
-                    if let Some(existing) = self.partial_procs.get(&symbol) {
-                        // if we're adding the same partial proc twice, they must be the actual same!
-                        //
-                        // NOTE we can't skip extra work! we still need to make the specialization for this
-                        // invocation. The content of the `annotation` can be different, even if the variable
-                        // number is the same
-                        debug_assert_eq!(annotation, existing.annotation);
-                        debug_assert_eq!(captured_symbols, existing.captured_symbols);
-                        debug_assert_eq!(is_self_recursive, existing.is_self_recursive);
-
-                        partial_proc = existing.clone();
-                    } else {
-                        let pattern_symbols = pattern_symbols.into_bump_slice();
-
-                        partial_proc = PartialProc {
-                            annotation,
-                            pattern_symbols,
-                            captured_symbols,
-                            body: body.value,
-                            is_self_recursive,
-                        };
+                    if self.is_module_thunk(symbol) {
+                        debug_assert!(layout.arguments.is_empty());
                     }
 
                     match &mut self.pending_specializations {
                         Some(pending_specializations) => {
                             // register the pending specialization, so this gets code genned later
-                            if self.module_thunks.contains(&symbol) {
-                                debug_assert!(layout.arguments.is_empty());
-                            }
+                            let pending =
+                                PendingSpecialization::from_var(env.arena, env.subs, annotation);
                             add_pending(pending_specializations, symbol, layout, pending);
 
-                            self.partial_procs.insert(symbol, partial_proc);
+                            match self.partial_procs.symbol_to_id(symbol) {
+                                Some(occupied) => {
+                                    let existing = self.partial_procs.get_id(occupied);
+                                    // if we're adding the same partial proc twice, they must be the actual same!
+                                    //
+                                    // NOTE we can't skip extra work! we still need to make the specialization for this
+                                    // invocation. The content of the `annotation` can be different, even if the variable
+                                    // number is the same
+                                    debug_assert_eq!(annotation, existing.annotation);
+                                    debug_assert_eq!(captured_symbols, existing.captured_symbols);
+                                    debug_assert_eq!(is_self_recursive, existing.is_self_recursive);
+
+                                    // the partial proc is already in there, do nothing
+                                }
+                                None => {
+                                    let pattern_symbols = pattern_symbols.into_bump_slice();
+
+                                    let partial_proc = PartialProc {
+                                        annotation,
+                                        pattern_symbols,
+                                        captured_symbols,
+                                        body: body.value,
+                                        is_self_recursive,
+                                    };
+
+                                    self.partial_procs.insert(symbol, partial_proc);
+                                }
+                            }
                         }
                         None => {
                             // Mark this proc as in-progress, so if we're dealing with
@@ -558,8 +616,43 @@ impl<'a> Procs<'a> {
 
                             let outside_layout = layout;
 
-                            match specialize(env, self, symbol, layout_cache, pending, partial_proc)
+                            let partial_proc_id = if let Some(partial_proc_id) =
+                                self.partial_procs.symbol_to_id(symbol)
                             {
+                                let existing = self.partial_procs.get_id(partial_proc_id);
+                                // if we're adding the same partial proc twice, they must be the actual same!
+                                //
+                                // NOTE we can't skip extra work! we still need to make the specialization for this
+                                // invocation. The content of the `annotation` can be different, even if the variable
+                                // number is the same
+                                debug_assert_eq!(annotation, existing.annotation);
+                                debug_assert_eq!(captured_symbols, existing.captured_symbols);
+                                debug_assert_eq!(is_self_recursive, existing.is_self_recursive);
+
+                                partial_proc_id
+                            } else {
+                                let pattern_symbols = pattern_symbols.into_bump_slice();
+
+                                let partial_proc = PartialProc {
+                                    annotation,
+                                    pattern_symbols,
+                                    captured_symbols,
+                                    body: body.value,
+                                    is_self_recursive,
+                                };
+
+                                self.partial_procs.insert(symbol, partial_proc)
+                            };
+
+                            match specialize_variable(
+                                env,
+                                self,
+                                symbol,
+                                layout_cache,
+                                annotation,
+                                BumpMap::new_in(env.arena),
+                                partial_proc_id,
+                            ) {
                                 Ok((proc, layout)) => {
                                     let top_level = ProcLayout::from_raw(env.arena, layout);
 
@@ -569,7 +662,7 @@ impl<'a> Procs<'a> {
                                         proc.name
                                     );
 
-                                    if self.module_thunks.contains(&proc.name) {
+                                    if self.is_module_thunk(proc.name) {
                                         debug_assert!(top_level.arguments.is_empty());
                                     }
 
@@ -589,50 +682,7 @@ impl<'a> Procs<'a> {
         }
     }
 
-    /// Add a named function that will be publicly exposed to the host
-    pub fn insert_exposed(
-        &mut self,
-        name: Symbol,
-        layout: ProcLayout<'a>,
-        arena: &'a Bump,
-        subs: &Subs,
-        opt_annotation: Option<roc_can::def::Annotation>,
-        fn_var: Variable,
-    ) {
-        let tuple = (name, layout);
-
-        // If we've already specialized this one, no further work is needed.
-        if self.specialized.contains_key(&tuple) {
-            return;
-        }
-
-        // We're done with that tuple, so move layout back out to avoid cloning it.
-        let (name, layout) = tuple;
-        let pending = match opt_annotation {
-            None => PendingSpecialization::from_var(arena, subs, fn_var),
-            Some(annotation) => PendingSpecialization::from_var_host_exposed(
-                arena,
-                subs,
-                fn_var,
-                &annotation.introduced_variables.host_exposed_aliases,
-            ),
-        };
-
-        // This should only be called when pending_specializations is Some.
-        // Otherwise, it's being called in the wrong pass!
-        match &mut self.pending_specializations {
-            Some(pending_specializations) => {
-                // register the pending specialization, so this gets code genned later
-                add_pending(pending_specializations, name, layout, pending)
-            }
-            None => unreachable!(
-                r"insert_exposed was called after the pending specializations phase had already completed!"
-            ),
-        }
-    }
-
-    /// TODO
-    pub fn insert_passed_by_name(
+    fn insert_passed_by_name(
         &mut self,
         env: &mut Env<'a, '_>,
         fn_var: Variable,
@@ -651,24 +701,24 @@ impl<'a> Procs<'a> {
             return;
         }
 
+        // register the pending specialization, so this gets code genned later
+        if self.module_thunks.contains(&name) {
+            debug_assert!(layout.arguments.is_empty());
+        }
+
         // This should only be called when pending_specializations is Some.
         // Otherwise, it's being called in the wrong pass!
         match &mut self.pending_specializations {
             Some(pending_specializations) => {
                 let pending = PendingSpecialization::from_var(env.arena, env.subs, fn_var);
 
-                // register the pending specialization, so this gets code genned later
-                if self.module_thunks.contains(&name) {
-                    debug_assert!(layout.arguments.is_empty());
-                }
                 add_pending(pending_specializations, name, layout, pending)
             }
             None => {
                 let symbol = name;
 
-                // TODO should pending_procs hold a Rc<Proc>?
-                let partial_proc = match self.partial_procs.get(&symbol) {
-                    Some(p) => p.clone(),
+                let partial_proc_id = match self.partial_procs.symbol_to_id(symbol) {
+                    Some(p) => p,
                     None => panic!("no partial_proc for {:?} in module {:?}", symbol, env.home),
                 };
 
@@ -695,7 +745,7 @@ impl<'a> Procs<'a> {
                     layout_cache,
                     fn_var,
                     Default::default(),
-                    partial_proc,
+                    partial_proc_id,
                 ) {
                     Ok((proc, _ignore_layout)) => {
                         // the `layout` is a function pointer, while `_ignore_layout` can be a
@@ -785,8 +835,6 @@ pub struct Env<'a, 'i> {
 impl<'a, 'i> Env<'a, 'i> {
     pub fn unique_symbol(&mut self) -> Symbol {
         let ident_id = self.ident_ids.gen_unique();
-
-        self.home.register_debug_idents(self.ident_ids);
 
         Symbol::new(self.home, ident_id)
     }
@@ -893,7 +941,7 @@ pub enum BranchInfo<'a> {
     Constructor {
         scrutinee: Symbol,
         layout: Layout<'a>,
-        tag_id: u8,
+        tag_id: TagIdIntType,
     },
 }
 
@@ -1043,11 +1091,11 @@ impl<'a> Call<'a> {
                     .text(format!("lowlevel {:?} ", lowlevel))
                     .append(alloc.intersperse(it, " "))
             }
-            HigherOrderLowLevel { op: lowlevel, .. } => {
+            HigherOrder(higher_order) => {
                 let it = arguments.iter().map(|s| symbol_to_doc(alloc, *s));
 
                 alloc
-                    .text(format!("lowlevel {:?} ", lowlevel))
+                    .text(format!("lowlevel {:?} ", higher_order.op))
                     .append(alloc.intersperse(it, " "))
             }
             Foreign {
@@ -1089,30 +1137,46 @@ impl UpdateModeId {
 pub enum CallType<'a> {
     ByName {
         name: Symbol,
-        ret_layout: Layout<'a>,
+        ret_layout: &'a Layout<'a>,
         arg_layouts: &'a [Layout<'a>],
         specialization_id: CallSpecId,
     },
     Foreign {
         foreign_symbol: ForeignSymbol,
-        ret_layout: Layout<'a>,
+        ret_layout: &'a Layout<'a>,
     },
     LowLevel {
         op: LowLevel,
         update_mode: UpdateModeId,
     },
-    HigherOrderLowLevel {
-        op: LowLevel,
-        /// the layout of the closure argument, if any
-        closure_env_layout: Option<Layout<'a>>,
-        /// specialization id of the function argument
-        specialization_id: CallSpecId,
-        /// does the function need to own the closure data
-        function_owns_closure_data: bool,
-        /// function layout
-        arg_layouts: &'a [Layout<'a>],
-        ret_layout: Layout<'a>,
-    },
+    HigherOrder(&'a HigherOrderLowLevel<'a>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct HigherOrderLowLevel<'a> {
+    pub op: crate::low_level::HigherOrder,
+    /// the layout of the closure argument, if any
+    pub closure_env_layout: Option<Layout<'a>>,
+
+    /// name of the top-level function that is passed as an argument
+    /// e.g. in `List.map xs Num.abs` this would be `Num.abs`
+    pub function_name: Symbol,
+
+    /// Symbol of the environment captured by the function argument
+    pub function_env: Symbol,
+
+    /// does the function argument need to own the closure data
+    pub function_owns_closure_data: bool,
+
+    /// specialization id of the function argument, used for name generation
+    pub specialization_id: CallSpecId,
+
+    /// update mode of the higher order lowlevel itself
+    pub update_mode: UpdateModeId,
+
+    /// function layout, used for name generation
+    pub arg_layouts: &'a [Layout<'a>],
+    pub ret_layout: Layout<'a>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1125,7 +1189,7 @@ pub enum Expr<'a> {
     Tag {
         tag_layout: UnionLayout<'a>,
         tag_name: TagName,
-        tag_id: u8,
+        tag_id: TagIdIntType,
         arguments: &'a [Symbol],
     },
     Struct(&'a [Symbol]),
@@ -1143,7 +1207,7 @@ pub enum Expr<'a> {
 
     UnionAtIndex {
         structure: Symbol,
-        tag_id: u8,
+        tag_id: TagIdIntType,
         union_layout: UnionLayout<'a>,
         index: u64,
     },
@@ -1160,7 +1224,7 @@ pub enum Expr<'a> {
         // normal Tag fields
         tag_layout: UnionLayout<'a>,
         tag_name: TagName,
-        tag_id: u8,
+        tag_id: TagIdIntType,
         arguments: &'a [Symbol],
     },
     Reset(Symbol),
@@ -1571,7 +1635,7 @@ fn patterns_to_when<'a>(
         match crate::exhaustive::check(
             pattern.region,
             &[(
-                Located::at(pattern.region, mono_pattern.clone()),
+                Located::at(pattern.region, mono_pattern),
                 crate::exhaustive::Guard::NoGuard,
             )],
             context,
@@ -1694,70 +1758,74 @@ pub fn specialize_all<'a>(
     env: &mut Env<'a, '_>,
     mut procs: Procs<'a>,
     externals_others_need: ExternalSpecializations<'a>,
+    specializations_for_host: BumpMap<Symbol, MutMap<ProcLayout<'a>, PendingSpecialization<'a>>>,
     layout_cache: &mut LayoutCache<'a>,
 ) -> Procs<'a> {
-    specialize_all_help(env, &mut procs, externals_others_need, layout_cache);
+    specialize_externals_others_need(env, &mut procs, externals_others_need, layout_cache);
 
     // When calling from_can, pending_specializations should be unavailable.
     // This must be a single pass, and we must not add any more entries to it!
     let opt_pending_specializations = std::mem::replace(&mut procs.pending_specializations, None);
 
-    for (name, by_layout) in opt_pending_specializations.into_iter().flatten() {
+    let it = specializations_for_host
+        .into_iter()
+        .chain(opt_pending_specializations.into_iter().flatten());
+
+    for (name, by_layout) in it {
         for (outside_layout, pending) in by_layout.into_iter() {
             // If we've already seen this (Symbol, Layout) combination before,
             // don't try to specialize it again. If we do, we'll loop forever!
-            //
-            // NOTE: this #[allow(clippy::map_entry)] here is for correctness!
-            // Changing it to use .entry() would necessarily make it incorrect.
-            #[allow(clippy::map_entry)]
-            if !procs.specialized.contains_key(&(name, outside_layout)) {
-                // TODO should pending_procs hold a Rc<Proc>?
-                let partial_proc = match procs.partial_procs.get(&name) {
-                    Some(v) => v.clone(),
-                    None => {
-                        // TODO this assumes the specialization is done by another module
-                        // make sure this does not become a problem down the road!
-                        continue;
-                    }
-                };
+            let key = (name, outside_layout);
 
-                // Mark this proc as in-progress, so if we're dealing with
-                // mutually recursive functions, we don't loop forever.
-                // (We had a bug around this before this system existed!)
-                procs.specialized.insert((name, outside_layout), InProgress);
-                match specialize(
-                    env,
-                    &mut procs,
-                    name,
-                    layout_cache,
-                    pending.clone(),
-                    partial_proc,
-                ) {
-                    Ok((proc, layout)) => {
-                        // TODO thiscode is duplicated elsewhere
-                        let top_level = ProcLayout::from_raw(env.arena, layout);
+            let partial_proc = match procs.specialized.entry(key) {
+                Entry::Occupied(_) => {
+                    // already specialized, just continue
+                    continue;
+                }
+                Entry::Vacant(vacant) => {
+                    match procs.partial_procs.symbol_to_id(name) {
+                        Some(v) => {
+                            // Mark this proc as in-progress, so if we're dealing with
+                            // mutually recursive functions, we don't loop forever.
+                            // (We had a bug around this before this system existed!)
+                            vacant.insert(InProgress);
 
-                        if procs.module_thunks.contains(&proc.name) {
-                            debug_assert!(
-                                top_level.arguments.is_empty(),
-                                "{:?} from {:?}",
-                                name,
-                                layout
-                            );
+                            v
                         }
-
-                        debug_assert_eq!(outside_layout, top_level, " in {:?}", name);
-                        procs.specialized.insert((name, top_level), Done(proc));
+                        None => {
+                            // TODO this assumes the specialization is done by another module
+                            // make sure this does not become a problem down the road!
+                            continue;
+                        }
                     }
-                    Err(SpecializeFailure {
-                        attempted_layout, ..
-                    }) => {
-                        let proc = generate_runtime_error_function(env, name, attempted_layout);
+                }
+            };
 
-                        let top_level = ProcLayout::from_raw(env.arena, attempted_layout);
+            match specialize(env, &mut procs, name, layout_cache, pending, partial_proc) {
+                Ok((proc, layout)) => {
+                    // TODO thiscode is duplicated elsewhere
+                    let top_level = ProcLayout::from_raw(env.arena, layout);
 
-                        procs.specialized.insert((name, top_level), Done(proc));
+                    if procs.is_module_thunk(proc.name) {
+                        debug_assert!(
+                            top_level.arguments.is_empty(),
+                            "{:?} from {:?}",
+                            name,
+                            layout
+                        );
                     }
+
+                    debug_assert_eq!(outside_layout, top_level, " in {:?}", name);
+                    procs.specialized.insert((name, top_level), Done(proc));
+                }
+                Err(SpecializeFailure {
+                    attempted_layout, ..
+                }) => {
+                    let proc = generate_runtime_error_function(env, name, attempted_layout);
+
+                    let top_level = ProcLayout::from_raw(env.arena, attempted_layout);
+
+                    procs.specialized.insert((name, top_level), Done(proc));
                 }
             }
         }
@@ -1766,72 +1834,57 @@ pub fn specialize_all<'a>(
     procs
 }
 
-fn specialize_all_help<'a>(
+fn specialize_externals_others_need<'a>(
     env: &mut Env<'a, '_>,
     procs: &mut Procs<'a>,
     externals_others_need: ExternalSpecializations<'a>,
     layout_cache: &mut LayoutCache<'a>,
 ) {
-    let mut symbol_solved_type = Vec::new_in(env.arena);
-
     for (symbol, solved_types) in externals_others_need.specs.iter() {
-        // for some unclear reason, the MutSet does not deduplicate according to the hash
-        // instance. So we do it manually here
-        let mut as_vec: std::vec::Vec<_> = solved_types.iter().collect();
+        for solved_type in solved_types {
+            // historical note: we used to deduplicate with a hash here,
+            // but the cost of that hash is very high. So for now we make
+            // duplicate specializations, and the insertion into a hash map
+            // below will deduplicate them.
 
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
+            let name = *symbol;
 
-        let hash_the_thing = |x: &SolvedType| {
-            let mut hasher = DefaultHasher::new();
-            x.hash(&mut hasher);
-            hasher.finish()
-        };
-
-        as_vec.sort_by_key(|x| hash_the_thing(x));
-        as_vec.dedup_by_key(|x| hash_the_thing(x));
-
-        for s in as_vec {
-            symbol_solved_type.push((*symbol, s.clone()));
-        }
-    }
-
-    for (name, solved_type) in symbol_solved_type.into_iter() {
-        let partial_proc = match procs.partial_procs.get(&name) {
-            Some(v) => v.clone(),
-            None => {
-                panic!("Cannot find a partial proc for {:?}", name);
-            }
-        };
-
-        // TODO I believe this sis also duplicated
-        match specialize_solved_type(
-            env,
-            procs,
-            name,
-            layout_cache,
-            solved_type,
-            BumpMap::new_in(env.arena),
-            partial_proc,
-        ) {
-            Ok((proc, layout)) => {
-                let top_level = ProcLayout::from_raw(env.arena, layout);
-
-                if procs.module_thunks.contains(&name) {
-                    debug_assert!(top_level.arguments.is_empty());
+            let partial_proc_id = match procs.partial_procs.symbol_to_id(name) {
+                Some(v) => v,
+                None => {
+                    panic!("Cannot find a partial proc for {:?}", name);
                 }
+            };
 
-                procs.specialized.insert((name, top_level), Done(proc));
-            }
-            Err(SpecializeFailure {
-                problem: _,
-                attempted_layout,
-            }) => {
-                let proc = generate_runtime_error_function(env, name, attempted_layout);
+            // TODO I believe this is also duplicated
+            match specialize_solved_type(
+                env,
+                procs,
+                name,
+                layout_cache,
+                solved_type,
+                BumpMap::new_in(env.arena),
+                partial_proc_id,
+            ) {
+                Ok((proc, layout)) => {
+                    let top_level = ProcLayout::from_raw(env.arena, layout);
 
-                let top_level = ProcLayout::from_raw(env.arena, attempted_layout);
+                    if procs.is_module_thunk(name) {
+                        debug_assert!(top_level.arguments.is_empty());
+                    }
 
-                procs.specialized.insert((name, top_level), Done(proc));
+                    procs.specialized.insert((name, top_level), Done(proc));
+                }
+                Err(SpecializeFailure {
+                    problem: _,
+                    attempted_layout,
+                }) => {
+                    let proc = generate_runtime_error_function(env, name, attempted_layout);
+
+                    let top_level = ProcLayout::from_raw(env.arena, attempted_layout);
+
+                    procs.specialized.insert((name, top_level), Done(proc));
+                }
             }
         }
     }
@@ -1889,32 +1942,28 @@ fn specialize_external<'a>(
     layout_cache: &mut LayoutCache<'a>,
     fn_var: Variable,
     host_exposed_variables: &[(Symbol, Variable)],
-    partial_proc: PartialProc<'a>,
+    partial_proc_id: PartialProcId,
 ) -> Result<Proc<'a>, LayoutProblem> {
-    let PartialProc {
-        annotation,
-        pattern_symbols,
-        captured_symbols,
-        body,
-        is_self_recursive,
-    } = partial_proc;
+    let partial_proc = procs.partial_procs.get_id(partial_proc_id);
+    let captured_symbols = partial_proc.captured_symbols;
 
     // unify the called function with the specialized signature, then specialize the function body
     let snapshot = env.subs.snapshot();
     let cache_snapshot = layout_cache.snapshot();
 
-    let _unified = roc_unify::unify::unify(env.subs, annotation, fn_var);
+    let _unified = roc_unify::unify::unify(env.subs, partial_proc.annotation, fn_var);
 
     // This will not hold for programs with type errors
     // let is_valid = matches!(unified, roc_unify::unify::Unified::Success(_));
     // debug_assert!(is_valid, "unificaton failure for {:?}", proc_name);
 
     // if this is a closure, add the closure record argument
-    let pattern_symbols = match captured_symbols {
-        CapturedSymbols::None => pattern_symbols,
-        CapturedSymbols::Captured([]) => pattern_symbols,
+    let pattern_symbols = match partial_proc.captured_symbols {
+        CapturedSymbols::None => partial_proc.pattern_symbols,
+        CapturedSymbols::Captured([]) => partial_proc.pattern_symbols,
         CapturedSymbols::Captured(_) => {
-            let mut temp = Vec::from_iter_in(pattern_symbols.iter().copied(), env.arena);
+            let mut temp =
+                Vec::from_iter_in(partial_proc.pattern_symbols.iter().copied(), env.arena);
             temp.push(Symbol::ARG_CLOSURE);
             temp.into_bump_slice()
         }
@@ -1971,7 +2020,7 @@ fn specialize_external<'a>(
                         Symbol::ARG_CLOSURE,
                         argument_symbols.into_bump_slice(),
                         argument_layouts,
-                        *return_layout,
+                        return_layout,
                         assigned,
                         hole,
                     );
@@ -2011,12 +2060,13 @@ fn specialize_external<'a>(
         }
     };
 
-    let recursivity = if is_self_recursive {
+    let recursivity = if partial_proc.is_self_recursive {
         SelfRecursive::SelfRecursive(JoinPointId(env.unique_symbol()))
     } else {
         SelfRecursive::NotSelfRecursive
     };
 
+    let body = partial_proc.body.clone();
     let mut specialized_body = from_can(env, fn_var, body, procs, layout_cache);
 
     match specialized {
@@ -2407,13 +2457,13 @@ struct SpecializeFailure<'a> {
 
 type SpecializeSuccess<'a> = (Proc<'a>, RawFunctionLayout<'a>);
 
-fn specialize<'a>(
+fn specialize<'a, 'b>(
     env: &mut Env<'a, '_>,
-    procs: &mut Procs<'a>,
+    procs: &'b mut Procs<'a>,
     proc_name: Symbol,
     layout_cache: &mut LayoutCache<'a>,
     pending: PendingSpecialization,
-    partial_proc: PartialProc<'a>,
+    partial_proc_id: PartialProcId,
 ) -> Result<SpecializeSuccess<'a>, SpecializeFailure<'a>> {
     let PendingSpecialization {
         solved_type,
@@ -2426,9 +2476,9 @@ fn specialize<'a>(
         procs,
         proc_name,
         layout_cache,
-        solved_type,
+        &solved_type,
         host_exposed_aliases,
-        partial_proc,
+        partial_proc_id,
     )
 }
 
@@ -2456,18 +2506,18 @@ fn specialize_solved_type<'a>(
     procs: &mut Procs<'a>,
     proc_name: Symbol,
     layout_cache: &mut LayoutCache<'a>,
-    solved_type: SolvedType,
+    solved_type: &SolvedType,
     host_exposed_aliases: BumpMap<Symbol, SolvedType>,
-    partial_proc: PartialProc<'a>,
+    partial_proc_id: PartialProcId,
 ) -> Result<SpecializeSuccess<'a>, SpecializeFailure<'a>> {
     specialize_variable_help(
         env,
         procs,
         proc_name,
         layout_cache,
-        |env| introduce_solved_type_to_subs(env, &solved_type),
+        |env| introduce_solved_type_to_subs(env, solved_type),
         host_exposed_aliases,
-        partial_proc,
+        partial_proc_id,
     )
 }
 
@@ -2478,7 +2528,7 @@ fn specialize_variable<'a>(
     layout_cache: &mut LayoutCache<'a>,
     fn_var: Variable,
     host_exposed_aliases: BumpMap<Symbol, SolvedType>,
-    partial_proc: PartialProc<'a>,
+    partial_proc_id: PartialProcId,
 ) -> Result<SpecializeSuccess<'a>, SpecializeFailure<'a>> {
     specialize_variable_help(
         env,
@@ -2487,7 +2537,7 @@ fn specialize_variable<'a>(
         layout_cache,
         |_| fn_var,
         host_exposed_aliases,
-        partial_proc,
+        partial_proc_id,
     )
 }
 
@@ -2498,7 +2548,7 @@ fn specialize_variable_help<'a, F>(
     layout_cache: &mut LayoutCache<'a>,
     fn_var_thunk: F,
     host_exposed_aliases: BumpMap<Symbol, SolvedType>,
-    partial_proc: PartialProc<'a>,
+    partial_proc_id: PartialProcId,
 ) -> Result<SpecializeSuccess<'a>, SpecializeFailure<'a>>
 where
     F: FnOnce(&mut Env<'a, '_>) -> Variable,
@@ -2517,7 +2567,7 @@ where
         .raw_from_var(env.arena, fn_var, env.subs)
         .unwrap_or_else(|err| panic!("TODO handle invalid function {:?}", err));
 
-    let raw = if procs.module_thunks.contains(&proc_name) {
+    let raw = if procs.is_module_thunk(proc_name) {
         match raw {
             RawFunctionLayout::Function(_, lambda_set, _) => {
                 RawFunctionLayout::ZeroArgumentThunk(Layout::LambdaSet(lambda_set))
@@ -2529,7 +2579,8 @@ where
     };
 
     // make sure rigid variables in the annotation are converted to flex variables
-    instantiate_rigids(env.subs, partial_proc.annotation);
+    let annotation_var = procs.partial_procs.get_id(partial_proc_id).annotation;
+    instantiate_rigids(env.subs, annotation_var);
 
     let mut host_exposed_variables = Vec::with_capacity_in(host_exposed_aliases.len(), env.arena);
 
@@ -2546,7 +2597,7 @@ where
         layout_cache,
         fn_var,
         &host_exposed_variables,
-        partial_proc,
+        partial_proc_id,
     );
 
     match specialized {
@@ -2620,8 +2671,8 @@ fn specialize_naked_symbol<'a>(
     hole: &'a Stmt<'a>,
     symbol: Symbol,
 ) -> Stmt<'a> {
-    if procs.module_thunks.contains(&symbol) {
-        let partial_proc = procs.partial_procs.get(&symbol).unwrap();
+    if procs.is_module_thunk(symbol) {
+        let partial_proc = procs.get_partial_proc(symbol).unwrap();
         let fn_var = partial_proc.annotation;
 
         // This is a top-level declaration, which will code gen to a 0-arity thunk.
@@ -2677,50 +2728,6 @@ fn specialize_naked_symbol<'a>(
         result,
         original,
     )
-}
-
-macro_rules! match_on_closure_argument {
-    ($env:expr, $procs:expr, $layout_cache:expr, $closure_data_symbol:expr, $closure_data_var:expr, $op:expr, [$($x:expr),* $(,)?], $layout: expr, $assigned:expr, $hole:expr) => {{
-        let closure_data_layout = return_on_layout_error!(
-            $env,
-            $layout_cache.raw_from_var($env.arena, $closure_data_var, $env.subs)
-        );
-
-        let top_level = ProcLayout::from_raw($env.arena, closure_data_layout);
-
-        let arena = $env.arena;
-
-        let arg_layouts = top_level.arguments;
-        let ret_layout = top_level.result;
-
-
-
-        match closure_data_layout {
-            RawFunctionLayout::Function(_, lambda_set, _) =>  {
-                lowlevel_match_on_lambda_set(
-                    $env,
-                    lambda_set,
-                    $op,
-                    $closure_data_symbol,
-                    |top_level_function, closure_data, closure_env_layout, specialization_id| self::Call {
-                        call_type: CallType::HigherOrderLowLevel {
-                            op: $op,
-                            closure_env_layout,
-                            specialization_id,
-                            function_owns_closure_data: false,
-                            arg_layouts,
-                            ret_layout,
-                        },
-                        arguments: arena.alloc([$($x,)* top_level_function, closure_data]),
-                    },
-                    $layout,
-                    $assigned,
-                    $hole,
-                )
-            }
-            RawFunctionLayout::ZeroArgumentThunk(_) => unreachable!(),
-        }
-    }};
 }
 
 fn try_make_literal<'a>(
@@ -2879,41 +2886,9 @@ pub fn with_hole<'a>(
             }
         }
         LetNonRec(def, cont, _) => {
-            if let roc_can::pattern::Pattern::Identifier(symbol) = &def.loc_pattern.value {
-                if let Closure {
-                    function_type,
-                    return_type,
-                    recursive,
-                    arguments,
-                    loc_body: boxed_body,
-                    captured_symbols,
-                    ..
-                } = def.loc_expr.value
-                {
-                    // Extract Procs, but discard the resulting Expr::Load.
-                    // That Load looks up the pointer, which we won't use here!
-
-                    let loc_body = *boxed_body;
-
-                    let is_self_recursive =
-                        !matches!(recursive, roc_can::expr::Recursive::NotRecursive);
-
-                    // this should be a top-level declaration, and hence have no captured symbols
-                    // if we ever do hit this (and it's not a bug), we should make sure to put the
-                    // captured symbols into a CapturedSymbols and give it to insert_named
-                    debug_assert!(captured_symbols.is_empty());
-
-                    procs.insert_named(
-                        env,
-                        layout_cache,
-                        *symbol,
-                        function_type,
-                        arguments,
-                        loc_body,
-                        CapturedSymbols::None,
-                        is_self_recursive,
-                        return_type,
-                    );
+            if let roc_can::pattern::Pattern::Identifier(symbol) = def.loc_pattern.value {
+                if let Closure(closure_data) = def.loc_expr.value {
+                    register_noncapturing_closure(env, procs, layout_cache, symbol, closure_data);
 
                     return with_hole(
                         env,
@@ -2925,9 +2900,6 @@ pub fn with_hole<'a>(
                         hole,
                     );
                 }
-            }
-
-            if let roc_can::pattern::Pattern::Identifier(symbol) = def.loc_pattern.value {
                 // special-case the form `let x = E in x`
                 // not doing so will drop the `hole`
                 match &cont.value {
@@ -3055,33 +3027,13 @@ pub fn with_hole<'a>(
             // because Roc is strict, only functions can be recursive!
             for def in defs.into_iter() {
                 if let roc_can::pattern::Pattern::Identifier(symbol) = &def.loc_pattern.value {
-                    if let Closure {
-                        function_type,
-                        return_type,
-                        recursive,
-                        arguments,
-                        loc_body: boxed_body,
-                        ..
-                    } = def.loc_expr.value
-                    {
-                        // Extract Procs, but discard the resulting Expr::Load.
-                        // That Load looks up the pointer, which we won't use here!
-
-                        let loc_body = *boxed_body;
-
-                        let is_self_recursive =
-                            !matches!(recursive, roc_can::expr::Recursive::NotRecursive);
-
-                        procs.insert_named(
+                    if let Closure(closure_data) = def.loc_expr.value {
+                        register_noncapturing_closure(
                             env,
+                            procs,
                             layout_cache,
                             *symbol,
-                            function_type,
-                            arguments,
-                            loc_body,
-                            CapturedSymbols::None,
-                            is_self_recursive,
-                            return_type,
+                            closure_data,
                         );
 
                         continue;
@@ -3779,7 +3731,7 @@ pub fn with_hole<'a>(
             }
         }
 
-        Closure {
+        Closure(ClosureData {
             function_type,
             return_type,
             name,
@@ -3787,7 +3739,7 @@ pub fn with_hole<'a>(
             captured_symbols,
             loc_body: boxed_body,
             ..
-        } => {
+        }) => {
             let loc_body = *boxed_body;
 
             let raw = layout_cache.raw_from_var(env.arena, function_type, env.subs);
@@ -3844,11 +3796,11 @@ pub fn with_hole<'a>(
             // if it's in there, it's a call by name, otherwise it's a call by pointer
             let is_known = |key| {
                 // a proc in this module, or an imported symbol
-                procs.partial_procs.contains_key(key) || env.is_imported_symbol(*key)
+                procs.partial_procs.contains_key(key) || env.is_imported_symbol(key)
             };
 
             match loc_expr.value {
-                roc_can::expr::Expr::Var(proc_name) if is_known(&proc_name) => {
+                roc_can::expr::Expr::Var(proc_name) if is_known(proc_name) => {
                     // a call by a known name
                     call_by_name(
                         env,
@@ -3912,7 +3864,7 @@ pub fn with_hole<'a>(
                                     closure_data_symbol,
                                     arg_symbols,
                                     arg_layouts,
-                                    *ret_layout,
+                                    ret_layout,
                                     assigned,
                                     hole,
                                 );
@@ -3939,7 +3891,7 @@ pub fn with_hole<'a>(
                                         closure_data_symbol,
                                         arg_symbols,
                                         arg_layouts,
-                                        *ret_layout,
+                                        ret_layout,
                                         assigned,
                                         hole,
                                     );
@@ -3988,7 +3940,7 @@ pub fn with_hole<'a>(
             let call = self::Call {
                 call_type: CallType::Foreign {
                     foreign_symbol,
-                    ret_layout: layout,
+                    ret_layout: env.arena.alloc(layout),
                 },
                 arguments: arg_symbols,
             };
@@ -4015,48 +3967,71 @@ pub fn with_hole<'a>(
             let layout =
                 return_on_layout_error!(env, layout_cache.from_var(env.arena, ret_var, env.subs));
 
-            use LowLevel::*;
-            match op {
-                ListMap | ListMapWithIndex | ListKeepIf | ListKeepOks | ListKeepErrs
-                | ListSortWith => {
-                    debug_assert_eq!(arg_symbols.len(), 2);
-
-                    let closure_index = 1;
+            macro_rules! match_on_closure_argument {
+                ( $ho:ident, [$($x:ident),* $(,)?]) => {{
+                    let closure_index = op.function_argument_position();
                     let closure_data_symbol = arg_symbols[closure_index];
                     let closure_data_var = args[closure_index].0;
 
-                    match_on_closure_argument!(
+                    let closure_data_layout = return_on_layout_error!(
                         env,
-                        procs,
-                        layout_cache,
-                        closure_data_symbol,
-                        closure_data_var,
-                        op,
-                        [arg_symbols[0]],
-                        layout,
-                        assigned,
-                        hole
-                    )
-                }
-                ListWalk | ListWalkUntil | ListWalkBackwards | DictWalk => {
+                        layout_cache.raw_from_var(env.arena, closure_data_var, env.subs)
+                    );
+
+                    let top_level = ProcLayout::from_raw(env.arena, closure_data_layout);
+
+                    let arena = env.arena;
+
+                    let arg_layouts = top_level.arguments;
+                    let ret_layout = top_level.result;
+
+                    match closure_data_layout {
+                        RawFunctionLayout::Function(_, lambda_set, _) =>  {
+                            lowlevel_match_on_lambda_set(
+                                env,
+                                lambda_set,
+                                op,
+                                closure_data_symbol,
+                                |(top_level_function, closure_data, closure_env_layout,  specialization_id, update_mode)| {
+                                    let higher_order = HigherOrderLowLevel {
+                                        op: crate::low_level::HigherOrder::$ho { $($x,)* },
+                                        closure_env_layout,
+                                        specialization_id,
+                                        update_mode,
+                                        function_owns_closure_data: false,
+                                        function_env: closure_data_symbol,
+                                        function_name: top_level_function,
+                                        arg_layouts,
+                                        ret_layout,
+                                    };
+
+                                    self::Call {
+                                        call_type: CallType::HigherOrder(arena.alloc(higher_order)),
+                                        arguments: arena.alloc([$($x,)* top_level_function, closure_data]),
+                                    }
+                                },
+                                layout,
+                                assigned,
+                                hole,
+                            )
+                        }
+                        RawFunctionLayout::ZeroArgumentThunk(_) => unreachable!("match_on_closure_argument received a zero-argument thunk"),
+                    }
+                }};
+            }
+
+            macro_rules! walk {
+                ($oh:ident) => {{
                     debug_assert_eq!(arg_symbols.len(), 3);
 
-                    let closure_index = 1;
-                    let closure_data_symbol = arg_symbols[closure_index];
-                    let closure_data_var = args[closure_index].0;
+                    const LIST_INDEX: usize = 0;
+                    const DEFAULT_INDEX: usize = 1;
+                    const CLOSURE_INDEX: usize = 2;
 
-                    let stmt = match_on_closure_argument!(
-                        env,
-                        procs,
-                        layout_cache,
-                        closure_data_symbol,
-                        closure_data_var,
-                        op,
-                        [arg_symbols[0], arg_symbols[2]],
-                        layout,
-                        assigned,
-                        hole
-                    );
+                    let xs = arg_symbols[LIST_INDEX];
+                    let state = arg_symbols[DEFAULT_INDEX];
+
+                    let stmt = match_on_closure_argument!($oh, [xs, state]);
 
                     // because of a hack to implement List.product and List.sum, we need to also
                     // assign to symbols here. Normally the arguments to a lowlevel function are
@@ -4068,9 +4043,9 @@ pub fn with_hole<'a>(
                         env,
                         procs,
                         layout_cache,
-                        args[0].0,
-                        Located::at_zero(args[0].1.clone()),
-                        arg_symbols[0],
+                        args[LIST_INDEX].0,
+                        Located::at_zero(args[LIST_INDEX].1.clone()),
+                        arg_symbols[LIST_INDEX],
                         stmt,
                     );
 
@@ -4078,9 +4053,9 @@ pub fn with_hole<'a>(
                         env,
                         procs,
                         layout_cache,
-                        args[2].0,
-                        Located::at_zero(args[2].1.clone()),
-                        arg_symbols[2],
+                        args[DEFAULT_INDEX].0,
+                        Located::at_zero(args[DEFAULT_INDEX].1.clone()),
+                        arg_symbols[DEFAULT_INDEX],
                         stmt,
                     );
 
@@ -4088,51 +4063,87 @@ pub fn with_hole<'a>(
                         env,
                         procs,
                         layout_cache,
-                        args[1].0,
-                        Located::at_zero(args[1].1.clone()),
-                        arg_symbols[1],
+                        args[CLOSURE_INDEX].0,
+                        Located::at_zero(args[CLOSURE_INDEX].1.clone()),
+                        arg_symbols[CLOSURE_INDEX],
                         stmt,
                     )
+                }};
+            }
+
+            use LowLevel::*;
+            match op {
+                ListMap => {
+                    debug_assert_eq!(arg_symbols.len(), 2);
+                    let xs = arg_symbols[0];
+                    match_on_closure_argument!(ListMap, [xs])
                 }
+
+                ListMapWithIndex => {
+                    debug_assert_eq!(arg_symbols.len(), 2);
+                    let xs = arg_symbols[0];
+                    match_on_closure_argument!(ListMapWithIndex, [xs])
+                }
+                ListKeepIf => {
+                    debug_assert_eq!(arg_symbols.len(), 2);
+                    let xs = arg_symbols[0];
+                    match_on_closure_argument!(ListKeepIf, [xs])
+                }
+                ListAny => {
+                    debug_assert_eq!(arg_symbols.len(), 2);
+                    let xs = arg_symbols[0];
+                    match_on_closure_argument!(ListAny, [xs])
+                }
+                ListKeepOks => {
+                    debug_assert_eq!(arg_symbols.len(), 2);
+                    let xs = arg_symbols[0];
+                    match_on_closure_argument!(ListKeepOks, [xs])
+                }
+                ListKeepErrs => {
+                    debug_assert_eq!(arg_symbols.len(), 2);
+                    let xs = arg_symbols[0];
+                    match_on_closure_argument!(ListKeepErrs, [xs])
+                }
+                ListSortWith => {
+                    debug_assert_eq!(arg_symbols.len(), 2);
+                    let xs = arg_symbols[0];
+                    match_on_closure_argument!(ListSortWith, [xs])
+                }
+                ListWalk => walk!(ListWalk),
+                ListWalkUntil => walk!(ListWalkUntil),
+                ListWalkBackwards => walk!(ListWalkBackwards),
+                DictWalk => walk!(DictWalk),
                 ListMap2 => {
                     debug_assert_eq!(arg_symbols.len(), 3);
 
-                    let closure_index = 2;
-                    let closure_data_symbol = arg_symbols[closure_index];
-                    let closure_data_var = args[closure_index].0;
+                    let xs = arg_symbols[0];
+                    let ys = arg_symbols[1];
 
-                    match_on_closure_argument!(
-                        env,
-                        procs,
-                        layout_cache,
-                        closure_data_symbol,
-                        closure_data_var,
-                        op,
-                        [arg_symbols[0], arg_symbols[1]],
-                        layout,
-                        assigned,
-                        hole
-                    )
+                    match_on_closure_argument!(ListMap2, [xs, ys])
                 }
                 ListMap3 => {
                     debug_assert_eq!(arg_symbols.len(), 4);
 
-                    let closure_index = 3;
-                    let closure_data_symbol = arg_symbols[closure_index];
-                    let closure_data_var = args[closure_index].0;
+                    let xs = arg_symbols[0];
+                    let ys = arg_symbols[1];
+                    let zs = arg_symbols[2];
 
-                    match_on_closure_argument!(
-                        env,
-                        procs,
-                        layout_cache,
-                        closure_data_symbol,
-                        closure_data_var,
-                        op,
-                        [arg_symbols[0], arg_symbols[1], arg_symbols[2]],
-                        layout,
-                        assigned,
-                        hole
-                    )
+                    match_on_closure_argument!(ListMap3, [xs, ys, zs])
+                }
+                ListMap4 => {
+                    debug_assert_eq!(arg_symbols.len(), 5);
+
+                    let xs = arg_symbols[0];
+                    let ys = arg_symbols[1];
+                    let zs = arg_symbols[2];
+                    let ws = arg_symbols[3];
+
+                    match_on_closure_argument!(ListMap4, [xs, ys, zs, ws])
+                }
+                ListFindUnsafe => {
+                    debug_assert_eq!(arg_symbols.len(), 2);
+                    let xs = arg_symbols[0];
+                    match_on_closure_argument!(ListFindUnsafe, [xs])
                 }
                 _ => {
                     let call = self::Call {
@@ -4388,7 +4399,7 @@ fn convert_tag_union<'a>(
                     let tag = Expr::Tag {
                         tag_layout: union_layout,
                         tag_name,
-                        tag_id: tag_id as u8,
+                        tag_id: tag_id as _,
                         arguments: field_symbols,
                     };
 
@@ -4411,7 +4422,7 @@ fn convert_tag_union<'a>(
                     let tag = Expr::Tag {
                         tag_layout: union_layout,
                         tag_name,
-                        tag_id: tag_id as u8,
+                        tag_id: tag_id as _,
                         arguments: field_symbols,
                     };
 
@@ -4436,7 +4447,7 @@ fn convert_tag_union<'a>(
                     let tag = Expr::Tag {
                         tag_layout: union_layout,
                         tag_name,
-                        tag_id: tag_id as u8,
+                        tag_id: tag_id as _,
                         arguments: field_symbols,
                     };
 
@@ -4463,7 +4474,7 @@ fn convert_tag_union<'a>(
                     let tag = Expr::Tag {
                         tag_layout: union_layout,
                         tag_name,
-                        tag_id: tag_id as u8,
+                        tag_id: tag_id as _,
                         arguments: field_symbols,
                     };
 
@@ -4481,7 +4492,7 @@ fn convert_tag_union<'a>(
                     let tag = Expr::Tag {
                         tag_layout: union_layout,
                         tag_name,
-                        tag_id: tag_id as u8,
+                        tag_id: tag_id as _,
                         arguments: field_symbols,
                     };
 
@@ -4618,6 +4629,131 @@ fn sorted_field_symbols<'a>(
     field_symbols_temp
 }
 
+/// Insert a closure that does capture symbols (because it is top-level) to the list of partial procs
+fn register_noncapturing_closure<'a>(
+    env: &mut Env<'a, '_>,
+    procs: &mut Procs<'a>,
+    layout_cache: &mut LayoutCache<'a>,
+    closure_name: Symbol,
+    closure_data: ClosureData,
+) {
+    let ClosureData {
+        function_type,
+        return_type,
+        recursive,
+        arguments,
+        loc_body: boxed_body,
+        captured_symbols,
+        ..
+    } = closure_data;
+
+    // Extract Procs, but discard the resulting Expr::Load.
+    // That Load looks up the pointer, which we won't use here!
+
+    let loc_body = *boxed_body;
+
+    let is_self_recursive = !matches!(recursive, roc_can::expr::Recursive::NotRecursive);
+
+    // this should be a top-level declaration, and hence have no captured symbols
+    // if we ever do hit this (and it's not a bug), we should make sure to put the
+    // captured symbols into a CapturedSymbols and give it to PartialProc::from_named_function
+    debug_assert!(captured_symbols.is_empty());
+
+    let partial_proc = PartialProc::from_named_function(
+        env,
+        layout_cache,
+        function_type,
+        arguments,
+        loc_body,
+        CapturedSymbols::None,
+        is_self_recursive,
+        return_type,
+    );
+
+    procs.partial_procs.insert(closure_name, partial_proc);
+}
+
+/// Insert a closure that may capture symbols to the list of partial procs
+fn register_capturing_closure<'a>(
+    env: &mut Env<'a, '_>,
+    procs: &mut Procs<'a>,
+    layout_cache: &mut LayoutCache<'a>,
+    closure_name: Symbol,
+    closure_data: ClosureData,
+) {
+    // the function surrounding the closure definition may be specialized multiple times,
+    // hence in theory this partial proc may be added multiple times. That would be wasteful
+    // so we check whether this partial proc is already there.
+    //
+    // (the `gen_primitives::task_always_twice` test has this behavior)
+    if !procs.partial_procs.contains_key(closure_name) {
+        let ClosureData {
+            function_type,
+            return_type,
+            closure_type,
+            closure_ext_var,
+            recursive,
+            arguments,
+            loc_body: boxed_body,
+            captured_symbols,
+            ..
+        } = closure_data;
+        let loc_body = *boxed_body;
+
+        let is_self_recursive = !matches!(recursive, roc_can::expr::Recursive::NotRecursive);
+
+        // does this function capture any local values?
+        let function_layout = layout_cache.raw_from_var(env.arena, function_type, env.subs);
+
+        let captured_symbols = match function_layout {
+            Ok(RawFunctionLayout::Function(_, lambda_set, _)) => {
+                if let Layout::Struct(&[]) = lambda_set.runtime_representation() {
+                    CapturedSymbols::None
+                } else {
+                    let mut temp = Vec::from_iter_in(captured_symbols, env.arena);
+                    temp.sort();
+                    CapturedSymbols::Captured(temp.into_bump_slice())
+                }
+            }
+            Ok(RawFunctionLayout::ZeroArgumentThunk(_)) => {
+                // top-level thunks cannot capture any variables
+                debug_assert!(
+                    captured_symbols.is_empty(),
+                    "{:?} with layout {:?} {:?} {:?}",
+                    &captured_symbols,
+                    function_layout,
+                    env.subs,
+                    (function_type, closure_type, closure_ext_var),
+                );
+                CapturedSymbols::None
+            }
+            Err(_) => {
+                // just allow this. see https://github.com/rtfeldman/roc/issues/1585
+                if captured_symbols.is_empty() {
+                    CapturedSymbols::None
+                } else {
+                    let mut temp = Vec::from_iter_in(captured_symbols, env.arena);
+                    temp.sort();
+                    CapturedSymbols::Captured(temp.into_bump_slice())
+                }
+            }
+        };
+
+        let partial_proc = PartialProc::from_named_function(
+            env,
+            layout_cache,
+            function_type,
+            arguments,
+            loc_body,
+            captured_symbols,
+            is_self_recursive,
+            return_type,
+        );
+
+        procs.partial_procs.insert(closure_name, partial_proc);
+    }
+}
+
 pub fn from_can<'a>(
     env: &mut Env<'a, '_>,
     variable: Variable,
@@ -4737,32 +4873,13 @@ pub fn from_can<'a>(
                     // Now that we know for sure it's a closure, get an owned
                     // version of these variant args so we can use them properly.
                     match def.loc_expr.value {
-                        Closure {
-                            function_type,
-                            return_type,
-                            recursive,
-                            arguments,
-                            loc_body: boxed_body,
-                            ..
-                        } => {
-                            // Extract Procs, but discard the resulting Expr::Load.
-                            // That Load looks up the pointer, which we won't use here!
-
-                            let loc_body = *boxed_body;
-
-                            let is_self_recursive =
-                                !matches!(recursive, roc_can::expr::Recursive::NotRecursive);
-
-                            procs.insert_named(
+                        Closure(closure_data) => {
+                            register_capturing_closure(
                                 env,
+                                procs,
                                 layout_cache,
                                 *symbol,
-                                function_type,
-                                arguments,
-                                loc_body,
-                                CapturedSymbols::None,
-                                is_self_recursive,
-                                return_type,
+                                closure_data,
                             );
 
                             continue;
@@ -4777,89 +4894,12 @@ pub fn from_can<'a>(
         }
         LetNonRec(def, cont, outer_annotation) => {
             if let roc_can::pattern::Pattern::Identifier(symbol) = &def.loc_pattern.value {
-                if let Closure { .. } = &def.loc_expr.value {
-                    // Now that we know for sure it's a closure, get an owned
-                    // version of these variant args so we can use them properly.
-                    match def.loc_expr.value {
-                        Closure {
-                            function_type,
-                            return_type,
-                            closure_type,
-                            closure_ext_var,
-                            recursive,
-                            arguments,
-                            loc_body: boxed_body,
-                            captured_symbols,
-                            ..
-                        } => {
-                            // Extract Procs, but discard the resulting Expr::Load.
-                            // That Load looks up the pointer, which we won't use here!
-
-                            let loc_body = *boxed_body;
-
-                            let is_self_recursive =
-                                !matches!(recursive, roc_can::expr::Recursive::NotRecursive);
-
-                            // does this function capture any local values?
-                            let function_layout =
-                                layout_cache.raw_from_var(env.arena, function_type, env.subs);
-
-                            let captured_symbols = match function_layout {
-                                Ok(RawFunctionLayout::Function(_, lambda_set, _)) => {
-                                    if let Layout::Struct(&[]) = lambda_set.runtime_representation()
-                                    {
-                                        CapturedSymbols::None
-                                    } else {
-                                        let mut temp =
-                                            Vec::from_iter_in(captured_symbols, env.arena);
-                                        temp.sort();
-                                        CapturedSymbols::Captured(temp.into_bump_slice())
-                                    }
-                                }
-                                Ok(RawFunctionLayout::ZeroArgumentThunk(_)) => {
-                                    // top-level thunks cannot capture any variables
-                                    debug_assert!(
-                                        captured_symbols.is_empty(),
-                                        "{:?} with layout {:?} {:?} {:?}",
-                                        &captured_symbols,
-                                        function_layout,
-                                        env.subs,
-                                        (function_type, closure_type, closure_ext_var),
-                                    );
-                                    CapturedSymbols::None
-                                }
-                                Err(_) => {
-                                    // just allow this. see https://github.com/rtfeldman/roc/issues/1585
-                                    if captured_symbols.is_empty() {
-                                        CapturedSymbols::None
-                                    } else {
-                                        let mut temp =
-                                            Vec::from_iter_in(captured_symbols, env.arena);
-                                        temp.sort();
-                                        CapturedSymbols::Captured(temp.into_bump_slice())
-                                    }
-                                }
-                            };
-
-                            procs.insert_named(
-                                env,
-                                layout_cache,
-                                *symbol,
-                                function_type,
-                                arguments,
-                                loc_body,
-                                captured_symbols,
-                                is_self_recursive,
-                                return_type,
-                            );
-
-                            return from_can(env, variable, cont.value, procs, layout_cache);
-                        }
-                        _ => unreachable!(),
-                    }
-                }
-
                 match def.loc_expr.value {
+                    roc_can::expr::Expr::Closure(closure_data) => {
+                        register_capturing_closure(env, procs, layout_cache, *symbol, closure_data);
+
+                        return from_can(env, variable, cont.value, procs, layout_cache);
+                    }
                     roc_can::expr::Expr::Var(original) => {
                         // a variable is aliased, e.g.
                         //
@@ -5445,7 +5485,7 @@ fn substitute_in_call<'a>(
         }),
         CallType::Foreign { .. } => None,
         CallType::LowLevel { .. } => None,
-        CallType::HigherOrderLowLevel { .. } => None,
+        CallType::HigherOrder { .. } => None,
     };
 
     let mut did_change = false;
@@ -5764,7 +5804,7 @@ fn store_tag_pattern<'a>(
     structure: Symbol,
     union_layout: UnionLayout<'a>,
     arguments: &[(Pattern<'a>, Layout<'a>)],
-    tag_id: u8,
+    tag_id: TagIdIntType,
     mut stmt: Stmt<'a>,
 ) -> StorePattern<'a> {
     use Pattern::*;
@@ -5995,7 +6035,7 @@ fn can_reuse_symbol<'a>(
 
         if env.is_imported_symbol(symbol) {
             Imported(symbol)
-        } else if procs.partial_procs.contains_key(&symbol) {
+        } else if procs.partial_procs.contains_key(symbol) {
             LocalFunction(symbol)
         } else {
             Value(symbol)
@@ -6060,7 +6100,7 @@ fn force_thunk<'a>(
     let call = self::Call {
         call_type: CallType::ByName {
             name: thunk_name,
-            ret_layout: layout,
+            ret_layout: env.arena.alloc(layout),
             arg_layouts: &[],
             specialization_id: env.next_call_specialization_id(),
         },
@@ -6084,7 +6124,7 @@ fn reuse_function_symbol<'a>(
     result: Stmt<'a>,
     original: Symbol,
 ) -> Stmt<'a> {
-    match procs.partial_procs.get(&original) {
+    match procs.get_partial_proc(original) {
         None => {
             match arg_var {
                 Some(arg_var) if env.is_imported_symbol(original) => {
@@ -6092,7 +6132,7 @@ fn reuse_function_symbol<'a>(
                         .raw_from_var(env.arena, arg_var, env.subs)
                         .expect("creating layout does not fail");
 
-                    if procs.imported_module_thunks.contains(&original) {
+                    if procs.is_imported_module_thunk(original) {
                         let layout = match raw {
                             RawFunctionLayout::ZeroArgumentThunk(layout) => layout,
                             RawFunctionLayout::Function(_, lambda_set, _) => {
@@ -6153,7 +6193,7 @@ fn reuse_function_symbol<'a>(
             // and closures by unification. Here we record whether this function captures
             // anything.
             let captures = partial_proc.captured_symbols.captures();
-            let captured = partial_proc.captured_symbols.clone();
+            let captured = partial_proc.captured_symbols;
 
             match res_layout {
                 RawFunctionLayout::Function(_, lambda_set, _) => {
@@ -6188,7 +6228,7 @@ fn reuse_function_symbol<'a>(
                             closure_data,
                             env.arena.alloc(result),
                         )
-                    } else if procs.module_thunks.contains(&original) {
+                    } else if procs.is_module_thunk(original) {
                         // this is a 0-argument thunk
 
                         // TODO suspicious
@@ -6384,7 +6424,7 @@ fn call_by_name<'a>(
             evaluate_arguments_then_runtime_error(env, procs, layout_cache, msg, loc_args)
         }
         Ok(RawFunctionLayout::Function(arg_layouts, lambda_set, ret_layout)) => {
-            if procs.module_thunks.contains(&proc_name) {
+            if procs.is_module_thunk(proc_name) {
                 if loc_args.is_empty() {
                     call_by_name_module_thunk(
                         env,
@@ -6425,7 +6465,7 @@ fn call_by_name<'a>(
                         closure_data_symbol,
                         arg_symbols,
                         arg_layouts,
-                        *ret_layout,
+                        ret_layout,
                         assigned,
                         hole,
                     );
@@ -6461,7 +6501,7 @@ fn call_by_name<'a>(
             }
         }
         Ok(RawFunctionLayout::ZeroArgumentThunk(ret_layout)) => {
-            if procs.module_thunks.contains(&proc_name) {
+            if procs.is_module_thunk(proc_name) {
                 // here we turn a call to a module thunk into  forcing of that thunk
                 call_by_name_module_thunk(
                     env,
@@ -6534,7 +6574,8 @@ fn call_by_name_help<'a>(
     // If we've already specialized this one, no further work is needed.
     if procs
         .specialized
-        .contains_key(&(proc_name, top_level_layout))
+        .keys()
+        .any(|x| x == &(proc_name, top_level_layout))
     {
         debug_assert_eq!(
             argument_layouts.len(),
@@ -6548,7 +6589,7 @@ fn call_by_name_help<'a>(
         let call = self::Call {
             call_type: CallType::ByName {
                 name: proc_name,
-                ret_layout: *ret_layout,
+                ret_layout,
                 arg_layouts: argument_layouts,
                 specialization_id: env.next_call_specialization_id(),
             },
@@ -6563,7 +6604,7 @@ fn call_by_name_help<'a>(
         add_needed_external(procs, env, original_fn_var, proc_name);
 
         debug_assert_ne!(proc_name.module_id(), ModuleId::ATTR);
-        if procs.imported_module_thunks.contains(&proc_name) {
+        if procs.is_imported_module_thunk(proc_name) {
             force_thunk(
                 env,
                 proc_name,
@@ -6589,7 +6630,7 @@ fn call_by_name_help<'a>(
             let call = self::Call {
                 call_type: CallType::ByName {
                     name: proc_name,
-                    ret_layout: *ret_layout,
+                    ret_layout,
                     arg_layouts: argument_layouts,
                     specialization_id: env.next_call_specialization_id(),
                 },
@@ -6602,8 +6643,6 @@ fn call_by_name_help<'a>(
             assign_to_symbols(env, procs, layout_cache, iter, result)
         }
     } else {
-        let pending = PendingSpecialization::from_var(env.arena, env.subs, fn_var);
-
         // When requested (that is, when procs.pending_specializations is `Some`),
         // store a pending specialization rather than specializing immediately.
         //
@@ -6615,15 +6654,16 @@ fn call_by_name_help<'a>(
         // the same specialization independently), we work through the
         // queue of pending specializations to complete each specialization
         // exactly once.
+        if procs.is_module_thunk(proc_name) {
+            debug_assert!(top_level_layout.arguments.is_empty());
+        }
+
         match &mut procs.pending_specializations {
             Some(pending_specializations) => {
                 debug_assert!(!env.is_imported_symbol(proc_name));
 
-                if procs.module_thunks.contains(&proc_name) {
-                    debug_assert!(top_level_layout.arguments.is_empty());
-                }
-
                 // register the pending specialization, so this gets code genned later
+                let pending = PendingSpecialization::from_var(env.arena, env.subs, fn_var);
                 add_pending(
                     pending_specializations,
                     proc_name,
@@ -6643,7 +6683,7 @@ fn call_by_name_help<'a>(
                 let call = self::Call {
                     call_type: CallType::ByName {
                         name: proc_name,
-                        ret_layout: *ret_layout,
+                        ret_layout,
                         arg_layouts: argument_layouts,
                         specialization_id: env.next_call_specialization_id(),
                     },
@@ -6656,26 +6696,12 @@ fn call_by_name_help<'a>(
                 assign_to_symbols(env, procs, layout_cache, iter, result)
             }
             None => {
-                let opt_partial_proc = procs.partial_procs.get(&proc_name);
-
-                /*
-                debug_assert_eq!(
-                    argument_layouts.len(),
-                    field_symbols.len(),
-                    "Function {:?} is called with {} arguments, but the layout expects {}",
-                    proc_name,
-                    field_symbols.len(),
-                    argument_layouts.len(),
-                );
-                */
+                let opt_partial_proc = procs.partial_procs.symbol_to_id(proc_name);
 
                 let field_symbols = field_symbols.into_bump_slice();
 
                 match opt_partial_proc {
                     Some(partial_proc) => {
-                        // TODO should pending_procs hold a Rc<Proc> to avoid this .clone()?
-                        let partial_proc = partial_proc.clone();
-
                         // Mark this proc as in-progress, so if we're dealing with
                         // mutually recursive functions, we don't loop forever.
                         // (We had a bug around this before this system existed!)
@@ -6683,8 +6709,15 @@ fn call_by_name_help<'a>(
                             .specialized
                             .insert((proc_name, top_level_layout), InProgress);
 
-                        match specialize(env, procs, proc_name, layout_cache, pending, partial_proc)
-                        {
+                        match specialize_variable(
+                            env,
+                            procs,
+                            proc_name,
+                            layout_cache,
+                            fn_var,
+                            BumpMap::new_in(env.arena),
+                            partial_proc,
+                        ) {
                             Ok((proc, layout)) => {
                                 // now we just call our freshly-specialized function
                                 call_specialized_proc(
@@ -6750,21 +6783,18 @@ fn call_by_name_module_thunk<'a>(
 ) -> Stmt<'a> {
     debug_assert!(!env.is_imported_symbol(proc_name));
 
-    // debug_assert!(!procs.module_thunks.contains(&proc_name), "{:?}", proc_name);
-
     let top_level_layout = ProcLayout::new(env.arena, &[], *ret_layout);
 
     let inner_layout = *ret_layout;
 
     // If we've already specialized this one, no further work is needed.
-    if procs
+    let already_specialized = procs
         .specialized
-        .contains_key(&(proc_name, top_level_layout))
-    {
+        .contains_key(&(proc_name, top_level_layout));
+
+    if already_specialized {
         force_thunk(env, proc_name, inner_layout, assigned, hole)
     } else {
-        let pending = PendingSpecialization::from_var(env.arena, env.subs, fn_var);
-
         // When requested (that is, when procs.pending_specializations is `Some`),
         // store a pending specialization rather than specializing immediately.
         //
@@ -6776,15 +6806,16 @@ fn call_by_name_module_thunk<'a>(
         // the same specialization independently), we work through the
         // queue of pending specializations to complete each specialization
         // exactly once.
+        if procs.is_module_thunk(proc_name) {
+            debug_assert!(top_level_layout.arguments.is_empty());
+        }
+
         match &mut procs.pending_specializations {
             Some(pending_specializations) => {
                 debug_assert!(!env.is_imported_symbol(proc_name));
 
-                if procs.module_thunks.contains(&proc_name) {
-                    debug_assert!(top_level_layout.arguments.is_empty());
-                }
-
                 // register the pending specialization, so this gets code genned later
+                let pending = PendingSpecialization::from_var(env.arena, env.subs, fn_var);
                 add_pending(
                     pending_specializations,
                     proc_name,
@@ -6795,13 +6826,10 @@ fn call_by_name_module_thunk<'a>(
                 force_thunk(env, proc_name, inner_layout, assigned, hole)
             }
             None => {
-                let opt_partial_proc = procs.partial_procs.get(&proc_name);
+                let opt_partial_proc = procs.partial_procs.symbol_to_id(proc_name);
 
                 match opt_partial_proc {
                     Some(partial_proc) => {
-                        // TODO should pending_procs hold a Rc<Proc> to avoid this .clone()?
-                        let partial_proc = partial_proc.clone();
-
                         // Mark this proc as in-progress, so if we're dealing with
                         // mutually recursive functions, we don't loop forever.
                         // (We had a bug around this before this system existed!)
@@ -6809,8 +6837,15 @@ fn call_by_name_module_thunk<'a>(
                             .specialized
                             .insert((proc_name, top_level_layout), InProgress);
 
-                        match specialize(env, procs, proc_name, layout_cache, pending, partial_proc)
-                        {
+                        match specialize_variable(
+                            env,
+                            procs,
+                            proc_name,
+                            layout_cache,
+                            fn_var,
+                            BumpMap::new_in(env.arena),
+                            partial_proc,
+                        ) {
                             Ok((proc, raw_layout)) => {
                                 debug_assert!(
                                     raw_layout.is_zero_argument_thunk(),
@@ -6898,7 +6933,7 @@ fn call_specialized_proc<'a>(
                 let call = self::Call {
                     call_type: CallType::ByName {
                         name: proc_name,
-                        ret_layout: function_layout.result,
+                        ret_layout: env.arena.alloc(function_layout.result),
                         arg_layouts: function_layout.arguments,
                         specialization_id: env.next_call_specialization_id(),
                     },
@@ -6918,7 +6953,7 @@ fn call_specialized_proc<'a>(
 
         match procs
             .partial_procs
-            .get(&proc_name)
+            .get_symbol(proc_name)
             .map(|pp| &pp.captured_symbols)
         {
             Some(&CapturedSymbols::Captured(captured_symbols)) => {
@@ -6941,7 +6976,7 @@ fn call_specialized_proc<'a>(
                     closure_data_symbol,
                     field_symbols,
                     argument_layouts.into_bump_slice(),
-                    function_layout.result,
+                    env.arena.alloc(function_layout.result),
                     assigned,
                     hole,
                 );
@@ -6971,7 +7006,7 @@ fn call_specialized_proc<'a>(
                 let call = self::Call {
                     call_type: CallType::ByName {
                         name: proc_name,
-                        ret_layout: function_layout.result,
+                        ret_layout: env.arena.alloc(function_layout.result),
                         arg_layouts: function_layout.arguments,
                         specialization_id: env.next_call_specialization_id(),
                     },
@@ -7014,7 +7049,7 @@ pub enum Pattern<'a> {
     },
     AppliedTag {
         tag_name: TagName,
-        tag_id: u8,
+        tag_id: TagIdIntType,
         arguments: Vec<'a, (Pattern<'a>, Layout<'a>)>,
         layout: UnionLayout<'a>,
         union: crate::exhaustive::Union,
@@ -7201,7 +7236,7 @@ fn from_can_pattern_help<'a>(
                     let mut ctors = std::vec::Vec::with_capacity(tag_names.len());
                     for (i, tag_name) in tag_names.into_iter().enumerate() {
                         ctors.push(Ctor {
-                            tag_id: TagId(i as u8),
+                            tag_id: TagId(i as _),
                             name: tag_name,
                             arity: 0,
                         })
@@ -7292,7 +7327,7 @@ fn from_can_pattern_help<'a>(
 
                             for (i, (tag_name, args)) in tags.iter().enumerate() {
                                 ctors.push(Ctor {
-                                    tag_id: TagId(i as u8),
+                                    tag_id: TagId(i as _),
                                     name: tag_name.clone(),
                                     arity: args.len(),
                                 })
@@ -7329,7 +7364,7 @@ fn from_can_pattern_help<'a>(
 
                             Pattern::AppliedTag {
                                 tag_name: tag_name.clone(),
-                                tag_id: tag_id as u8,
+                                tag_id: tag_id as _,
                                 arguments: mono_args,
                                 union,
                                 layout,
@@ -7343,7 +7378,7 @@ fn from_can_pattern_help<'a>(
 
                             for (i, (tag_name, args)) in tags.iter().enumerate() {
                                 ctors.push(Ctor {
-                                    tag_id: TagId(i as u8),
+                                    tag_id: TagId(i as _),
                                     name: tag_name.clone(),
                                     // don't include tag discriminant in arity
                                     arity: args.len() - 1,
@@ -7374,7 +7409,7 @@ fn from_can_pattern_help<'a>(
 
                             Pattern::AppliedTag {
                                 tag_name: tag_name.clone(),
-                                tag_id: tag_id as u8,
+                                tag_id: tag_id as _,
                                 arguments: mono_args,
                                 union,
                                 layout,
@@ -7388,7 +7423,7 @@ fn from_can_pattern_help<'a>(
                             debug_assert_eq!(&w_tag_name, tag_name);
 
                             ctors.push(Ctor {
-                                tag_id: TagId(0_u8),
+                                tag_id: TagId(0),
                                 name: tag_name.clone(),
                                 arity: fields.len(),
                             });
@@ -7417,7 +7452,7 @@ fn from_can_pattern_help<'a>(
 
                             Pattern::AppliedTag {
                                 tag_name: tag_name.clone(),
-                                tag_id: tag_id as u8,
+                                tag_id: tag_id as _,
                                 arguments: mono_args,
                                 union,
                                 layout,
@@ -7435,7 +7470,7 @@ fn from_can_pattern_help<'a>(
                             for (tag_name, args) in tags.iter() {
                                 if i == nullable_id as usize {
                                     ctors.push(Ctor {
-                                        tag_id: TagId(i as u8),
+                                        tag_id: TagId(i as _),
                                         name: nullable_name.clone(),
                                         // don't include tag discriminant in arity
                                         arity: 0,
@@ -7445,7 +7480,7 @@ fn from_can_pattern_help<'a>(
                                 }
 
                                 ctors.push(Ctor {
-                                    tag_id: TagId(i as u8),
+                                    tag_id: TagId(i as _),
                                     name: tag_name.clone(),
                                     // don't include tag discriminant in arity
                                     arity: args.len() - 1,
@@ -7456,7 +7491,7 @@ fn from_can_pattern_help<'a>(
 
                             if i == nullable_id as usize {
                                 ctors.push(Ctor {
-                                    tag_id: TagId(i as u8),
+                                    tag_id: TagId(i as _),
                                     name: nullable_name.clone(),
                                     // don't include tag discriminant in arity
                                     arity: 0,
@@ -7490,7 +7525,7 @@ fn from_can_pattern_help<'a>(
 
                             Pattern::AppliedTag {
                                 tag_name: tag_name.clone(),
-                                tag_id: tag_id as u8,
+                                tag_id: tag_id as _,
                                 arguments: mono_args,
                                 union,
                                 layout,
@@ -7506,13 +7541,13 @@ fn from_can_pattern_help<'a>(
                             debug_assert!(!other_fields.is_empty());
 
                             ctors.push(Ctor {
-                                tag_id: TagId(nullable_id as u8),
+                                tag_id: TagId(nullable_id as _),
                                 name: nullable_name.clone(),
                                 arity: 0,
                             });
 
                             ctors.push(Ctor {
-                                tag_id: TagId(!nullable_id as u8),
+                                tag_id: TagId(!nullable_id as _),
                                 name: nullable_name.clone(),
                                 // FIXME drop tag
                                 arity: other_fields.len() - 1,
@@ -7546,7 +7581,7 @@ fn from_can_pattern_help<'a>(
 
                             Pattern::AppliedTag {
                                 tag_name: tag_name.clone(),
-                                tag_id: tag_id as u8,
+                                tag_id: tag_id as _,
                                 arguments: mono_args,
                                 union,
                                 layout,
@@ -7870,6 +7905,8 @@ pub fn num_argument_to_int_or_float(
     }
 }
 
+type ToLowLevelCallArguments<'a> = (Symbol, Symbol, Option<Layout<'a>>, CallSpecId, UpdateModeId);
+
 /// Use the lambda set to figure out how to make a lowlevel call
 #[allow(clippy::too_many_arguments)]
 fn lowlevel_match_on_lambda_set<'a, ToLowLevelCall>(
@@ -7883,7 +7920,7 @@ fn lowlevel_match_on_lambda_set<'a, ToLowLevelCall>(
     hole: &'a Stmt<'a>,
 ) -> Stmt<'a>
 where
-    ToLowLevelCall: Fn(Symbol, Symbol, Option<Layout<'a>>, CallSpecId) -> Call<'a> + Copy,
+    ToLowLevelCall: Fn(ToLowLevelCallArguments<'a>) -> Call<'a> + Copy,
 {
     match lambda_set.runtime_representation() {
         Layout::Union(union_layout) => {
@@ -7918,12 +7955,14 @@ where
         Layout::Struct(_) => match lambda_set.set.get(0) {
             Some((function_symbol, _)) => {
                 let call_spec_id = env.next_call_specialization_id();
-                let call = to_lowlevel_call(
+                let update_mode = env.next_update_mode_id();
+                let call = to_lowlevel_call((
                     *function_symbol,
                     closure_data_symbol,
                     lambda_set.is_represented(),
                     call_spec_id,
-                );
+                    update_mode,
+                ));
 
                 build_call(env, call, assigned, return_layout, env.arena.alloc(hole))
             }
@@ -7988,7 +8027,7 @@ fn lowlevel_union_lambda_set_to_switch<'a, ToLowLevelCall>(
     hole: &'a Stmt<'a>,
 ) -> Stmt<'a>
 where
-    ToLowLevelCall: Fn(Symbol, Symbol, Option<Layout<'a>>, CallSpecId) -> Call<'a> + Copy,
+    ToLowLevelCall: Fn(ToLowLevelCallArguments<'a>) -> Call<'a> + Copy,
 {
     debug_assert!(!lambda_set.is_empty());
 
@@ -8002,12 +8041,14 @@ where
         let hole = Stmt::Jump(join_point_id, env.arena.alloc([assigned]));
 
         let call_spec_id = env.next_call_specialization_id();
-        let call = to_lowlevel_call(
+        let update_mode = env.next_update_mode_id();
+        let call = to_lowlevel_call((
             *function_symbol,
             closure_data_symbol,
             closure_env_layout,
             call_spec_id,
-        );
+            update_mode,
+        ));
         let stmt = build_call(env, call, assigned, return_layout, env.arena.alloc(hole));
 
         branches.push((i as u64, BranchInfo::None, stmt));
@@ -8049,7 +8090,7 @@ fn match_on_lambda_set<'a>(
     closure_data_symbol: Symbol,
     argument_symbols: &'a [Symbol],
     argument_layouts: &'a [Layout<'a>],
-    return_layout: Layout<'a>,
+    return_layout: &'a Layout<'a>,
     assigned: Symbol,
     hole: &'a Stmt<'a>,
 ) -> Stmt<'a> {
@@ -8146,7 +8187,7 @@ fn union_lambda_set_to_switch<'a>(
     closure_data_symbol: Symbol,
     argument_symbols: &'a [Symbol],
     argument_layouts: &'a [Layout<'a>],
-    return_layout: Layout<'a>,
+    return_layout: &'a Layout<'a>,
     assigned: Symbol,
     hole: &'a Stmt<'a>,
 ) -> Stmt<'a> {
@@ -8190,12 +8231,12 @@ fn union_lambda_set_to_switch<'a>(
         cond_layout: closure_tag_id_layout,
         branches: branches.into_bump_slice(),
         default_branch,
-        ret_layout: return_layout,
+        ret_layout: *return_layout,
     };
 
     let param = Param {
         symbol: assigned,
-        layout: return_layout,
+        layout: *return_layout,
         borrow: false,
     };
 
@@ -8217,7 +8258,7 @@ fn union_lambda_set_branch<'a>(
     closure_data_layout: Layout<'a>,
     argument_symbols_slice: &'a [Symbol],
     argument_layouts_slice: &'a [Layout<'a>],
-    return_layout: Layout<'a>,
+    return_layout: &'a Layout<'a>,
 ) -> Stmt<'a> {
     let result_symbol = env.unique_symbol();
 
@@ -8246,7 +8287,7 @@ fn union_lambda_set_branch_help<'a>(
     closure_data_layout: Layout<'a>,
     argument_symbols_slice: &'a [Symbol],
     argument_layouts_slice: &'a [Layout<'a>],
-    return_layout: Layout<'a>,
+    return_layout: &'a Layout<'a>,
     assigned: Symbol,
     hole: &'a Stmt<'a>,
 ) -> Stmt<'a> {
@@ -8292,7 +8333,7 @@ fn union_lambda_set_branch_help<'a>(
         arguments: argument_symbols,
     };
 
-    build_call(env, call, assigned, return_layout, hole)
+    build_call(env, call, assigned, *return_layout, hole)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8304,7 +8345,7 @@ fn enum_lambda_set_to_switch<'a>(
     closure_data_symbol: Symbol,
     argument_symbols: &'a [Symbol],
     argument_layouts: &'a [Layout<'a>],
-    return_layout: Layout<'a>,
+    return_layout: &'a Layout<'a>,
     assigned: Symbol,
     hole: &'a Stmt<'a>,
 ) -> Stmt<'a> {
@@ -8341,12 +8382,12 @@ fn enum_lambda_set_to_switch<'a>(
         cond_layout: closure_tag_id_layout,
         branches: branches.into_bump_slice(),
         default_branch,
-        ret_layout: return_layout,
+        ret_layout: *return_layout,
     };
 
     let param = Param {
         symbol: assigned,
-        layout: return_layout,
+        layout: *return_layout,
         borrow: false,
     };
 
@@ -8367,7 +8408,7 @@ fn enum_lambda_set_branch<'a>(
     closure_data_layout: Layout<'a>,
     argument_symbols_slice: &'a [Symbol],
     argument_layouts_slice: &'a [Layout<'a>],
-    return_layout: Layout<'a>,
+    return_layout: &'a Layout<'a>,
 ) -> Stmt<'a> {
     let result_symbol = env.unique_symbol();
 
@@ -8408,7 +8449,7 @@ fn enum_lambda_set_branch<'a>(
         },
         arguments: argument_symbols,
     };
-    build_call(env, call, assigned, return_layout, env.arena.alloc(hole))
+    build_call(env, call, assigned, *return_layout, env.arena.alloc(hole))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8425,7 +8466,7 @@ fn lowlevel_enum_lambda_set_to_switch<'a, ToLowLevelCall>(
     hole: &'a Stmt<'a>,
 ) -> Stmt<'a>
 where
-    ToLowLevelCall: Fn(Symbol, Symbol, Option<Layout<'a>>, CallSpecId) -> Call<'a> + Copy,
+    ToLowLevelCall: Fn(ToLowLevelCallArguments<'a>) -> Call<'a> + Copy,
 {
     debug_assert!(!lambda_set.is_empty());
 
@@ -8439,12 +8480,14 @@ where
         let hole = Stmt::Jump(join_point_id, env.arena.alloc([result_symbol]));
 
         let call_spec_id = env.next_call_specialization_id();
-        let call = to_lowlevel_call(
+        let update_mode = env.next_update_mode_id();
+        let call = to_lowlevel_call((
             *function_symbol,
             closure_data_symbol,
             closure_env_layout,
             call_spec_id,
-        );
+            update_mode,
+        ));
         let stmt = build_call(
             env,
             call,

@@ -27,7 +27,7 @@ use ven_graph::{strongly_connected_components, topological_sort_into_groups};
 use crate::{
     lang::{
         core::{
-            expr::{expr2::Expr2, expr_to_expr2::to_expr2, output::Output},
+            expr::{expr2::Expr2, expr_to_expr2::expr_to_expr2, output::Output},
             fun_def::FunctionDef,
             pattern::{self, symbols_from_pattern, to_pattern_id, Pattern2, PatternId},
             types::{to_annotation2, Alias, Annotation2, Signature, Type2, TypeId},
@@ -37,7 +37,11 @@ use crate::{
         rigids::Rigids,
         scope::Scope,
     },
-    mem_pool::{pool::Pool, pool_vec::PoolVec, shallow_clone::ShallowClone},
+    mem_pool::{
+        pool::{NodeId, Pool},
+        pool_vec::PoolVec,
+        shallow_clone::ShallowClone,
+    },
 };
 
 #[derive(Debug)]
@@ -316,7 +320,7 @@ fn from_pending_alias<'a>(
             }
 
             for loc_lowercase in vars {
-                if !named_rigids.contains_key(loc_lowercase.value.as_str()) {
+                if !named_rigids.contains_key(&loc_lowercase.value) {
                     env.problem(Problem::PhantomTypeArgument {
                         alias: symbol,
                         variable_region: loc_lowercase.region,
@@ -454,6 +458,10 @@ fn canonicalize_pending_def<'a>(
                         output.references.referenced_aliases.insert(symbol);
                     }
 
+                    // Ensure rigid type vars and their names are known in the output.
+                    for (name, &var) in named_rigids.iter() {
+                        output.introduced_variables.insert_named(name.clone(), var);
+                    }
                     let rigids = Rigids::new(named_rigids, unnamed_rigids, env.pool);
 
                     // bookkeeping for tail-call detection. If we're assigning to an
@@ -464,7 +472,7 @@ fn canonicalize_pending_def<'a>(
                         env.tailcallable_symbol = Some(*defined_symbol);
                     };
 
-                    // regiser the name of this closure, to make sure the closure won't capture it's own name
+                    // register the name of this closure, to make sure the closure won't capture it's own name
                     if let (Pattern2::Identifier(ref defined_symbol), &ast::Expr::Closure(_, _)) =
                         (&env.pool[loc_can_pattern], &loc_expr.value)
                     {
@@ -472,7 +480,7 @@ fn canonicalize_pending_def<'a>(
                     };
 
                     let (loc_can_expr, can_output) =
-                        to_expr2(env, scope, &loc_expr.value, loc_expr.region);
+                        expr_to_expr2(env, scope, &loc_expr.value, loc_expr.region);
 
                     output.references.union_mut(can_output.references.clone());
 
@@ -488,9 +496,9 @@ fn canonicalize_pending_def<'a>(
                     match loc_can_expr {
                         Expr2::Closure {
                             args: closure_args,
-                            body,
+                            body_id,
                             extra,
-                            name: closure_symbol,
+                            uniq_symbol: closure_symbol,
                             ..
                         } => {
                             let symbol = match env.pool[loc_can_pattern] {
@@ -521,7 +529,7 @@ fn canonicalize_pending_def<'a>(
                             // parent commit for the bug this fixed!
                             let refs = References::new();
 
-                            let arguments: PoolVec<(PatternId, Type2)> =
+                            let arguments: PoolVec<(NodeId<Type2>, PatternId)> =
                                 PoolVec::with_capacity(closure_args.len() as u32, env.pool);
 
                             let return_type: TypeId;
@@ -558,7 +566,8 @@ fn canonicalize_pending_def<'a>(
                                     for (node_id, ((_, pattern_id), typ)) in
                                         arguments.iter_node_ids().zip(it.into_iter())
                                     {
-                                        env.pool[node_id] = (pattern_id, typ);
+                                        let typ = env.pool.add(typ);
+                                        env.pool[node_id] = (typ, pattern_id);
                                     }
 
                                     return_type = return_type_id;
@@ -570,7 +579,7 @@ fn canonicalize_pending_def<'a>(
                                 arguments,
                                 rigids: env.pool.add(rigids),
                                 return_type,
-                                body,
+                                body_id,
                             };
 
                             let def = Def::Function(function_def);
@@ -632,14 +641,15 @@ fn canonicalize_pending_def<'a>(
                 env.tailcallable_symbol = Some(*defined_symbol);
             };
 
-            // regiser the name of this closure, to make sure the closure won't capture it's own name
+            // register the name of this closure, to make sure the closure won't capture it's own name
             if let (Pattern2::Identifier(ref defined_symbol), &ast::Expr::Closure(_, _)) =
                 (&env.pool[loc_can_pattern], &loc_expr.value)
             {
                 env.closure_name_symbol = Some(*defined_symbol);
             };
 
-            let (loc_can_expr, can_output) = to_expr2(env, scope, &loc_expr.value, loc_expr.region);
+            let (loc_can_expr, can_output) =
+                expr_to_expr2(env, scope, &loc_expr.value, loc_expr.region);
 
             output.references.union_mut(can_output.references.clone());
 
@@ -655,9 +665,9 @@ fn canonicalize_pending_def<'a>(
             match loc_can_expr {
                 Expr2::Closure {
                     args: closure_args,
-                    body,
+                    body_id,
                     extra,
-                    name: closure_symbol,
+                    uniq_symbol: closure_symbol,
                     ..
                 } => {
                     let symbol = match env.pool[loc_can_pattern] {
@@ -688,21 +698,21 @@ fn canonicalize_pending_def<'a>(
                     // parent commit for the bug this fixed!
                     let refs = References::new();
 
-                    let arguments: PoolVec<(PatternId, Variable)> =
+                    let arguments: PoolVec<(Variable, PatternId)> =
                         PoolVec::with_capacity(closure_args.len() as u32, env.pool);
 
                     let it: Vec<_> = closure_args.iter(env.pool).map(|(x, y)| (*x, *y)).collect();
 
                     for (node_id, (_, pattern_id)) in arguments.iter_node_ids().zip(it.into_iter())
                     {
-                        env.pool[node_id] = (pattern_id, env.var_store.fresh());
+                        env.pool[node_id] = (env.var_store.fresh(), pattern_id);
                     }
 
                     let function_def = FunctionDef::NoAnnotation {
                         name: symbol,
                         arguments,
                         return_var: env.var_store.fresh(),
-                        body,
+                        body_id,
                     };
 
                     let def = Def::Function(function_def);

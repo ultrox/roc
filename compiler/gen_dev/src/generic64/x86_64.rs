@@ -82,7 +82,7 @@ impl CallConv<X86_64GeneralReg, X86_64FloatReg> for X86_64SystemV {
         X86_64GeneralReg::RAX,
         X86_64GeneralReg::RCX,
         X86_64GeneralReg::RDX,
-        // Don't use stack pionter: X86_64GeneralReg::RSP,
+        // Don't use stack pointer: X86_64GeneralReg::RSP,
         X86_64GeneralReg::RSI,
         X86_64GeneralReg::RDI,
         X86_64GeneralReg::R8,
@@ -258,7 +258,7 @@ impl CallConv<X86_64GeneralReg, X86_64FloatReg> for X86_64SystemV {
                 Layout::Struct(&[]) => {}
                 x => {
                     return Err(format!(
-                        "Loading args with layout {:?} not yet implementd",
+                        "Loading args with layout {:?} not yet implemented",
                         x
                     ));
                 }
@@ -464,7 +464,7 @@ impl CallConv<X86_64GeneralReg, X86_64FloatReg> for X86_64WindowsFastcall {
         // The regs we want to use first should be at the end of this vec.
         // We will use pop to get which reg to use next
 
-        // Don't use stack pionter: X86_64GeneralReg::RSP,
+        // Don't use stack pointer: X86_64GeneralReg::RSP,
         // Don't use frame pointer: X86_64GeneralReg::RBP,
 
         // Use callee saved regs last.
@@ -602,7 +602,7 @@ impl CallConv<X86_64GeneralReg, X86_64FloatReg> for X86_64WindowsFastcall {
                     Layout::Struct(&[]) => {}
                     x => {
                         return Err(format!(
-                            "Loading args with layout {:?} not yet implementd",
+                            "Loading args with layout {:?} not yet implemented",
                             x
                         ));
                     }
@@ -1053,6 +1053,11 @@ impl Assembler<X86_64GeneralReg, X86_64FloatReg> for X86_64Assembler {
         mov_base64_offset32_reg64(buf, X86_64GeneralReg::RSP, offset, src)
     }
 
+    #[inline(always)]
+    fn neg_reg64_reg64(buf: &mut Vec<'_, u8>, dst: X86_64GeneralReg, src: X86_64GeneralReg) {
+        mov_reg64_reg64(buf, dst, src);
+        neg_reg64(buf, dst);
+    }
     #[inline(always)]
     fn sub_reg64_reg64_imm32(
         buf: &mut Vec<'_, u8>,

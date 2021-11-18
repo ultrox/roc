@@ -149,6 +149,7 @@ pub trait Assembler<GeneralReg: RegTrait, FloatReg: RegTrait> {
     fn mov_stack32_freg64(buf: &mut Vec<'_, u8>, offset: i32, src: FloatReg);
     fn mov_stack32_reg64(buf: &mut Vec<'_, u8>, offset: i32, src: GeneralReg);
 
+    fn neg_reg64_reg64(buf: &mut Vec<'_, u8>, dst: GeneralReg, src: GeneralReg);
     fn imul_reg64_reg64_reg64(
         buf: &mut Vec<'_, u8>,
         dst: GeneralReg,
@@ -553,7 +554,7 @@ impl<
                 let jmp_offset = ASM::jmp_imm32(&mut self.buf, 0x1234_5678);
                 ret_jumps.push((jmp_location, jmp_offset));
 
-                // Overwite the original jne with the correct offset.
+                // Overwrite the original jne with the correct offset.
                 let end_offset = self.buf.len();
                 let jne_offset = end_offset - start_offset;
                 ASM::jne_reg64_imm64_imm32(&mut tmp, cond_reg, *val, jne_offset as i32);
@@ -664,7 +665,7 @@ impl<
                 },
             }));
 
-        // Overwite the original jump with the correct offset.
+        // Overwrite the original jump with the correct offset.
         let mut tmp = bumpalo::vec![in self.env.arena];
         self.update_jmp_imm32_offset(
             &mut tmp,
@@ -786,6 +787,23 @@ impl<
         }
     }
 
+    fn build_num_neg(
+        &mut self,
+        dst: &Symbol,
+        src: &Symbol,
+        layout: &Layout<'a>,
+    ) -> Result<(), String> {
+        match layout {
+            Layout::Builtin(Builtin::Int64) => {
+                let dst_reg = self.claim_general_reg(dst)?;
+                let src_reg = self.load_to_general_reg(src)?;
+                ASM::neg_reg64_reg64(&mut self.buf, dst_reg, src_reg);
+                Ok(())
+            }
+            x => Err(format!("NumNeg: layout, {:?}, not implemented yet", x)),
+        }
+    }
+
     fn build_num_sub(
         &mut self,
         dst: &Symbol,
@@ -830,8 +848,9 @@ impl<
         layout: &Layout<'a>,
         fields: &'a [Symbol],
     ) -> Result<(), String> {
+        let struct_size = layout.stack_size(PTR_SIZE);
+
         if let Layout::Struct(field_layouts) = layout {
-            let struct_size = layout.stack_size(PTR_SIZE);
             if struct_size > 0 {
                 let offset = self.claim_stack_size(struct_size)?;
                 self.symbol_storage_map.insert(
@@ -862,7 +881,6 @@ impl<
             Ok(())
         } else {
             // This is a single element struct. Just copy the single field to the stack.
-            let struct_size = layout.stack_size(PTR_SIZE);
             let offset = self.claim_stack_size(struct_size)?;
             self.symbol_storage_map.insert(
                 *sym,
@@ -1296,7 +1314,7 @@ impl<
         match val {
             Some(SymbolStorage::GeneralReg(reg)) => {
                 let offset = self.claim_stack_size(8)?;
-                // For base addresssing, use the negative offset - 8.
+                // For base addressing, use the negative offset - 8.
                 ASM::mov_base32_reg64(&mut self.buf, offset, reg);
                 self.symbol_storage_map.insert(
                     *sym,
@@ -1310,7 +1328,7 @@ impl<
             }
             Some(SymbolStorage::FloatReg(reg)) => {
                 let offset = self.claim_stack_size(8)?;
-                // For base addresssing, use the negative offset.
+                // For base addressing, use the negative offset.
                 ASM::mov_base32_freg64(&mut self.buf, offset, reg);
                 self.symbol_storage_map.insert(
                     *sym,
