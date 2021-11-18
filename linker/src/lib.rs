@@ -99,7 +99,7 @@ pub fn build_and_preprocess_host(
 }
 
 pub fn link_preprocessed_host(
-    _target: &Triple,
+    target: &Triple,
     host_input_path: &Path,
     roc_app_obj: &Path,
     binary_path: &Path,
@@ -111,6 +111,7 @@ pub fn link_preprocessed_host(
         binary_path.to_str().unwrap(),
         false,
         false,
+        target,
     )? != 0
     {
         panic!("Failed to surgically link host");
@@ -1743,6 +1744,7 @@ pub fn surgery(
     out_filename: &str,
     verbose: bool,
     time: bool,
+    target: &Triple,
 ) -> io::Result<i32> {
     let total_start = SystemTime::now();
     let loading_metadata_start = total_start;
@@ -1770,7 +1772,7 @@ pub fn surgery(
     };
     let app_parsing_duration = app_parsing_start.elapsed().unwrap();
 
-    let exec_parsing_start = SystemTime::now();
+    let load_and_mmap_start = SystemTime::now();
     let exec_file = fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -1780,6 +1782,108 @@ pub fn surgery(
     exec_file.set_len(max_out_len)?;
 
     let mut exec_mmap = unsafe { MmapMut::map_mut(&exec_file)? };
+
+    let load_and_mmap_duration = load_and_mmap_start.elapsed().unwrap();
+    let out_gen_start = SystemTime::now();
+
+    let mut offset = 0;
+    let output = match target.binary_format {
+        target_lexicon::BinaryFormat::Elf => surgery_elf(
+            app_filename,
+            metadata_filename,
+            out_filename,
+            verbose,
+            time,
+            &md,
+            &mut exec_mmap,
+            &mut offset,
+            app_obj,
+        ),
+        target_lexicon::BinaryFormat::Macho => surgery_macho(
+            app_filename,
+            metadata_filename,
+            out_filename,
+            verbose,
+            time,
+            &md,
+            &mut exec_mmap,
+            &mut offset,
+            app_obj,
+        ),
+        _ => {
+            // We should have verified this via supported() before calling this function
+            unreachable!()
+        }
+    }?;
+
+    let out_gen_duration = out_gen_start.elapsed().unwrap();
+    let flushing_data_start = SystemTime::now();
+
+    // TODO investigate using the async version of flush - might be faster due to not having to block on that
+    exec_mmap.flush()?;
+    // Also drop files to to ensure data is fully written here.
+    drop(exec_mmap);
+
+    exec_file.set_len(offset as u64 + 1)?;
+    drop(exec_file);
+    let flushing_data_duration = flushing_data_start.elapsed().unwrap();
+
+    // Make sure the final executable has permision to execute.
+    let mut perms = fs::metadata(out_filename)?.permissions();
+    perms.set_mode(perms.mode() | 0o111);
+    fs::set_permissions(out_filename, perms)?;
+
+    let total_duration = total_start.elapsed().unwrap();
+
+    if verbose || time {
+        println!("\nTimings");
+        report_timing("Loading Metadata", loading_metadata_duration);
+        report_timing("Application Parsing", app_parsing_duration);
+        report_timing("Loading and mmap-ing", load_and_mmap_duration);
+        report_timing("Output Generation", out_gen_duration);
+        report_timing("Flushing Data to Disk", flushing_data_duration);
+        report_timing(
+            "Other",
+            total_duration
+                - loading_metadata_duration
+                - app_parsing_duration
+                - load_and_mmap_duration
+                - out_gen_duration
+                - flushing_data_duration,
+        );
+        report_timing("Total", total_duration);
+    }
+
+    Ok(output)
+}
+
+pub fn surgery_macho(
+    app_filename: &str,
+    metadata_filename: &str,
+    out_filename: &str,
+    verbose: bool,
+    time: bool,
+    md: &metadata::Metadata,
+    exec_mmap: &mut MmapMut,
+    offset: &mut usize, // TODO return this instead of taking a mutable reference to it
+    app_obj: object::File,
+) -> io::Result<i32> {
+    // TODO
+
+    Ok(-1)
+}
+
+pub fn surgery_elf(
+    app_filename: &str,
+    metadata_filename: &str,
+    out_filename: &str,
+    verbose: bool,
+    time: bool,
+    md: &metadata::Metadata,
+    exec_mmap: &mut MmapMut,
+    offset_ref: &mut usize, // TODO return this instead of taking a mutable reference to it
+    app_obj: object::File,
+) -> io::Result<i32> {
     let elf64 = exec_mmap[4] == 2;
     let litte_endian = exec_mmap[5] == 1;
     if !elf64 || !litte_endian {
@@ -1794,6 +1898,7 @@ pub fn surgery(
     let sh_offset = exec_header.e_shoff.get(NativeEndian);
     let sh_ent_size = exec_header.e_shentsize.get(NativeEndian);
     let sh_num = exec_header.e_shnum.get(NativeEndian);
+
     if verbose {
         println!();
         println!("Is Elf64: {}", elf64);
@@ -1805,9 +1910,7 @@ pub fn surgery(
         println!("SH Entry Size: {}", sh_ent_size);
         println!("SH Entry Count: {}", sh_num);
     }
-    let exec_parsing_duration = exec_parsing_start.elapsed().unwrap();
 
-    let out_gen_start = SystemTime::now();
     // Backup section header table.
     let sh_size = sh_ent_size as usize * sh_num as usize;
     let mut sh_tab = vec![];
@@ -2059,7 +2162,7 @@ pub fn surgery(
     let new_section_count = 2;
     offset += new_section_count * sh_ent_size as usize;
     let section_headers = load_structs_inplace_mut::<elf::SectionHeader64<LittleEndian>>(
-        &mut exec_mmap,
+        exec_mmap,
         new_sh_offset as usize,
         sh_num as usize + new_section_count,
     );
@@ -2097,13 +2200,13 @@ pub fn surgery(
     new_text_section.sh_entsize = endian::U64::new(LittleEndian, 0);
 
     // Reload and update file header and size.
-    let file_header = load_struct_inplace_mut::<elf::FileHeader64<LittleEndian>>(&mut exec_mmap, 0);
+    let file_header = load_struct_inplace_mut::<elf::FileHeader64<LittleEndian>>(exec_mmap, 0);
     file_header.e_shoff = endian::U64::new(LittleEndian, new_sh_offset as u64);
     file_header.e_shnum = endian::U16::new(LittleEndian, sh_num + new_section_count as u16);
 
     // Add 2 new segments that match the new sections.
     let program_headers = load_structs_inplace_mut::<elf::ProgramHeader64<LittleEndian>>(
-        &mut exec_mmap,
+        exec_mmap,
         ph_offset as usize,
         ph_num as usize,
     );
@@ -2130,8 +2233,8 @@ pub fn surgery(
     // Update calls from platform and dynamic symbols.
     let dynsym_offset = md.dynamic_symbol_table_section_offset + md.added_byte_count;
 
-    for func_name in md.app_functions {
-        let func_virt_offset = match app_func_vaddr_map.get(&func_name) {
+    for func_name in md.app_functions.iter() {
+        let func_virt_offset = match app_func_vaddr_map.get(func_name) {
             Some(offset) => *offset as u64,
             None => {
                 println!("Function, {}, was not defined by the app", &func_name);
@@ -2145,7 +2248,7 @@ pub fn surgery(
             );
         }
 
-        for s in md.surgeries.get(&func_name).unwrap_or(&vec![]) {
+        for s in md.surgeries.get(func_name).unwrap_or(&vec![]) {
             if verbose {
                 println!("\tPerforming surgery: {:+x?}", s);
             }
@@ -2183,7 +2286,7 @@ pub fn surgery(
 
         // Replace plt call code with just a jump.
         // This is a backup incase we missed a call to the plt.
-        if let Some((plt_off, plt_vaddr)) = md.plt_addresses.get(&func_name) {
+        if let Some((plt_off, plt_vaddr)) = md.plt_addresses.get(func_name) {
             let plt_off = (*plt_off + md.added_byte_count) as usize;
             let plt_vaddr = *plt_vaddr + md.added_byte_count;
             let jmp_inst_len = 5;
@@ -2201,19 +2304,19 @@ pub fn surgery(
             }
         }
 
-        if let Some(i) = md.dynamic_symbol_indices.get(&func_name) {
+        if let Some(i) = md.dynamic_symbol_indices.get(func_name) {
             let sym = load_struct_inplace_mut::<elf::Sym64<LittleEndian>>(
-                &mut exec_mmap,
+                exec_mmap,
                 dynsym_offset as usize + *i as usize * mem::size_of::<elf::Sym64<LittleEndian>>(),
             );
             sym.st_shndx = endian::U16::new(LittleEndian, new_text_section_index as u16);
             sym.st_value = endian::U64::new(LittleEndian, func_virt_offset as u64);
             sym.st_size = endian::U64::new(
                 LittleEndian,
-                match app_func_size_map.get(&func_name) {
+                match app_func_size_map.get(func_name) {
                     Some(size) => *size,
                     None => {
-                        println!("Size missing for: {}", &func_name);
+                        println!("Size missing for: {}", func_name);
                         return Ok(-1);
                     }
                 },
@@ -2221,42 +2324,9 @@ pub fn surgery(
         }
     }
 
-    let out_gen_duration = out_gen_start.elapsed().unwrap();
+    // TODO return this instead of accepting a mutable ref!
+    *offset_ref = offset;
 
-    let flushing_data_start = SystemTime::now();
-    exec_mmap.flush()?;
-    // Also drop files to to ensure data is fully written here.
-    drop(exec_mmap);
-    exec_file.set_len(offset as u64 + 1)?;
-    drop(exec_file);
-    let flushing_data_duration = flushing_data_start.elapsed().unwrap();
-
-    // Make sure the final executable has permision to execute.
-    let mut perms = fs::metadata(out_filename)?.permissions();
-    perms.set_mode(perms.mode() | 0o111);
-    fs::set_permissions(out_filename, perms)?;
-
-    let total_duration = total_start.elapsed().unwrap();
-
-    if verbose || time {
-        println!();
-        println!("Timings");
-        report_timing("Loading Metadata", loading_metadata_duration);
-        report_timing("Executable Parsing", exec_parsing_duration);
-        report_timing("Application Parsing", app_parsing_duration);
-        report_timing("Output Generation", out_gen_duration);
-        report_timing("Flushing Data to Disk", flushing_data_duration);
-        report_timing(
-            "Other",
-            total_duration
-                - loading_metadata_duration
-                - exec_parsing_duration
-                - app_parsing_duration
-                - out_gen_duration
-                - flushing_data_duration,
-        );
-        report_timing("Total", total_duration);
-    }
     Ok(0)
 }
 
