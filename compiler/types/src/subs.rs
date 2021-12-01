@@ -470,6 +470,10 @@ impl VarStore {
         VarStore { next: next_var }
     }
 
+    pub fn new_from_storage(subs: &StorageSubs) -> Self {
+        Self::new_from_subs(&subs.subs)
+    }
+
     pub fn peek(&mut self) -> u32 {
         self.next
     }
@@ -2844,7 +2848,8 @@ fn restore_help(subs: &mut Subs, initial: Variable) {
 
 #[derive(Clone, Debug)]
 pub struct StorageSubs {
-    subs: Subs,
+    // TODO make not pub
+    pub subs: Subs,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -2864,6 +2869,14 @@ impl StorageSubs {
 
     pub fn extend_with_variable(&mut self, source: &mut Subs, variable: Variable) -> Variable {
         deep_copy_var_to(source, &mut self.subs, variable)
+    }
+
+    pub fn extend_with_variable_storage(
+        &mut self,
+        source: &mut Self,
+        variable: Variable,
+    ) -> Variable {
+        deep_copy_var_to(&mut source.subs, &mut self.subs, variable)
     }
 
     pub fn merge_into(self, target: &mut Subs) -> impl Fn(Variable) -> Variable {
@@ -3361,7 +3374,8 @@ fn deep_copy_var_to_help<'a>(
         }
 
         RigidVar(name) => {
-            target.set(copy, make_descriptor(FlexVar(Some(name))));
+            // target.set(copy, make_descriptor(FlexVar(Some(name))));
+            target.set(copy, make_descriptor(RigidVar(name)));
 
             copy
         }

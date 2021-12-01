@@ -421,6 +421,8 @@ fn solve(
                     // Add a variable for each def to new_vars_by_env.
                     let mut local_def_vars = LocalDefVarsVec::with_length(let_con.def_types.len());
 
+                    dbg!(&let_con.def_types);
+
                     for (symbol, loc_type) in let_con.def_types.iter() {
                         let var = type_to_var(subs, rank, pools, cached_aliases, &loc_type.value);
 
@@ -497,6 +499,8 @@ fn solve(
 
                     // Add a variable for each def to local_def_vars.
                     let mut local_def_vars = LocalDefVarsVec::with_length(let_con.def_types.len());
+
+                    dbg!(&let_con.def_types, next_rank);
 
                     for (symbol, loc_type) in let_con.def_types.iter() {
                         let def_type = &loc_type.value;

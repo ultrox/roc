@@ -6,7 +6,7 @@ use roc_collections::all::{MutMap, MutSet, SendMap};
 use roc_module::symbol::{ModuleId, Symbol};
 use roc_region::all::{Located, Region};
 use roc_types::solved_types::{FreeVars, SolvedType};
-use roc_types::subs::{VarStore, Variable};
+use roc_types::subs::{StorageSubs, VarStore, Variable};
 use roc_types::types::{Alias, Problem};
 
 pub type SubsByModule = MutMap<ModuleId, ExposedModuleTypes>;
@@ -14,7 +14,10 @@ pub type SubsByModule = MutMap<ModuleId, ExposedModuleTypes>;
 #[derive(Clone, Debug)]
 pub enum ExposedModuleTypes {
     Invalid,
-    Valid(MutMap<Symbol, SolvedType>, MutMap<Symbol, Alias>),
+    Valid {
+        symbols: ExposedValues,
+        aliases: MutMap<Symbol, Alias>,
+    },
 }
 
 pub struct ConstrainedModule {
@@ -111,8 +114,21 @@ pub fn constrain_imports(
     constraint
 }
 
+#[derive(Debug, Clone)]
+pub struct ExposedValues {
+    pub storage: StorageSubs,
+    pub symbols: Vec<(Symbol, Variable)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportedSymbols {
+    pub storage: StorageSubs,
+    pub symbols: Vec<(Symbol, Variable)>,
+    pub builtins: Vec<Symbol>,
+}
+
 pub struct ConstrainableImports {
-    pub imported_symbols: Vec<Import>,
+    pub imported_symbols: ImportedSymbols,
     pub imported_aliases: MutMap<Symbol, Alias>,
     pub unused_imports: MutMap<ModuleId, Region>,
 }
@@ -129,7 +145,11 @@ pub fn pre_constrain_imports(
     exposed_types: &mut SubsByModule,
     stdlib: &StdLib,
 ) -> ConstrainableImports {
-    let mut imported_symbols = Vec::with_capacity(references.len());
+    let mut imported_symbols = ImportedSymbols {
+        storage: StorageSubs::new(Default::default()),
+        symbols: Vec::new(),
+        builtins: Vec::new(),
+    };
     let mut imported_aliases = MutMap::default();
     let mut unused_imports = imported_modules; // We'll remove these as we encounter them.
 
@@ -148,16 +168,8 @@ pub fn pre_constrain_imports(
             // For builtin modules, we create imports from the
             // hardcoded builtin map.
             match stdlib.types.get(&symbol) {
-                Some((solved_type, region)) => {
-                    let loc_symbol = Located {
-                        value: symbol,
-                        region: *region,
-                    };
-
-                    imported_symbols.push(Import {
-                        loc_symbol,
-                        solved_type: solved_type.clone(),
-                    });
+                Some(_) => {
+                    imported_symbols.builtins.push(symbol);
                 }
                 None => {
                     let is_valid_alias = stdlib.applies.contains(&symbol)
@@ -173,37 +185,38 @@ pub fn pre_constrain_imports(
                 }
             }
         } else if module_id != home {
-            // We already have constraints for our own symbols.
-            let region = Region::zero(); // TODO this should be the region where this symbol was declared in its home module. Look that up!
-            let loc_symbol = Located {
-                value: symbol,
-                region,
-            };
-
-            match exposed_types.get(&module_id) {
-                Some(ExposedModuleTypes::Valid(solved_types, new_aliases)) => {
+            match exposed_types.get_mut(&module_id) {
+                Some(ExposedModuleTypes::Valid {
+                    symbols: exposed_symbols,
+                    aliases: new_aliases,
+                }) => {
+                    let ExposedValues { storage, symbols } = exposed_symbols;
                     // If the exposed value was invalid (e.g. it didn't have
                     // a corresponding definition), it won't have an entry
                     // in solved_types
-                    if let Some(solved_type) = solved_types.get(&symbol) {
+                    if let Some((_, variable)) = symbols.iter().find(|(s, _)| *s == symbol) {
                         // TODO should this be a union?
                         for (k, v) in new_aliases.clone() {
                             imported_aliases.insert(k, v);
                         }
 
-                        imported_symbols.push(Import {
-                            loc_symbol,
-                            solved_type: solved_type.clone(),
-                        });
+                        let variable = imported_symbols
+                            .storage
+                            .extend_with_variable_storage(storage, *variable);
+
+                        imported_symbols.symbols.push((symbol, variable));
                     }
                 }
                 Some(ExposedModuleTypes::Invalid) => {
                     // If that module was invalid, use True constraints
                     // for everything imported from it.
-                    imported_symbols.push(Import {
-                        loc_symbol,
-                        solved_type: SolvedType::Erroneous(Problem::InvalidModule),
-                    });
+
+                    todo!()
+
+                    //                    imported_symbols.push(Import {
+                    //                        loc_symbol,
+                    //                        solved_type: SolvedType::Erroneous(Problem::InvalidModule),
+                    //                    });
                 }
                 None => {
                     panic!(

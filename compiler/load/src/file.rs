@@ -10,7 +10,8 @@ use roc_can::def::{Declaration, Def};
 use roc_can::module::{canonicalize_module_defs, Module};
 use roc_collections::all::{default_hasher, BumpMap, MutMap, MutSet};
 use roc_constrain::module::{
-    constrain_imports, pre_constrain_imports, ConstrainableImports, Import,
+    constrain_imports, pre_constrain_imports, ConstrainableImports, ExposedValues, Import,
+    ImportedSymbols,
 };
 use roc_constrain::module::{constrain_module, ExposedModuleTypes, SubsByModule};
 use roc_module::ident::{Ident, Lowercase, ModuleName, QualifiedModuleName, TagName};
@@ -33,7 +34,7 @@ use roc_region::all::{Located, Region};
 use roc_solve::module::SolvedModule;
 use roc_solve::solve;
 use roc_types::solved_types::Solved;
-use roc_types::subs::{Subs, VarStore, Variable};
+use roc_types::subs::{StorageSubs, Subs, VarStore, Variable};
 use roc_types::types::{Alias, Type};
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::{HashMap, HashSet};
@@ -814,9 +815,8 @@ enum Msg<'a> {
     },
     FinishedAllTypeChecking {
         solved_subs: Solved<Subs>,
-        exposed_vars_by_symbol: MutMap<Symbol, Variable>,
         exposed_aliases_by_symbol: MutMap<Symbol, Alias>,
-        exposed_values: Vec<Symbol>,
+        exposed_values: ExposedValues,
         dep_idents: MutMap<ModuleId, IdentIds>,
         documentation: MutMap<ModuleId, ModuleDocumentation>,
     },
@@ -1031,13 +1031,14 @@ enum BuildTask<'a> {
     Solve {
         module: Module,
         ident_ids: IdentIds,
-        imported_symbols: Vec<Import>,
+        imported_symbols: ImportedSymbols,
         module_timing: ModuleTiming,
         constraint: Constraint,
         var_store: VarStore,
         declarations: Vec<Declaration>,
         dep_idents: MutMap<ModuleId, IdentIds>,
         unused_imports: MutMap<ModuleId, Region>,
+        stdlib: StdLib,
     },
     BuildPendingSpecializations {
         module_timing: ModuleTiming,
@@ -1571,7 +1572,6 @@ where
                 match msg {
                     Msg::FinishedAllTypeChecking {
                         solved_subs,
-                        exposed_vars_by_symbol,
                         exposed_aliases_by_symbol,
                         exposed_values,
                         dep_idents,
@@ -1592,7 +1592,6 @@ where
                             solved_subs,
                             exposed_values,
                             exposed_aliases_by_symbol,
-                            exposed_vars_by_symbol,
                             dep_idents,
                             documentation,
                         )));
@@ -1985,7 +1984,8 @@ fn update<'a>(
             if is_host_exposed {
                 state.exposed_to_host.extend(
                     solved_module
-                        .exposed_vars_by_symbol
+                        .exported_symbols
+                        .symbols
                         .iter()
                         .map(|(k, v)| (*k, *v)),
                 );
@@ -2007,8 +2007,7 @@ fn update<'a>(
                 msg_tx
                     .send(Msg::FinishedAllTypeChecking {
                         solved_subs,
-                        exposed_vars_by_symbol: solved_module.exposed_vars_by_symbol,
-                        exposed_values: solved_module.exposed_symbols,
+                        exposed_values: solved_module.exported_symbols,
                         exposed_aliases_by_symbol: solved_module.aliases,
                         dep_idents,
                         documentation,
@@ -2025,7 +2024,10 @@ fn update<'a>(
             } else {
                 state.exposed_types.insert(
                     module_id,
-                    ExposedModuleTypes::Valid(solved_module.solved_types, solved_module.aliases),
+                    ExposedModuleTypes::Valid {
+                        aliases: solved_module.aliases,
+                        symbols: solved_module.exported_symbols,
+                    },
                 );
 
                 if state.goal_phase > Phase::SolveTypes {
@@ -2334,9 +2336,8 @@ fn finish_specialization(
 fn finish(
     state: State,
     solved: Solved<Subs>,
-    exposed_values: Vec<Symbol>,
+    exposed_values: ExposedValues,
     exposed_aliases_by_symbol: MutMap<Symbol, Alias>,
-    exposed_vars_by_symbol: MutMap<Symbol, Variable>,
     dep_idents: MutMap<ModuleId, IdentIds>,
     documentation: MutMap<ModuleId, ModuleDocumentation>,
 ) -> LoadedModule {
@@ -2373,8 +2374,8 @@ fn finish(
         declarations_by_id: state.declarations_by_id,
         dep_idents,
         exposed_aliases: exposed_aliases_by_symbol,
-        exposed_values,
-        exposed_to_host: exposed_vars_by_symbol.into_iter().collect(),
+        exposed_values: exposed_values.symbols.iter().map(|(s, _)| *s).collect(),
+        exposed_to_host: exposed_values.symbols.into_iter().collect(),
         header_sources,
         sources,
         timings: state.timings,
@@ -3313,6 +3314,7 @@ impl<'a> BuildTask<'a> {
             dep_idents,
             module_timing,
             unused_imports,
+            stdlib: stdlib.clone(),
         }
     }
 }
@@ -3322,12 +3324,13 @@ fn run_solve<'a>(
     module: Module,
     ident_ids: IdentIds,
     mut module_timing: ModuleTiming,
-    imported_symbols: Vec<Import>,
+    imported_symbols: ImportedSymbols,
     constraint: Constraint,
     mut var_store: VarStore,
     decls: Vec<Declaration>,
     dep_idents: MutMap<ModuleId, IdentIds>,
     unused_imports: MutMap<ModuleId, Region>,
+    stdlib: StdLib,
 ) -> Msg<'a> {
     // We have more constraining work to do now, so we'll add it to our timings.
     let constrain_start = SystemTime::now();
@@ -3353,42 +3356,49 @@ fn run_solve<'a>(
     //        let constraint = constrain_imports(imported_symbols, constraint, &mut var_store);
     //    }
 
-    let mut imports = Vec::new();
+    let mut stdlib_imports = Vec::new();
     let mut rigid_vars = Vec::new();
 
     {
         use roc_types::solved_types::{FreeVars, SolvedType};
 
-        for import in imported_symbols {
+        dbg!(&imported_symbols.builtins);
+
+        for symbol in imported_symbols.builtins {
             let mut free_vars = FreeVars::default();
-            let loc_symbol = import.loc_symbol;
 
-            // an imported symbol can be either an alias or a value
-            match import.solved_type {
-                SolvedType::Alias(symbol, _, _, _) if symbol == loc_symbol.value => {
-                    // do nothing, in the future the alias definitions should not be in the list of imported values
-                }
-                _ => {
-                    let typ = roc_types::solved_types::to_type(
-                        &import.solved_type,
-                        &mut free_vars,
-                        &mut var_store,
-                    );
+            match stdlib.types.get(&symbol) {
+                None => unreachable!(),
+                Some((solved_type, region)) => {
+                    let loc_symbol = Located::at(*region, symbol);
+                    // an imported symbol can be either an alias or a value
+                    match solved_type {
+                        SolvedType::Alias(symbol, _, _, _) if *symbol == loc_symbol.value => {
+                            // do nothing, in the future the alias definitions should not be in the list of imported values
+                        }
+                        _ => {
+                            let typ = roc_types::solved_types::to_type(
+                                solved_type,
+                                &mut free_vars,
+                                &mut var_store,
+                            );
 
-                    imports.push((loc_symbol.value, typ));
+                            stdlib_imports.push((loc_symbol.value, typ));
 
-                    for (_, var) in free_vars.named_vars {
-                        rigid_vars.push(var);
-                    }
+                            for (_, var) in free_vars.named_vars {
+                                rigid_vars.push(var);
+                            }
 
-                    for var in free_vars.wildcards {
-                        rigid_vars.push(var);
-                    }
+                            for var in free_vars.wildcards {
+                                rigid_vars.push(var);
+                            }
 
-                    // Variables can lose their name during type inference. But the unnamed
-                    // variables are still part of a signature, and thus must be treated as rigids here!
-                    for (_, var) in free_vars.unnamed_vars {
-                        rigid_vars.push(var);
+                            // Variables can lose their name during type inference. But the unnamed
+                            // variables are still part of a signature, and thus must be treated as rigids here!
+                            for (_, var) in free_vars.unnamed_vars {
+                                rigid_vars.push(var);
+                            }
+                        }
                     }
                 }
             }
@@ -3401,11 +3411,24 @@ fn run_solve<'a>(
     let mut imported_variables = Vec::new();
 
     {
-        for (symbol, typ) in imports {
+        for (symbol, typ) in stdlib_imports {
             let var = roc_solve::solve::import_type_to_var(&mut subs, &typ);
             imported_variables.push((symbol, var));
         }
     }
+
+    {
+        // extend our subs with the subs that contains the imports
+        let variable_map = imported_symbols.storage.merge_into(&mut subs);
+
+        for (symbol, variable) in imported_symbols.symbols {
+            let mapped = variable_map(variable);
+            dbg!(symbol, mapped);
+            imported_variables.push((symbol, mapped));
+        }
+    }
+
+    dbg!(&subs);
 
     let constraint = Constraint::Let(Box::new(roc_can::constraint::LetConstraint {
         rigid_vars,
@@ -3418,19 +3441,27 @@ fn run_solve<'a>(
         ret_constraint: constraint,
     }));
 
-    let (solved_subs, solved_env, problems) =
+    let (mut solved_subs, solved_env, problems) =
         roc_solve::module::run_solve(aliases, rigid_variables, constraint, subs);
 
     let mut exposed_vars_by_symbol: MutMap<Symbol, Variable> = solved_env.vars_by_symbol.clone();
     exposed_vars_by_symbol.retain(|k, _| exposed_symbols.contains(k));
 
-    let solved_types =
-        roc_solve::module::make_solved_types(&solved_env, &solved_subs, &exposed_vars_by_symbol);
+    let mut exported_symbols = ExposedValues {
+        storage: StorageSubs::new(Subs::new()),
+        symbols: Vec::new(),
+    };
+
+    for (symbol, var) in exposed_vars_by_symbol {
+        let new_var = exported_symbols
+            .storage
+            .extend_with_variable(&mut solved_subs.0, var);
+
+        exported_symbols.symbols.push((symbol, new_var))
+    }
 
     let solved_module = SolvedModule {
-        exposed_vars_by_symbol,
-        exposed_symbols: exposed_symbols.into_iter().collect::<Vec<_>>(),
-        solved_types,
+        exported_symbols,
         problems,
         aliases: solved_env.aliases,
     };
@@ -4354,6 +4385,7 @@ where
             declarations,
             dep_idents,
             unused_imports,
+            stdlib,
         } => Ok(run_solve(
             module,
             ident_ids,
@@ -4364,6 +4396,7 @@ where
             declarations,
             dep_idents,
             unused_imports,
+            stdlib,
         )),
         BuildPendingSpecializations {
             module_id,

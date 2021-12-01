@@ -1,6 +1,7 @@
 use crate::solve;
 use roc_can::constraint::Constraint;
 use roc_collections::all::MutMap;
+use roc_constrain::module::ExposedValues;
 use roc_module::ident::Lowercase;
 use roc_module::symbol::Symbol;
 use roc_types::solved_types::{Solved, SolvedType};
@@ -9,10 +10,8 @@ use roc_types::types::Alias;
 
 #[derive(Debug)]
 pub struct SolvedModule {
-    pub solved_types: MutMap<Symbol, SolvedType>,
     pub aliases: MutMap<Symbol, Alias>,
-    pub exposed_symbols: Vec<Symbol>,
-    pub exposed_vars_by_symbol: MutMap<Symbol, Variable>,
+    pub exported_symbols: ExposedValues,
     pub problems: Vec<solve::TypeError>,
 }
 
