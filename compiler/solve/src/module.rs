@@ -20,14 +20,12 @@ pub fn run_solve(
     aliases: MutMap<Symbol, Alias>,
     rigid_variables: MutMap<Variable, Lowercase>,
     constraint: Constraint,
-    var_store: VarStore,
+    mut subs: Subs,
 ) -> (Solved<Subs>, solve::Env, Vec<solve::TypeError>) {
     let env = solve::Env {
         vars_by_symbol: MutMap::default(),
         aliases,
     };
-
-    let mut subs = Subs::new_from_varstore(var_store);
 
     for (var, name) in rigid_variables {
         subs.rigid_var(var, name);

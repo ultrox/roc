@@ -676,6 +676,13 @@ fn put_scratchpad(scratchpad: bumpalo::Bump) {
     });
 }
 
+pub fn import_type_to_var(subs: &mut Subs, typ: &Type) -> Variable {
+    let mut pools = Pools::default();
+    let rank = Rank::NONE;
+
+    type_to_var(subs, rank, &mut pools, &mut Default::default(), typ)
+}
+
 fn type_to_var(
     subs: &mut Subs,
     rank: Rank,

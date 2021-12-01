@@ -3332,10 +3332,6 @@ fn run_solve<'a>(
     // We have more constraining work to do now, so we'll add it to our timings.
     let constrain_start = SystemTime::now();
 
-    // Finish constraining the module by wrapping the existing Constraint
-    // in the ones we just computed. We can do this off the main thread.
-    let constraint = constrain_imports(imported_symbols, constraint, &mut var_store);
-
     let constrain_end = SystemTime::now();
 
     let module_id = module.module_id;
@@ -3351,8 +3347,79 @@ fn run_solve<'a>(
         debug_assert!(constraint.validate(), "{:?}", &constraint);
     }
 
+    //    if false {
+    //        // Finish constraining the module by wrapping the existing Constraint
+    //        // in the ones we just computed. We can do this off the main thread.
+    //        let constraint = constrain_imports(imported_symbols, constraint, &mut var_store);
+    //    }
+
+    let mut imports = Vec::new();
+    let mut rigid_vars = Vec::new();
+
+    {
+        use roc_types::solved_types::{FreeVars, SolvedType};
+
+        for import in imported_symbols {
+            let mut free_vars = FreeVars::default();
+            let loc_symbol = import.loc_symbol;
+
+            // an imported symbol can be either an alias or a value
+            match import.solved_type {
+                SolvedType::Alias(symbol, _, _, _) if symbol == loc_symbol.value => {
+                    // do nothing, in the future the alias definitions should not be in the list of imported values
+                }
+                _ => {
+                    let typ = roc_types::solved_types::to_type(
+                        &import.solved_type,
+                        &mut free_vars,
+                        &mut var_store,
+                    );
+
+                    imports.push((loc_symbol.value, typ));
+
+                    for (_, var) in free_vars.named_vars {
+                        rigid_vars.push(var);
+                    }
+
+                    for var in free_vars.wildcards {
+                        rigid_vars.push(var);
+                    }
+
+                    // Variables can lose their name during type inference. But the unnamed
+                    // variables are still part of a signature, and thus must be treated as rigids here!
+                    for (_, var) in free_vars.unnamed_vars {
+                        rigid_vars.push(var);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut subs = Subs::new_from_varstore(var_store);
+
+    // next, introduce the types of imported symbols, and keep track of their variable
+    let mut imported_variables = Vec::new();
+
+    {
+        for (symbol, typ) in imports {
+            let var = roc_solve::solve::import_type_to_var(&mut subs, &typ);
+            imported_variables.push((symbol, var));
+        }
+    }
+
+    let constraint = Constraint::Let(Box::new(roc_can::constraint::LetConstraint {
+        rigid_vars,
+        flex_vars: Vec::new(),
+        def_types: imported_variables
+            .into_iter()
+            .map(|(s, v)| (s, Located::at_zero(Type::Variable(v))))
+            .collect(),
+        defs_constraint: Constraint::True,
+        ret_constraint: constraint,
+    }));
+
     let (solved_subs, solved_env, problems) =
-        roc_solve::module::run_solve(aliases, rigid_variables, constraint, var_store);
+        roc_solve::module::run_solve(aliases, rigid_variables, constraint, subs);
 
     let mut exposed_vars_by_symbol: MutMap<Symbol, Variable> = solved_env.vars_by_symbol.clone();
     exposed_vars_by_symbol.retain(|k, _| exposed_symbols.contains(k));
