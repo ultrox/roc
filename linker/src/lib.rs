@@ -1857,10 +1857,242 @@ pub fn surgery_macho(
     time: bool,
     md: &metadata::Metadata,
     exec_mmap: &mut MmapMut,
-    offset: &mut usize, // TODO return this instead of taking a mutable reference to it
+    offset_ref: &mut usize, // TODO return this instead of taking a mutable reference to it
     app_obj: object::File,
 ) -> io::Result<i32> {
-    // TODO
+    let mut offset = md.exec_len as usize;
+
+    // Align physical and virtual address of new segment.
+    let mut virt_offset = align_to_offset_by_constraint(
+        md.last_vaddr as usize,
+        offset,
+        md.load_align_constraint as usize,
+    );
+    let new_rodata_section_vaddr = virt_offset;
+    if verbose {
+        println!();
+        println!(
+            "New Virtual Rodata Section Address: {:+x?}",
+            new_rodata_section_vaddr
+        );
+    }
+
+    // First decide on sections locations and then recode every exact symbol locations.
+
+    // Copy sections and resolve their symbols/relocations.
+    let symbols = app_obj.symbols().collect::<Vec<Symbol>>();
+    let mut section_offset_map: MutMap<SectionIndex, (usize, usize)> = MutMap::default();
+    let mut symbol_vaddr_map: MutMap<SymbolIndex, usize> = MutMap::default();
+    let mut app_func_vaddr_map: MutMap<String, usize> = MutMap::default();
+    let mut app_func_size_map: MutMap<String, u64> = MutMap::default();
+
+    // TODO: In the future Roc may use a data section to store memoized toplevel thunks
+    // in development builds for caching the results of top-level constants
+
+    let rodata_sections: Vec<Section> = app_obj
+        .sections()
+        .filter(|sec| sec.name().unwrap_or_default().starts_with("__RODATA"))
+        .collect();
+
+    // bss section is like rodata section, but it has zero file size and non-zero virtual size.
+    let bss_sections: Vec<Section> = app_obj
+        .sections()
+        .filter(|sec| sec.name().unwrap_or_default().starts_with("__BSS"))
+        .collect();
+
+    let text_sections: Vec<Section> = app_obj
+        .sections()
+        .filter(|sec| sec.name().unwrap_or_default().starts_with("__TEXT"))
+        .collect();
+    if text_sections.is_empty() {
+        println!("No text sections found. This application has no code.");
+        return Ok(-1);
+    }
+
+    // Calculate addresses and load symbols.
+    // Note, it is important the bss sections come after the rodata sections.
+    for sec in rodata_sections
+        .iter()
+        .chain(bss_sections.iter())
+        .chain(text_sections.iter())
+    {
+        offset = align_by_constraint(offset, MIN_SECTION_ALIGNMENT);
+        virt_offset =
+            align_to_offset_by_constraint(virt_offset, offset, md.load_align_constraint as usize);
+        if verbose {
+            println!(
+                "Section, {}, is being put at offset: {:+x}(virt: {:+x})",
+                sec.name().unwrap(),
+                offset,
+                virt_offset
+            )
+        }
+        section_offset_map.insert(sec.index(), (offset, virt_offset));
+        for sym in symbols.iter() {
+            if sym.section() == SymbolSection::Section(sec.index()) {
+                let name = sym.name().unwrap_or_default().to_string();
+                if !md.roc_symbol_vaddresses.contains_key(&name) {
+                    symbol_vaddr_map.insert(sym.index(), virt_offset + sym.address() as usize);
+                }
+                if md.app_functions.contains(&name) {
+                    app_func_vaddr_map.insert(name.clone(), virt_offset + sym.address() as usize);
+                    app_func_size_map.insert(name, sym.size());
+                }
+            }
+        }
+        let section_size = match sec.file_range() {
+            Some((_, size)) => size,
+            None => 0,
+        };
+        if sec.name().unwrap_or_default().starts_with("__BSS") {
+            // bss sections only modify the virtual size.
+            virt_offset += sec.size() as usize;
+        } else if section_size != sec.size() {
+            println!(
+                "We do not deal with non bss sections that have different on disk and in memory sizes"
+            );
+            return Ok(-1);
+        } else {
+            offset += section_size as usize;
+            virt_offset += sec.size() as usize;
+        }
+    }
+    if verbose {
+        println!("Data Relocation Offsets: {:+x?}", symbol_vaddr_map);
+        println!("Found App Function Symbols: {:+x?}", app_func_vaddr_map);
+    }
+
+    let (new_text_section_offset, new_text_section_vaddr) = text_sections
+        .iter()
+        .map(|sec| section_offset_map.get(&sec.index()).unwrap())
+        .min()
+        .unwrap();
+    let (new_text_section_offset, new_text_section_vaddr) =
+        (*new_text_section_offset, *new_text_section_vaddr);
+
+    // Move data and deal with relocations.
+    for sec in rodata_sections
+        .iter()
+        .chain(bss_sections.iter())
+        .chain(text_sections.iter())
+    {
+        let data = match sec.data() {
+            Ok(data) => data,
+            Err(err) => {
+                println!(
+                    "Failed to load data for section, {:+x?}: {}",
+                    sec.name().unwrap(),
+                    err
+                );
+                return Ok(-1);
+            }
+        };
+        let (section_offset, section_virtual_offset) =
+            section_offset_map.get(&sec.index()).unwrap();
+        let (section_offset, section_virtual_offset) = (*section_offset, *section_virtual_offset);
+        exec_mmap[section_offset..section_offset + data.len()].copy_from_slice(data);
+        // Deal with definitions and relocations for this section.
+        if verbose {
+            println!();
+            println!(
+                "Processing Relocations for Section: {:+x?} @ {:+x} (virt: {:+x})",
+                sec, section_offset, section_virtual_offset
+            );
+        }
+        for rel in sec.relocations() {
+            if verbose {
+                println!("\tFound Relocation: {:+x?}", rel);
+            }
+            match rel.1.target() {
+                RelocationTarget::Symbol(index) => {
+                    let target_offset = if let Some(target_offset) = symbol_vaddr_map.get(&index) {
+                        if verbose {
+                            println!(
+                                "\t\tRelocation targets symbol in app at: {:+x}",
+                                target_offset
+                            );
+                        }
+                        Some(*target_offset as i64)
+                    } else {
+                        app_obj
+                            .symbol_by_index(index)
+                            .and_then(|sym| sym.name())
+                            .ok()
+                            .and_then(|name| {
+                                md.roc_symbol_vaddresses.get(name).map(|address| {
+                                    let vaddr = (*address + md.added_byte_count) as i64;
+                                    if verbose {
+                                        println!(
+                                            "\t\tRelocation targets symbol in host: {} @ {:+x}",
+                                            name, vaddr
+                                        );
+                                    }
+                                    vaddr
+                                })
+                            })
+                    };
+
+                    if let Some(target_offset) = target_offset {
+                        let virt_base = section_virtual_offset as usize + rel.0 as usize;
+                        let base = section_offset as usize + rel.0 as usize;
+                        let target: i64 = match rel.1.kind() {
+                            RelocationKind::Relative | RelocationKind::PltRelative => {
+                                target_offset - virt_base as i64 + rel.1.addend()
+                            }
+                            x => {
+                                println!("Relocation Kind not yet support: {:?}", x);
+                                return Ok(-1);
+                            }
+                        };
+                        if verbose {
+                            println!(
+                                "\t\tRelocation base location: {:+x} (virt: {:+x})",
+                                base, virt_base
+                            );
+                            println!("\t\tFinal relocation target offset: {:+x}", target);
+                        }
+                        match rel.1.size() {
+                            32 => {
+                                let data = (target as i32).to_le_bytes();
+                                exec_mmap[base..base + 4].copy_from_slice(&data);
+                            }
+                            64 => {
+                                let data = target.to_le_bytes();
+                                exec_mmap[base..base + 8].copy_from_slice(&data);
+                            }
+                            x => {
+                                println!("Relocation size not yet supported: {}", x);
+                                return Ok(-1);
+                            }
+                        }
+                    } else if matches!(app_obj.symbol_by_index(index), Ok(sym) if ["__divti3", "__udivti3"].contains(&sym.name().unwrap_or_default()))
+                    {
+                        // Explicitly ignore some symbols that are currently always linked.
+                        continue;
+                    } else {
+                        println!(
+                            "Undefined Symbol in relocation, {:+x?}: {:+x?}",
+                            rel,
+                            app_obj.symbol_by_index(index)
+                        );
+                        return Ok(-1);
+                    }
+                }
+
+                _ => {
+                    println!("Relocation target not yet support: {:+x?}", rel);
+                    return Ok(-1);
+                }
+            }
+        }
+    }
+
+    // Flush app only data to speed up write to disk.
+    exec_mmap.flush_async_range(md.exec_len as usize, offset - md.exec_len as usize)?;
+
+    // TODO: look into merging symbol tables, debug info, and eh frames to enable better debugger experience.
+
+    *offset_ref = offset;
 
     Ok(-1)
 }
@@ -1933,8 +2165,8 @@ pub fn surgery_elf(
     let mut app_func_vaddr_map: MutMap<String, usize> = MutMap::default();
     let mut app_func_size_map: MutMap<String, u64> = MutMap::default();
 
-    // TODO: Does Roc ever create a data section? I think no cause it would mess up fully functional guarantees.
-    // If not we never need to think about it, but we should double check.
+    // TODO: In the future Roc may use a data section to store memoized toplevel thunks
+    // in development builds for caching the results of top-level constants
     let rodata_sections: Vec<Section> = app_obj
         .sections()
         .filter(|sec| sec.name().unwrap_or_default().starts_with(".rodata"))
