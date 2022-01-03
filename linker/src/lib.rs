@@ -913,7 +913,7 @@ fn gen_macho_le(
         .set(LittleEndian, (size_of_cmds + added_bytes) as u32);
 
     // Go through every command and shift it by added_bytes if it's absolute, unless it's inside the command header
-    let offset = mem::size_of_val(exec_header);
+    let mut offset = mem::size_of_val(exec_header);
 
     let cpu_type = match target.architecture {
         target_lexicon::Architecture::X86_64 => macho::CPU_TYPE_X86_64,
@@ -926,6 +926,7 @@ fn gen_macho_le(
 
     for _ in 0..num_load_cmds {
         let info = load_struct_inplace::<macho::LoadCommand<LittleEndian>>(&mut out_mmap, offset);
+        let cmd_size = info.cmdsize.get(NativeEndian) as usize;
 
         match info.cmd.get(NativeEndian) {
             macho::LC_SEGMENT_64 => {
@@ -945,18 +946,21 @@ fn gen_macho_le(
                 );
 
                 let num_sections = cmd.nsects.get(NativeEndian);
-                let size_of_cmd = mem::size_of_val(cmd);
 
                 let sections = load_structs_inplace_mut::<macho::Section64<LittleEndian>>(
                     &mut out_mmap,
-                    offset + size_of_cmd,
+                    offset + cmd_size,
                     num_sections as usize,
                 );
                 struct Relocation {
                     offset: u32,
                     num_relocations: u32,
                 }
+
                 let mut relocation_offsets = Vec::with_capacity(sections.len());
+
+                // Account for the space sections take up
+                offset += mem::size_of::<macho::Section64<LittleEndian>>() * sections.len();
 
                 for section in sections {
                     section.addr.set(
@@ -1223,6 +1227,8 @@ fn gen_macho_le(
                 );
             }
         }
+
+        offset += cmd_size;
     }
 
     Ok((out_mmap, out_file))
