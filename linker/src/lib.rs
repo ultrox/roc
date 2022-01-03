@@ -1788,17 +1788,9 @@ pub fn surgery(
 
     let mut offset = 0;
     let output = match target.binary_format {
-        target_lexicon::BinaryFormat::Elf => surgery_elf(
-            app_filename,
-            metadata_filename,
-            out_filename,
-            verbose,
-            time,
-            &md,
-            &mut exec_mmap,
-            &mut offset,
-            app_obj,
-        ),
+        target_lexicon::BinaryFormat::Elf => {
+            surgery_elf(verbose, &md, &mut exec_mmap, &mut offset, app_obj)
+        }
         target_lexicon::BinaryFormat::Macho => surgery_macho(
             app_filename,
             metadata_filename,
@@ -1874,11 +1866,7 @@ pub fn surgery_macho(
 }
 
 pub fn surgery_elf(
-    app_filename: &str,
-    metadata_filename: &str,
-    out_filename: &str,
     verbose: bool,
-    time: bool,
     md: &metadata::Metadata,
     exec_mmap: &mut MmapMut,
     offset_ref: &mut usize, // TODO return this instead of taking a mutable reference to it
