@@ -859,7 +859,7 @@ fn gen_macho_le(
     out_filename: &str,
     macho_load_so_offset: usize,
     target: &Triple,
-    verbose: bool,
+    _verbose: bool,
 ) -> io::Result<(MmapMut, File)> {
     use macho::{DylibCommand, Section64, SegmentCommand64};
 
@@ -928,6 +928,12 @@ fn gen_macho_le(
         let info = load_struct_inplace::<macho::LoadCommand<LittleEndian>>(&mut out_mmap, offset);
         let cmd_size = info.cmdsize.get(NativeEndian) as usize;
 
+        println!(
+            "\n* * * PROCESSING 0x{:x?} at {}\n",
+            info.cmd.get(NativeEndian),
+            offset
+        );
+
         match info.cmd.get(NativeEndian) {
             macho::LC_SEGMENT_64 => {
                 let cmd = load_struct_inplace_mut::<macho::SegmentCommand64<LittleEndian>>(
@@ -959,9 +965,6 @@ fn gen_macho_le(
 
                 let mut relocation_offsets = Vec::with_capacity(sections.len());
 
-                // Account for the space sections take up
-                offset += mem::size_of::<macho::Section64<LittleEndian>>() * sections.len();
-
                 for section in sections {
                     section.addr.set(
                         LittleEndian,
@@ -983,33 +986,34 @@ fn gen_macho_le(
                     });
                 }
 
-                for Relocation {
-                    offset,
-                    num_relocations,
-                } in relocation_offsets
-                {
-                    let relos = load_structs_inplace_mut::<macho::Relocation<LittleEndian>>(
-                        &mut out_mmap,
-                        offset as usize,
-                        num_relocations as usize,
-                    );
+                // TODO FIXME this is necessary for ARM, but seems to be broken. Skipping for now since we're just targeting x86
+                // for Relocation {
+                //     offset,
+                //     num_relocations,
+                // } in relocation_offsets
+                // {
+                //     let relos = load_structs_inplace_mut::<macho::Relocation<LittleEndian>>(
+                //         &mut out_mmap,
+                //         offset as usize,
+                //         num_relocations as usize,
+                //     );
 
-                    // TODO this has never been tested, because scattered relocations only come up on ARM!
-                    for relo in relos.iter_mut() {
-                        if relo.r_scattered(LittleEndian, cpu_type) {
-                            let mut scattered_info = relo.scattered_info(NativeEndian);
+                //     // TODO this has never been tested, because scattered relocations only come up on ARM!
+                //     for relo in relos.iter_mut() {
+                //         if relo.r_scattered(LittleEndian, cpu_type) {
+                //             let mut scattered_info = relo.scattered_info(NativeEndian);
 
-                            if !scattered_info.r_pcrel {
-                                scattered_info.r_value += added_bytes as u32;
+                //             if !scattered_info.r_pcrel {
+                //                 scattered_info.r_value += added_bytes as u32;
 
-                                let new_info = scattered_info.relocation(LittleEndian);
+                //                 let new_info = scattered_info.relocation(LittleEndian);
 
-                                relo.r_word0 = new_info.r_word0;
-                                relo.r_word1 = new_info.r_word1;
-                            }
-                        }
-                    }
-                }
+                //                 relo.r_word0 = new_info.r_word0;
+                //                 relo.r_word1 = new_info.r_word1;
+                //             }
+                //         }
+                //     }
+                // }
             }
             macho::LC_SYMTAB => {
                 let cmd = load_struct_inplace_mut::<macho::SymtabCommand<LittleEndian>>(
@@ -1221,15 +1225,22 @@ fn gen_macho_le(
                 unreachable!()
             }
             cmd => {
-                panic!(
-                    "Unrecognized Mach-O command during linker preprocessing: {}",
+                eprintln!(
+                    "- - - Unrecognized Mach-O command during linker preprocessing: 0x{:x?}",
                     cmd
                 );
+                // panic!(
+                //     "Unrecognized Mach-O command during linker preprocessing: 0x{:x?}",
+                //     cmd
+                // );
             }
         }
 
         offset += cmd_size;
     }
+
+    // cmd_loc should be where the last offset ended
+    md.macho_cmd_loc = offset as u64;
 
     Ok((out_mmap, out_file))
 }
@@ -1866,7 +1877,8 @@ pub fn surgery_macho(
     offset_ref: &mut usize, // TODO return this instead of taking a mutable reference to it
     app_obj: object::File,
 ) -> io::Result<i32> {
-    let mut offset = md.exec_len as usize;
+    let mut offset = align_by_constraint(md.exec_len as usize, MIN_SECTION_ALIGNMENT);
+    let new_rodata_section_offset = offset;
 
     // Align physical and virtual address of new segment.
     let mut virt_offset = align_to_offset_by_constraint(
@@ -2001,7 +2013,7 @@ pub fn surgery_macho(
         if verbose {
             println!();
             println!(
-                "Processing Relocations for Section: {:+x?} @ {:+x} (virt: {:+x})",
+                "Processing Relocations for Section: 0x{:+x?} @ {:+x} (virt: {:+x})",
                 sec, section_offset, section_virtual_offset
             );
         }
@@ -2097,6 +2109,183 @@ pub fn surgery_macho(
     exec_mmap.flush_async_range(md.exec_len as usize, offset - md.exec_len as usize)?;
 
     // TODO: look into merging symbol tables, debug info, and eh frames to enable better debugger experience.
+
+    let mut cmd_offset = md.macho_cmd_loc as usize;
+
+    // Load this section (we made room for it earlier) and then mutate all its data to make it the desired command
+    {
+        let cmd =
+            load_struct_inplace_mut::<macho::SegmentCommand64<LittleEndian>>(exec_mmap, cmd_offset);
+        let size_of_cmd = mem::size_of_val(cmd);
+
+        cmd_offset += size_of_cmd;
+
+        cmd.cmd.set(LittleEndian, macho::LC_SEGMENT_64);
+        cmd.cmdsize.set(LittleEndian, size_of_cmd as u32);
+        cmd.segname = *b"__RODATA\0\0\0\0\0\0\0\0";
+        cmd.vmaddr
+            .set(LittleEndian, new_rodata_section_vaddr as u64);
+        cmd.vmsize.set(
+            LittleEndian,
+            (new_text_section_vaddr - new_rodata_section_vaddr) as u64,
+        );
+        cmd.fileoff
+            .set(LittleEndian, new_rodata_section_offset as u64);
+        cmd.filesize.set(
+            LittleEndian,
+            (new_text_section_offset - new_rodata_section_offset) as u64,
+        );
+        cmd.nsects.set(LittleEndian, 1);
+
+        // TODO set protection
+    }
+
+    {
+        let cmd = load_struct_inplace_mut::<macho::Section64<LittleEndian>>(exec_mmap, cmd_offset);
+        let size_of_cmd = mem::size_of_val(cmd);
+
+        cmd_offset += size_of_cmd;
+
+        cmd.sectname = *b"__RODATA\0\0\0\0\0\0\0\0";
+        cmd.segname = *b"__RODATA\0\0\0\0\0\0\0\0";
+        cmd.addr.set(LittleEndian, new_rodata_section_vaddr as u64);
+        cmd.size.set(
+            LittleEndian,
+            (new_text_section_offset - new_rodata_section_offset) as u64,
+        );
+        cmd.offset.set(LittleEndian, 0); // TODO is this offset since the start of the file, or segment offset?
+        cmd.align.set(LittleEndian, 12); // TODO should this be 4096?
+                                         // TODO flags
+    }
+
+    {
+        let cmd =
+            load_struct_inplace_mut::<macho::SegmentCommand64<LittleEndian>>(exec_mmap, cmd_offset);
+        let size_of_cmd = mem::size_of_val(cmd);
+
+        cmd_offset += size_of_cmd;
+
+        cmd.cmd.set(LittleEndian, macho::LC_SEGMENT_64);
+        cmd.cmdsize.set(LittleEndian, size_of_cmd as u32);
+        cmd.segname = *b"__TEXT\0\0\0\0\0\0\0\0\0\0";
+        cmd.vmaddr.set(LittleEndian, new_text_section_vaddr as u64);
+        cmd.vmsize
+            .set(LittleEndian, (offset - new_text_section_offset) as u64);
+        cmd.fileoff
+            .set(LittleEndian, new_text_section_offset as u64);
+        cmd.filesize
+            .set(LittleEndian, (offset - new_text_section_offset) as u64);
+        cmd.nsects.set(LittleEndian, 1);
+
+        // TODO set protection
+    }
+
+    {
+        let cmd = load_struct_inplace_mut::<macho::Section64<LittleEndian>>(exec_mmap, cmd_offset);
+
+        cmd.sectname = *b"__TEXT\0\0\0\0\0\0\0\0\0\0";
+        cmd.segname = *b"__TEXT\0\0\0\0\0\0\0\0\0\0";
+        cmd.addr.set(LittleEndian, new_text_section_vaddr as u64);
+        cmd.size
+            .set(LittleEndian, (offset - new_text_section_offset) as u64);
+        cmd.offset.set(LittleEndian, 0); // TODO is this offset since the start of the file, or segment offset?
+        cmd.align.set(LittleEndian, 12); // TODO should this be 4096?
+                                         // TODO flags
+    }
+
+    // Update calls from platform and dynamic symbols.
+    let dynsym_offset = md.dynamic_symbol_table_section_offset + md.added_byte_count;
+
+    for func_name in md.app_functions.iter() {
+        let func_virt_offset = match app_func_vaddr_map.get(func_name) {
+            Some(offset) => *offset as u64,
+            None => {
+                println!("Function, {}, was not defined by the app", &func_name);
+                return Ok(-1);
+            }
+        };
+        if verbose {
+            println!(
+                "Updating calls to {} to the address: {:+x}",
+                &func_name, func_virt_offset
+            );
+        }
+
+        for s in md.surgeries.get(func_name).unwrap_or(&vec![]) {
+            if verbose {
+                println!("\tPerforming surgery: {:+x?}", s);
+            }
+            let surgery_virt_offset = match s.virtual_offset {
+                VirtualOffset::Relative(vs) => (vs + md.added_byte_count) as i64,
+                VirtualOffset::Absolute => 0,
+            };
+            match s.size {
+                4 => {
+                    let target = (func_virt_offset as i64 - surgery_virt_offset) as i32;
+                    if verbose {
+                        println!("\tTarget Jump: {:+x}", target);
+                    }
+                    let data = target.to_le_bytes();
+                    exec_mmap[(s.file_offset + md.added_byte_count) as usize
+                        ..(s.file_offset + md.added_byte_count) as usize + 4]
+                        .copy_from_slice(&data);
+                }
+                8 => {
+                    let target = func_virt_offset as i64 - surgery_virt_offset;
+                    if verbose {
+                        println!("\tTarget Jump: {:+x}", target);
+                    }
+                    let data = target.to_le_bytes();
+                    exec_mmap[(s.file_offset + md.added_byte_count) as usize
+                        ..(s.file_offset + md.added_byte_count) as usize + 8]
+                        .copy_from_slice(&data);
+                }
+                x => {
+                    println!("Surgery size not yet supported: {}", x);
+                    return Ok(-1);
+                }
+            }
+        }
+
+        // Replace plt call code with just a jump.
+        // This is a backup incase we missed a call to the plt.
+        if let Some((plt_off, plt_vaddr)) = md.plt_addresses.get(func_name) {
+            let plt_off = (*plt_off + md.added_byte_count) as usize;
+            let plt_vaddr = *plt_vaddr + md.added_byte_count;
+            let jmp_inst_len = 5;
+            let target =
+                (func_virt_offset as i64 - (plt_vaddr as i64 + jmp_inst_len as i64)) as i32;
+            if verbose {
+                println!("\tPLT: {:+x}, {:+x}", plt_off, plt_vaddr);
+                println!("\tTarget Jump: {:+x}", target);
+            }
+            let data = target.to_le_bytes();
+            exec_mmap[plt_off] = 0xE9;
+            exec_mmap[plt_off + 1..plt_off + jmp_inst_len].copy_from_slice(&data);
+            for i in jmp_inst_len..PLT_ADDRESS_OFFSET as usize {
+                exec_mmap[plt_off + i] = 0x90;
+            }
+        }
+
+        // Commented out because it doesn't apply to mach-o
+        // if let Some(i) = md.dynamic_symbol_indices.get(func_name) {
+        //     let sym = load_struct_inplace_mut::<elf::Sym64<LittleEndian>>(
+        //         exec_mmap,
+        //         dynsym_offset as usize + *i as usize * mem::size_of::<elf::Sym64<LittleEndian>>(),
+        //     );
+        //     sym.st_value = endian::U64::new(LittleEndian, func_virt_offset as u64);
+        //     sym.st_size = endian::U64::new(
+        //         LittleEndian,
+        //         match app_func_size_map.get(func_name) {
+        //             Some(size) => *size,
+        //             None => {
+        //                 println!("Size missing for: {}", func_name);
+        //                 return Ok(-1);
+        //             }
+        //         },
+        //     );
+        // }
+    }
 
     *offset_ref = offset;
 
@@ -2279,7 +2468,7 @@ pub fn surgery_elf(
         if verbose {
             println!();
             println!(
-                "Processing Relocations for Section: {:+x?} @ {:+x} (virt: {:+x})",
+                "Processing Relocations for Section: 0x{:+x?} @ {:+x} (virt: {:+x})",
                 sec, section_offset, section_virtual_offset
             );
         }
