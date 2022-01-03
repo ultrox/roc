@@ -1,3 +1,4 @@
+use roc_module::symbol::Symbol;
 use std::ops::Index;
 
 pub const BUILTINS_HOST_OBJ_PATH: &str = env!(
@@ -27,24 +28,123 @@ pub enum DecWidth {
 }
 
 #[repr(u8)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub enum FloatWidth {
     F32,
     F64,
     F128,
 }
 
+impl FloatWidth {
+    pub const fn stack_size(&self) -> u32 {
+        use FloatWidth::*;
+
+        match self {
+            F32 => 4,
+            F64 => 8,
+            F128 => 16,
+        }
+    }
+
+    pub const fn alignment_bytes(&self) -> u32 {
+        use std::mem::align_of;
+        use FloatWidth::*;
+
+        // TODO actually alignment is architecture-specific
+        match self {
+            F32 => align_of::<f32>() as u32,
+            F64 => align_of::<f64>() as u32,
+            F128 => align_of::<i128>() as u32,
+        }
+    }
+
+    pub const fn try_from_symbol(symbol: Symbol) -> Option<Self> {
+        match symbol {
+            Symbol::NUM_F64 | Symbol::NUM_BINARY64 | Symbol::NUM_AT_BINARY64 => {
+                Some(FloatWidth::F64)
+            }
+
+            Symbol::NUM_F32 | Symbol::NUM_BINARY32 | Symbol::NUM_AT_BINARY32 => {
+                Some(FloatWidth::F32)
+            }
+
+            _ => None,
+        }
+    }
+}
+
 #[repr(u8)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub enum IntWidth {
-    U8,
-    U16,
-    U32,
-    U64,
-    U128,
-    I8,
-    I16,
-    I32,
-    I64,
-    I128,
+    U8 = 0,
+    U16 = 1,
+    U32 = 2,
+    U64 = 3,
+    U128 = 4,
+    I8 = 5,
+    I16 = 6,
+    I32 = 7,
+    I64 = 8,
+    I128 = 9,
+}
+
+impl IntWidth {
+    pub const fn is_signed(&self) -> bool {
+        use IntWidth::*;
+
+        matches!(self, I8 | I16 | I32 | I64 | I128)
+    }
+    pub const fn stack_size(&self) -> u32 {
+        use IntWidth::*;
+
+        match self {
+            U8 | I8 => 1,
+            U16 | I16 => 2,
+            U32 | I32 => 4,
+            U64 | I64 => 8,
+            U128 | I128 => 16,
+        }
+    }
+
+    pub const fn alignment_bytes(&self) -> u32 {
+        use std::mem::align_of;
+        use IntWidth::*;
+
+        // TODO actually alignment is architecture-specific
+        match self {
+            U8 | I8 => align_of::<i8>() as u32,
+            U16 | I16 => align_of::<i16>() as u32,
+            U32 | I32 => align_of::<i32>() as u32,
+            U64 | I64 => align_of::<i64>() as u32,
+            U128 | I128 => align_of::<i128>() as u32,
+        }
+    }
+
+    pub const fn try_from_symbol(symbol: Symbol) -> Option<Self> {
+        match symbol {
+            Symbol::NUM_I128 | Symbol::NUM_SIGNED128 | Symbol::NUM_AT_SIGNED128 => {
+                Some(IntWidth::I128)
+            }
+            Symbol::NUM_I64 | Symbol::NUM_SIGNED64 | Symbol::NUM_AT_SIGNED64 => Some(IntWidth::I64),
+            Symbol::NUM_I32 | Symbol::NUM_SIGNED32 | Symbol::NUM_AT_SIGNED32 => Some(IntWidth::I32),
+            Symbol::NUM_I16 | Symbol::NUM_SIGNED16 | Symbol::NUM_AT_SIGNED16 => Some(IntWidth::I16),
+            Symbol::NUM_I8 | Symbol::NUM_SIGNED8 | Symbol::NUM_AT_SIGNED8 => Some(IntWidth::I8),
+            Symbol::NUM_U128 | Symbol::NUM_UNSIGNED128 | Symbol::NUM_AT_UNSIGNED128 => {
+                Some(IntWidth::U128)
+            }
+            Symbol::NUM_U64 | Symbol::NUM_UNSIGNED64 | Symbol::NUM_AT_UNSIGNED64 => {
+                Some(IntWidth::U64)
+            }
+            Symbol::NUM_U32 | Symbol::NUM_UNSIGNED32 | Symbol::NUM_AT_UNSIGNED32 => {
+                Some(IntWidth::U32)
+            }
+            Symbol::NUM_U16 | Symbol::NUM_UNSIGNED16 | Symbol::NUM_AT_UNSIGNED16 => {
+                Some(IntWidth::U16)
+            }
+            Symbol::NUM_U8 | Symbol::NUM_UNSIGNED8 | Symbol::NUM_AT_UNSIGNED8 => Some(IntWidth::U8),
+            _ => None,
+        }
+    }
 }
 
 impl Index<DecWidth> for IntrinsicName {
@@ -142,6 +242,9 @@ pub const STR_ENDS_WITH: &str = "roc_builtins.str.ends_with";
 pub const STR_NUMBER_OF_BYTES: &str = "roc_builtins.str.number_of_bytes";
 pub const STR_FROM_INT: IntrinsicName = int_intrinsic!("roc_builtins.str.from_int");
 pub const STR_FROM_FLOAT: &str = "roc_builtins.str.from_float";
+pub const STR_TO_INT: IntrinsicName = int_intrinsic!("roc_builtins.str.to_int");
+pub const STR_TO_FLOAT: IntrinsicName = float_intrinsic!("roc_builtins.str.to_float");
+pub const STR_TO_DECIMAL: &str = "roc_builtins.str.to_decimal";
 pub const STR_EQUAL: &str = "roc_builtins.str.equal";
 pub const STR_TO_UTF8: &str = "roc_builtins.str.to_utf8";
 pub const STR_FROM_UTF8: &str = "roc_builtins.str.from_utf8";
@@ -196,8 +299,10 @@ pub const LIST_CONCAT: &str = "roc_builtins.list.concat";
 pub const LIST_SET: &str = "roc_builtins.list.set";
 pub const LIST_SET_IN_PLACE: &str = "roc_builtins.list.set_in_place";
 pub const LIST_ANY: &str = "roc_builtins.list.any";
+pub const LIST_ALL: &str = "roc_builtins.list.all";
 pub const LIST_FIND_UNSAFE: &str = "roc_builtins.list.find_unsafe";
 
+pub const DEC_FROM_STR: &str = "roc_builtins.dec.from_str";
 pub const DEC_FROM_F64: &str = "roc_builtins.dec.from_f64";
 pub const DEC_EQ: &str = "roc_builtins.dec.eq";
 pub const DEC_NEQ: &str = "roc_builtins.dec.neq";
@@ -208,5 +313,6 @@ pub const DEC_MUL_WITH_OVERFLOW: &str = "roc_builtins.dec.mul_with_overflow";
 pub const DEC_DIV: &str = "roc_builtins.dec.div";
 
 pub const UTILS_TEST_PANIC: &str = "roc_builtins.utils.test_panic";
+pub const UTILS_INCREF: &str = "roc_builtins.utils.incref";
 pub const UTILS_DECREF: &str = "roc_builtins.utils.decref";
 pub const UTILS_DECREF_CHECK_NULL: &str = "roc_builtins.utils.decref_check_null";

@@ -5,12 +5,12 @@ use crate::llvm::build::{
     FAST_CALL_CONV, TAG_DATA_INDEX, TAG_ID_INDEX,
 };
 use crate::llvm::build_list::{incrementing_elem_loop, list_len, load_list};
-use crate::llvm::convert::{basic_type_from_layout, basic_type_from_layout_1, ptr_int};
+use crate::llvm::convert::{basic_type_from_layout, basic_type_from_layout_1};
 use bumpalo::collections::Vec;
 use inkwell::basic_block::BasicBlock;
 use inkwell::context::Context;
 use inkwell::module::Linkage;
-use inkwell::types::{AnyTypeEnum, BasicType, BasicTypeEnum};
+use inkwell::types::{AnyTypeEnum, BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::values::{
     BasicValue, BasicValueEnum, FunctionValue, IntValue, PointerValue, StructValue,
 };
@@ -19,6 +19,8 @@ use roc_module::symbol::Interns;
 use roc_module::symbol::Symbol;
 use roc_mono::layout::{Builtin, Layout, LayoutIds, UnionLayout};
 
+/// "Infinite" reference count, for static values
+/// Ref counts are encoded as negative numbers where isize::MIN represents 1
 pub const REFCOUNT_MAX: usize = 0_usize;
 
 pub fn refcount_1(ctx: &Context, ptr_bytes: u32) -> IntValue<'_> {
@@ -46,7 +48,7 @@ impl<'ctx> PointerToRefcount<'ctx> {
     /// alignment works out that way.
     pub unsafe fn from_ptr<'a, 'env>(env: &Env<'a, 'ctx, 'env>, ptr: PointerValue<'ctx>) -> Self {
         // must make sure it's a pointer to usize
-        let refcount_type = ptr_int(env.context, env.ptr_bytes);
+        let refcount_type = env.ptr_int();
 
         let value = env
             .builder
@@ -66,7 +68,7 @@ impl<'ctx> PointerToRefcount<'ctx> {
     ) -> Self {
         let builder = env.builder;
         // pointer to usize
-        let refcount_type = ptr_int(env.context, env.ptr_bytes);
+        let refcount_type = env.ptr_int();
         let refcount_ptr_type = refcount_type.ptr_type(AddressSpace::Generic);
 
         let ptr_as_usize_ptr = builder
@@ -127,7 +129,7 @@ impl<'ctx> PointerToRefcount<'ctx> {
     fn increment<'a, 'env>(&self, amount: IntValue<'ctx>, env: &Env<'a, 'ctx, 'env>) {
         let refcount = self.get_refcount(env);
         let builder = env.builder;
-        let refcount_type = ptr_int(env.context, env.ptr_bytes);
+        let refcount_type = env.ptr_int();
 
         let is_static_allocation = builder.build_int_compare(
             IntPredicate::EQ,
@@ -183,7 +185,7 @@ impl<'ctx> PointerToRefcount<'ctx> {
                     env.module,
                     fn_name,
                     fn_type,
-                    Linkage::Private,
+                    Linkage::Internal,
                     FAST_CALL_CONV, // Because it's an internal-only function, it should use the fast calling convention.
                 );
 
@@ -442,8 +444,8 @@ fn modify_refcount_builtin<'a, 'ctx, 'env>(
             Some(function)
         }
         Set(element_layout) => {
-            let key_layout = &Layout::Struct(&[]);
-            let value_layout = element_layout;
+            let key_layout = element_layout;
+            let value_layout = &Layout::Struct(&[]);
 
             let function = modify_refcount_dict(
                 env,
@@ -565,9 +567,11 @@ fn call_help<'a, 'ctx, 'env>(
     let call = match call_mode {
         CallMode::Inc(inc_amount) => {
             env.builder
-                .build_call(function, &[value, inc_amount.into()], "increment")
+                .build_call(function, &[value.into(), inc_amount.into()], "increment")
         }
-        CallMode::Dec => env.builder.build_call(function, &[value], "decrement"),
+        CallMode::Dec => env
+            .builder
+            .build_call(function, &[value.into()], "decrement"),
     };
 
     call.set_call_convention(FAST_CALL_CONV);
@@ -593,21 +597,31 @@ fn modify_refcount_layout_build_function<'a, 'ctx, 'env>(
         Union(variant) => {
             use UnionLayout::*;
 
-            if let NonRecursive(tags) = variant {
-                let function = modify_refcount_union(env, layout_ids, mode, when_recursive, tags);
+            match variant {
+                NonRecursive(&[]) => {
+                    // void type, nothing to refcount here
+                    None
+                }
 
-                return Some(function);
+                NonRecursive(tags) => {
+                    let function =
+                        modify_refcount_union(env, layout_ids, mode, when_recursive, tags);
+
+                    Some(function)
+                }
+
+                _ => {
+                    let function = build_rec_union(
+                        env,
+                        layout_ids,
+                        mode,
+                        &WhenRecursive::Loop(*variant),
+                        *variant,
+                    );
+
+                    Some(function)
+                }
             }
-
-            let function = build_rec_union(
-                env,
-                layout_ids,
-                mode,
-                &WhenRecursive::Loop(*variant),
-                *variant,
-            );
-
-            Some(function)
         }
 
         Struct(layouts) => {
@@ -857,7 +871,7 @@ fn modify_refcount_str_help<'a, 'ctx, 'env>(
     let is_big_and_non_empty = builder.build_int_compare(
         IntPredicate::SGT,
         len,
-        ptr_int(ctx, env.ptr_bytes).const_zero(),
+        env.ptr_int().const_zero(),
         "is_big_str",
     );
 
@@ -979,7 +993,7 @@ fn modify_refcount_dict_help<'a, 'ctx, 'env>(
     let is_non_empty = builder.build_int_compare(
         IntPredicate::SGT,
         len,
-        ptr_int(ctx, env.ptr_bytes).const_zero(),
+        env.ptr_int().const_zero(),
         "is_non_empty",
     );
 
@@ -1027,7 +1041,7 @@ fn build_header<'a, 'ctx, 'env>(
             env,
             fn_name,
             env.context.void_type().into(),
-            &[arg_type, ptr_int(env.context, env.ptr_bytes).into()],
+            &[arg_type, env.ptr_int().into()],
         ),
         Mode::Dec => build_header_help(env, fn_name, env.context.void_type().into(), &[arg_type]),
     }
@@ -1041,6 +1055,11 @@ pub fn build_header_help<'a, 'ctx, 'env>(
     arguments: &[BasicTypeEnum<'ctx>],
 ) -> FunctionValue<'ctx> {
     use inkwell::types::AnyTypeEnum::*;
+
+    let it = arguments.iter().map(|x| BasicMetadataTypeEnum::from(*x));
+    let vec = Vec::from_iter_in(it, env.arena);
+    let arguments = vec.as_slice();
+
     let fn_type = match return_type {
         ArrayType(t) => t.fn_type(arguments, false),
         FloatType(t) => t.fn_type(arguments, false),

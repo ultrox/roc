@@ -1,6 +1,9 @@
 #[cfg(feature = "gen-llvm")]
 use crate::helpers::llvm::assert_evals_to;
 
+#[cfg(feature = "gen-llvm")]
+use crate::helpers::llvm::expect_runtime_error_panic;
+
 #[cfg(feature = "gen-dev")]
 use crate::helpers::dev::assert_evals_to;
 
@@ -254,7 +257,7 @@ fn twice_record_access() {
     );
 }
 #[test]
-#[cfg(any(feature = "gen-llvm", feature = "gen-dev"))]
+#[cfg(any(feature = "gen-llvm", feature = "gen-dev", feature = "gen-wasm"))]
 fn empty_record() {
     assert_evals_to!(
         indoc!(
@@ -807,6 +810,24 @@ fn return_nested_record() {
 }
 
 #[test]
+#[cfg(any(feature = "gen-llvm", feature = "gen-wasm"))]
+fn nested_record_load() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+                x = { a : { b : 0x5 } }
+
+                y = x.a
+
+                y.b
+                "#
+        ),
+        5,
+        i64
+    );
+}
+
+#[test]
 #[cfg(any(feature = "gen-llvm"))]
 fn accessor_twice() {
     assert_evals_to!(".foo { foo: 4 }  + .foo { bar: 6.28, foo: 3 } ", 7, i64);
@@ -967,4 +988,44 @@ fn update_the_only_field() {
         4,
         i64
     );
+}
+
+#[test]
+#[cfg(any(feature = "gen-llvm", feature = "gen-wasm"))]
+// https://github.com/rtfeldman/roc/issues/1513
+fn both_have_unique_fields() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+            a = { x: 42, y: 43 }
+            b = { x: 42, z: 44 }
+
+            f : { x : I64 }a, { x : I64 }b -> I64
+            f = \{ x: x1}, { x: x2 } -> x1 + x2 
+
+            f a b
+            "#
+        ),
+        84,
+        i64
+    );
+}
+
+#[test]
+#[cfg(any(feature = "gen-llvm"))]
+#[should_panic(
+    // TODO: something upstream is escaping the '
+    expected = r#"Roc failed with message: "Can\'t create record with improper layout""#
+)]
+fn call_with_bad_record_runtime_error() {
+    expect_runtime_error_panic!(indoc!(
+        r#"
+            app "test" provides [ main ] to "./platform"
+
+            main =
+                get : {a: Bool} -> Bool
+                get = \{a} -> a
+                get {b: ""}
+            "#
+    ))
 }

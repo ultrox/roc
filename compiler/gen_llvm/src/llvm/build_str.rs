@@ -7,13 +7,13 @@ use inkwell::builder::Builder;
 use inkwell::values::{BasicValueEnum, FunctionValue, IntValue, PointerValue, StructValue};
 use inkwell::AddressSpace;
 use morphic_lib::UpdateMode;
-use roc_builtins::bitcode;
+use roc_builtins::bitcode::{self, IntWidth};
 use roc_module::symbol::Symbol;
 use roc_mono::layout::{Builtin, Layout};
 
-use super::build::{intwidth_from_builtin, load_symbol, load_symbol_and_layout};
+use super::build::load_symbol;
 
-pub static CHAR_LAYOUT: Layout = Layout::Builtin(Builtin::Int8);
+pub static CHAR_LAYOUT: Layout = Layout::u8();
 
 /// Str.repeat : Str, Nat -> Str
 pub fn str_repeat<'a, 'ctx, 'env>(
@@ -282,36 +282,10 @@ pub fn str_trim_right<'a, 'ctx, 'env>(
 /// Str.fromInt : Int -> Str
 pub fn str_from_int<'a, 'ctx, 'env>(
     env: &Env<'a, 'ctx, 'env>,
-    scope: &Scope<'a, 'ctx>,
-    int_symbol: Symbol,
+    value: IntValue<'ctx>,
+    int_width: IntWidth,
 ) -> BasicValueEnum<'ctx> {
-    let (int, int_layout) = load_symbol_and_layout(scope, &int_symbol);
-
-    match int_layout {
-        Layout::Builtin(builtin) => match builtin {
-            Builtin::Usize
-            | Builtin::Int128
-            | Builtin::Int64
-            | Builtin::Int32
-            | Builtin::Int16
-            | Builtin::Int8 => {
-                let intwidth = intwidth_from_builtin(*builtin, env.ptr_bytes);
-                call_bitcode_fn(env, &[int], &bitcode::STR_FROM_INT[intwidth])
-            }
-            _ => {
-                unreachable!(
-                    "Compiler bug: tried to convert numeric on invalid builtin layout: ({:?})",
-                    int_layout
-                );
-            }
-        },
-        _ => {
-            unreachable!(
-                "Compiler bug: tried to convert numeric on invalid layout: {:?}",
-                int_layout
-            );
-        }
-    }
+    call_bitcode_fn(env, &[value.into()], &bitcode::STR_FROM_INT[int_width])
 }
 
 /// Str.toUtf8 : Str -> List U8
@@ -432,7 +406,7 @@ pub fn str_from_utf8<'a, 'ctx, 'env>(
     decode_from_utf8_result(env, result_ptr).into()
 }
 
-/// Str.fromInt : Int -> Str
+/// Str.fromFloat : Int -> Str
 pub fn str_from_float<'a, 'ctx, 'env>(
     env: &Env<'a, 'ctx, 'env>,
     scope: &Scope<'a, 'ctx>,
@@ -457,13 +431,4 @@ pub fn str_equal<'a, 'ctx, 'env>(
         &[str1_i128.into(), str2_i128.into()],
         bitcode::STR_EQUAL,
     )
-}
-
-// TODO investigate: does this cause problems when the layout is known? this value is now not refcounted!
-pub fn empty_str<'a, 'ctx, 'env>(env: &Env<'a, 'ctx, 'env>) -> BasicValueEnum<'ctx> {
-    let struct_type = super::convert::zig_str_type(env);
-
-    // The pointer should be null (aka zero) and the length should be zero,
-    // so the whole struct should be a const_zero
-    BasicValueEnum::StructValue(struct_type.const_zero())
 }

@@ -1,7 +1,8 @@
 use bumpalo::collections::Vec;
 use inkwell::context::Context;
-use inkwell::types::{BasicType, BasicTypeEnum, IntType, StructType};
+use inkwell::types::{BasicType, BasicTypeEnum, FloatType, IntType, StructType};
 use inkwell::AddressSpace;
+use roc_builtins::bitcode::{FloatWidth, IntWidth};
 use roc_mono::layout::{Builtin, Layout, UnionLayout};
 
 fn basic_type_from_record<'a, 'ctx, 'env>(
@@ -143,24 +144,44 @@ pub fn basic_type_from_builtin<'a, 'ctx, 'env>(
     use Builtin::*;
 
     let context = env.context;
-    let ptr_bytes = env.ptr_bytes;
 
     match builtin {
-        Int128 => context.i128_type().as_basic_type_enum(),
-        Int64 => context.i64_type().as_basic_type_enum(),
-        Int32 => context.i32_type().as_basic_type_enum(),
-        Int16 => context.i16_type().as_basic_type_enum(),
-        Int8 => context.i8_type().as_basic_type_enum(),
-        Int1 => context.bool_type().as_basic_type_enum(),
-        Usize => ptr_int(context, ptr_bytes).as_basic_type_enum(),
+        Int(int_width) => int_type_from_int_width(env, *int_width).as_basic_type_enum(),
+        Float(float_width) => float_type_from_float_width(env, *float_width).as_basic_type_enum(),
+        Bool => context.bool_type().as_basic_type_enum(),
         Decimal => context.i128_type().as_basic_type_enum(),
-        Float128 => context.f128_type().as_basic_type_enum(),
-        Float64 => context.f64_type().as_basic_type_enum(),
-        Float32 => context.f32_type().as_basic_type_enum(),
-        Dict(_, _) | EmptyDict => zig_dict_type(env).into(),
-        Set(_) | EmptySet => zig_dict_type(env).into(),
-        List(_) | EmptyList => zig_list_type(env).into(),
-        Str | EmptyStr => zig_str_type(env).into(),
+        Dict(_, _) => zig_dict_type(env).into(),
+        Set(_) => zig_dict_type(env).into(),
+        List(_) => zig_list_type(env).into(),
+        Str => zig_str_type(env).into(),
+    }
+}
+
+pub fn int_type_from_int_width<'a, 'ctx, 'env>(
+    env: &crate::llvm::build::Env<'a, 'ctx, 'env>,
+    int_width: IntWidth,
+) -> IntType<'ctx> {
+    use IntWidth::*;
+
+    match int_width {
+        U128 | I128 => env.context.i128_type(),
+        U64 | I64 => env.context.i64_type(),
+        U32 | I32 => env.context.i32_type(),
+        U16 | I16 => env.context.i16_type(),
+        U8 | I8 => env.context.i8_type(),
+    }
+}
+
+pub fn float_type_from_float_width<'a, 'ctx, 'env>(
+    env: &crate::llvm::build::Env<'a, 'ctx, 'env>,
+    float_width: FloatWidth,
+) -> FloatType<'ctx> {
+    use FloatWidth::*;
+
+    match float_width {
+        F128 => todo!("F128 is not implemented"),
+        F64 => env.context.f64_type(),
+        F32 => env.context.f32_type(),
     }
 }
 
@@ -180,22 +201,6 @@ pub fn block_of_memory_slices<'ctx>(
     }
 
     block_of_memory_help(context, union_size)
-}
-
-pub fn union_data_is_struct<'a, 'ctx, 'env>(
-    env: &crate::llvm::build::Env<'a, 'ctx, 'env>,
-    layouts: &[Layout<'_>],
-) -> StructType<'ctx> {
-    let data_type = basic_type_from_record(env, layouts);
-    union_data_is_struct_type(env.context, data_type.into_struct_type())
-}
-
-pub fn union_data_is_struct_type<'ctx>(
-    context: &'ctx Context,
-    struct_type: StructType<'ctx>,
-) -> StructType<'ctx> {
-    let tag_id_type = context.i64_type();
-    context.struct_type(&[struct_type.into(), tag_id_type.into()], false)
 }
 
 pub fn block_of_memory<'ctx>(
@@ -225,32 +230,23 @@ fn block_of_memory_help(context: &Context, union_size: u32) -> BasicTypeEnum<'_>
     let num_i64 = union_size / 8;
     let num_i8 = union_size % 8;
 
+    let i8_array_type = context.i8_type().array_type(num_i8).as_basic_type_enum();
     let i64_array_type = context.i64_type().array_type(num_i64).as_basic_type_enum();
 
-    if num_i8 == 0 {
-        // the object fits perfectly in some number of i64's
+    if num_i64 == 0 {
+        // The object fits perfectly in some number of i8s
+        context.struct_type(&[i8_array_type], false).into()
+    } else if num_i8 == 0 {
+        // The object fits perfectly in some number of i64s
         // (i.e. the size is a multiple of 8 bytes)
         context.struct_type(&[i64_array_type], false).into()
     } else {
-        // there are some trailing bytes at the end
+        // There are some trailing bytes at the end
         let i8_array_type = context.i8_type().array_type(num_i8).as_basic_type_enum();
 
         context
             .struct_type(&[i64_array_type, i8_array_type], false)
             .into()
-    }
-}
-
-pub fn ptr_int(ctx: &Context, ptr_bytes: u32) -> IntType<'_> {
-    match ptr_bytes {
-        1 => ctx.i8_type(),
-        2 => ctx.i16_type(),
-        4 => ctx.i32_type(),
-        8 => ctx.i64_type(),
-        _ => panic!(
-            "Invalid target: Roc does't support compiling to {}-bit systems.",
-            ptr_bytes * 8
-        ),
     }
 }
 

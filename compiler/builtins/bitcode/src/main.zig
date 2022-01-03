@@ -10,6 +10,7 @@ const STR = "str";
 const dec = @import("dec.zig");
 
 comptime {
+    exportDecFn(dec.fromStr, "from_str");
     exportDecFn(dec.fromF64C, "from_f64");
     exportDecFn(dec.eqC, "eq");
     exportDecFn(dec.neqC, "neq");
@@ -51,6 +52,7 @@ comptime {
     exportListFn(list.listSetInPlace, "set_in_place");
     exportListFn(list.listSwap, "swap");
     exportListFn(list.listAny, "any");
+    exportListFn(list.listAll, "all");
     exportListFn(list.listFindUnsafe, "find_unsafe");
 }
 
@@ -130,6 +132,11 @@ comptime {
 
     inline for (INTEGERS) |T| {
         str.exportFromInt(T, ROC_BUILTINS ++ "." ++ STR ++ ".from_int.");
+        num.exportParseInt(T, ROC_BUILTINS ++ "." ++ STR ++ ".to_int.");
+    }
+
+    inline for (FLOATS) |T| {
+        num.exportParseFloat(T, ROC_BUILTINS ++ "." ++ STR ++ ".to_float.");
     }
 }
 
@@ -137,6 +144,7 @@ comptime {
 
 comptime {
     exportUtilsFn(utils.test_panic, "test_panic");
+    exportUtilsFn(utils.increfC, "incref");
     exportUtilsFn(utils.decrefC, "decref");
     exportUtilsFn(utils.decrefCheckNullC, "decref_check_null");
 

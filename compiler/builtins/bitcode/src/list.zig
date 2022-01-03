@@ -36,7 +36,7 @@ pub const RocList = extern struct {
         }
 
         // otherwise, check if the refcount is one
-        const ptr: [*]usize = @ptrCast([*]usize, @alignCast(8, self.bytes));
+        const ptr: [*]usize = @ptrCast([*]usize, @alignCast(@alignOf(usize), self.bytes));
         return (ptr - 1)[0] == utils.REFCOUNT_ONE;
     }
 
@@ -975,7 +975,6 @@ pub fn listRange(width: utils.IntWidth, low: Opaque, high: Opaque) callconv(.C) 
         .I32 => helper1(i32, low, high),
         .I64 => helper1(i64, low, high),
         .I128 => helper1(i128, low, high),
-        .Usize => helper1(usize, low, high),
     };
 }
 
@@ -1110,6 +1109,36 @@ pub fn listAny(
     }
 
     return false;
+}
+
+pub fn listAll(
+    list: RocList,
+    caller: Caller1,
+    data: Opaque,
+    inc_n_data: IncN,
+    data_is_owned: bool,
+    element_width: usize,
+) callconv(.C) bool {
+    if (list.bytes) |source_ptr| {
+        const size = list.len();
+
+        if (data_is_owned) {
+            inc_n_data(data, size);
+        }
+
+        var i: usize = 0;
+        while (i < size) : (i += 1) {
+            var satisfied = false;
+            const element = source_ptr + i * element_width;
+            caller(data, element, @ptrCast(?[*]u8, &satisfied));
+
+            if (!satisfied) {
+                return false;
+            }
+        }
+        return true;
+    }
+    return true;
 }
 
 // SWAP ELEMENTS
@@ -1253,7 +1282,7 @@ pub fn listSet(
     // `if inBounds then LowLevelListGet input index item else input`
     // so we don't do a bounds check here. Hence, the list is also non-empty,
     // because inserting into an empty list is always out of bounds
-    const ptr: [*]usize = @ptrCast([*]usize, @alignCast(8, bytes));
+    const ptr: [*]usize = @ptrCast([*]usize, @alignCast(@alignOf(usize), bytes));
 
     if ((ptr - 1)[0] == utils.REFCOUNT_ONE) {
         return listSetInPlaceHelp(bytes, index, element, element_width, dec);

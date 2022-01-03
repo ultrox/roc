@@ -12,7 +12,36 @@ use crate::helpers::wasm::assert_evals_to;
 
 #[allow(unused_imports)]
 use indoc::indoc;
-use roc_std::RocStr;
+use roc_std::{RocList, RocStr};
+
+// #[test]
+// fn str_split_empty_delimiter() {
+//     assert_evals_to!(
+//         indoc!(
+//             r#"
+//                     List.len (Str.split "hello" "")
+//                 "#
+//         ),
+//         1,
+//         i64
+//     );
+
+//     assert_evals_to!(
+//         indoc!(
+//             r#"
+//                     when List.first (Str.split "JJJ" "") is
+//                         Ok str ->
+//                             Str.countGraphemes str
+
+//                         _ ->
+//                             -1
+
+//                 "#
+//         ),
+//         3,
+//         i64
+//     );
+// }
 
 // #[test]
 // fn str_split_bigger_delimiter_small_str() {
@@ -305,213 +334,146 @@ fn small_str_concat_empty_first_arg() {
     );
 }
 
-// #[test]
-// fn small_str_concat_empty_second_arg() {
-//     assert_llvm_evals_to!(
-//         r#"Str.concat "JJJJJJJJJJJJJJJ" """#,
-//         [
-//             0x4a,
-//             0x4a,
-//             0x4a,
-//             0x4a,
-//             0x4a,
-//             0x4a,
-//             0x4a,
-//             0x4a,
-//             0x4a,
-//             0x4a,
-//             0x4a,
-//             0x4a,
-//             0x4a,
-//             0x4a,
-//             0x4a,
-//             0b1000_1111
-//         ],
-//         [u8; 16]
-//     );
-// }
+#[test]
+fn small_str_concat_empty_second_arg() {
+    assert_evals_to!(
+        r#"Str.concat "JJJJJJJ" """#,
+        [0x4a, 0x4a, 0x4a, 0x4a, 0x4a, 0x4a, 0x4a, 0b1000_0111],
+        [u8; 8]
+    );
+}
 
-// #[test]
-// fn small_str_concat_small_to_big() {
-//     assert_evals_to!(
-//         r#"Str.concat "abc" " this is longer than 15 chars""#,
-//         RocStr::from_slice(b"abc this is longer than 15 chars"),
-//         RocStr
-//     );
-// }
+#[test]
+fn small_str_concat_small_to_big() {
+    assert_evals_to!(
+        r#"Str.concat "abc" " this is longer than 7 chars""#,
+        RocStr::from_slice(b"abc this is longer than 7 chars"),
+        RocStr
+    );
+}
 
-// #[test]
-// fn small_str_concat_small_to_small_staying_small() {
-//     assert_llvm_evals_to!(
-//         r#"Str.concat "J" "JJJJJJJJJJJJJJ""#,
-//         [
-//             0x4a,
-//             0x4a,
-//             0x4a,
-//             0x4a,
-//             0x4a,
-//             0x4a,
-//             0x4a,
-//             0x4a,
-//             0x4a,
-//             0x4a,
-//             0x4a,
-//             0x4a,
-//             0x4a,
-//             0x4a,
-//             0x4a,
-//             0b1000_1111
-//         ],
-//         [u8; 16]
-//     );
-// }
+#[test]
+fn small_str_concat_small_to_small_staying_small() {
+    assert_evals_to!(
+        r#"Str.concat "J" "JJJJJJ""#,
+        [0x4a, 0x4a, 0x4a, 0x4a, 0x4a, 0x4a, 0x4a, 0b1000_0111],
+        [u8; 8]
+    );
+}
 
-// #[test]
-// fn small_str_concat_small_to_small_overflow_to_big() {
-//     assert_evals_to!(
-//         r#"Str.concat "abcdefghijklm" "nopqrstuvwxyz""#,
-//         RocStr::from_slice(b"abcdefghijklmnopqrstuvwxyz"),
-//         RocStr
-//     );
-// }
+#[test]
+fn small_str_concat_small_to_small_overflow_to_big() {
+    assert_evals_to!(
+        r#"Str.concat "abcdefg" "hijklmn""#,
+        RocStr::from_slice(b"abcdefghijklmn"),
+        RocStr
+    );
+}
 
-// #[test]
-// fn str_concat_empty() {
-//     assert_evals_to!(r#"Str.concat "" """#, RocStr::default(), RocStr);
-// }
+#[test]
+fn str_concat_empty() {
+    assert_evals_to!(r#"Str.concat "" """#, RocStr::default(), RocStr);
+}
 
-// #[test]
-// fn small_str_is_empty() {
-//     assert_evals_to!(r#"Str.isEmpty "abc""#, false, bool);
-// }
+#[test]
+fn small_str_is_empty() {
+    assert_evals_to!(r#"Str.isEmpty "abc""#, false, bool);
+}
 
-// #[test]
-// fn big_str_is_empty() {
-//     assert_evals_to!(
-//         r#"Str.isEmpty "this is more than 15 chars long""#,
-//         false,
-//         bool
-//     );
-// }
+#[test]
+fn big_str_is_empty() {
+    assert_evals_to!(
+        r#"Str.isEmpty "this is more than 15 chars long""#,
+        false,
+        bool
+    );
+}
 
-// #[test]
-// fn empty_str_is_empty() {
-//     assert_evals_to!(r#"Str.isEmpty """#, true, bool);
-// }
+#[test]
+fn empty_str_is_empty() {
+    assert_evals_to!(r#"Str.isEmpty """#, true, bool);
+}
 
-// #[test]
-// fn str_starts_with() {
-//     assert_evals_to!(r#"Str.startsWith "hello world" "hell""#, true, bool);
-//     assert_evals_to!(r#"Str.startsWith "hello world" """#, true, bool);
-//     assert_evals_to!(r#"Str.startsWith "nope" "hello world""#, false, bool);
-//     assert_evals_to!(r#"Str.startsWith "hell" "hello world""#, false, bool);
-//     assert_evals_to!(r#"Str.startsWith "" "hello world""#, false, bool);
-// }
+#[test]
+fn str_starts_with() {
+    assert_evals_to!(r#"Str.startsWith "hello world" "hell""#, true, bool);
+    assert_evals_to!(r#"Str.startsWith "hello world" """#, true, bool);
+    assert_evals_to!(r#"Str.startsWith "nope" "hello world""#, false, bool);
+    assert_evals_to!(r#"Str.startsWith "hell" "hello world""#, false, bool);
+    assert_evals_to!(r#"Str.startsWith "" "hello world""#, false, bool);
+}
 
-// #[test]
-// fn str_starts_with_code_point() {
-//     assert_evals_to!(
-//         &format!(r#"Str.startsWithCodePt "foobar" {}"#, 'f' as u32),
-//         true,
-//         bool
-//     );
-//     assert_evals_to!(
-//         &format!(r#"Str.startsWithCodePt "zoobar" {}"#, 'f' as u32),
-//         false,
-//         bool
-//     );
-// }
+#[test]
+fn str_starts_with_code_point() {
+    assert_evals_to!(
+        &format!(r#"Str.startsWithCodePt "foobar" {}"#, 'f' as u32),
+        true,
+        bool
+    );
+    assert_evals_to!(
+        &format!(r#"Str.startsWithCodePt "zoobar" {}"#, 'f' as u32),
+        false,
+        bool
+    );
+}
 
-// #[test]
-// fn str_ends_with() {
-//     assert_evals_to!(r#"Str.endsWith "hello world" "world""#, true, bool);
-//     assert_evals_to!(r#"Str.endsWith "nope" "hello world""#, false, bool);
-//     assert_evals_to!(r#"Str.endsWith "" "hello world""#, false, bool);
-// }
+#[test]
+fn str_ends_with() {
+    assert_evals_to!(r#"Str.endsWith "hello world" "world""#, true, bool);
+    assert_evals_to!(r#"Str.endsWith "nope" "hello world""#, false, bool);
+    assert_evals_to!(r#"Str.endsWith "" "hello world""#, false, bool);
+}
 
-// #[test]
-// fn str_count_graphemes_small_str() {
-//     assert_evals_to!(r#"Str.countGraphemes "å🤔""#, 2, usize);
-// }
+#[test]
+fn str_count_graphemes_small_str() {
+    assert_evals_to!(r#"Str.countGraphemes "å🤔""#, 2, usize);
+}
 
-// #[test]
-// fn str_count_graphemes_three_js() {
-//     assert_evals_to!(r#"Str.countGraphemes "JJJ""#, 3, usize);
-// }
+#[test]
+fn str_count_graphemes_three_js() {
+    assert_evals_to!(r#"Str.countGraphemes "JJJ""#, 3, usize);
+}
 
-// #[test]
-// fn str_count_graphemes_big_str() {
-//     assert_evals_to!(
-//         r#"Str.countGraphemes "6🤔å🤔e¥🤔çppkd🙃1jdal🦯asdfa∆ltråø˚waia8918.,🏅jjc""#,
-//         45,
-//         usize
-//     );
-// }
+#[test]
+fn str_count_graphemes_big_str() {
+    assert_evals_to!(
+        r#"Str.countGraphemes "6🤔å🤔e¥🤔çppkd🙃1jdal🦯asdfa∆ltråø˚waia8918.,🏅jjc""#,
+        45,
+        usize
+    );
+}
 
-// #[test]
-// fn str_starts_with_same_big_str() {
-//     assert_evals_to!(
-//         r#"Str.startsWith "123456789123456789" "123456789123456789""#,
-//         true,
-//         bool
-//     );
-// }
+#[test]
+fn str_starts_with_same_big_str() {
+    assert_evals_to!(
+        r#"Str.startsWith "123456789123456789" "123456789123456789""#,
+        true,
+        bool
+    );
+}
 
-// #[test]
-// fn str_starts_with_different_big_str() {
-//     assert_evals_to!(
-//         r#"Str.startsWith "12345678912345678910" "123456789123456789""#,
-//         true,
-//         bool
-//     );
-// }
+#[test]
+fn str_starts_with_different_big_str() {
+    assert_evals_to!(
+        r#"Str.startsWith "12345678912345678910" "123456789123456789""#,
+        true,
+        bool
+    );
+}
 
-// #[test]
-// fn str_starts_with_same_small_str() {
-//     assert_evals_to!(r#"Str.startsWith "1234" "1234""#, true, bool);
-// }
+#[test]
+fn str_starts_with_same_small_str() {
+    assert_evals_to!(r#"Str.startsWith "1234" "1234""#, true, bool);
+}
 
-// #[test]
-// fn str_starts_with_different_small_str() {
-//     assert_evals_to!(r#"Str.startsWith "1234" "12""#, true, bool);
-// }
-// #[test]
-// fn str_starts_with_false_small_str() {
-//     assert_evals_to!(r#"Str.startsWith "1234" "23""#, false, bool);
-// }
-
-// #[test]
-// fn str_from_int() {
-//     assert_evals_to!(
-//         r#"Str.fromInt 1234"#,
-//         roc_std::RocStr::from_slice("1234".as_bytes()),
-//         roc_std::RocStr
-//     );
-//     assert_evals_to!(
-//         r#"Str.fromInt 0"#,
-//         roc_std::RocStr::from_slice("0".as_bytes()),
-//         roc_std::RocStr
-//     );
-//     assert_evals_to!(
-//         r#"Str.fromInt -1"#,
-//         roc_std::RocStr::from_slice("-1".as_bytes()),
-//         roc_std::RocStr
-//     );
-
-//     let max = format!("{}", i64::MAX);
-//     assert_evals_to!(
-//         r#"Str.fromInt Num.maxInt"#,
-//         RocStr::from_slice(max.as_bytes()),
-//         RocStr
-//     );
-
-//     let min = format!("{}", i64::MIN);
-//     assert_evals_to!(
-//         r#"Str.fromInt Num.minInt"#,
-//         RocStr::from_slice(min.as_bytes()),
-//         RocStr
-//     );
-// }
+#[test]
+fn str_starts_with_different_small_str() {
+    assert_evals_to!(r#"Str.startsWith "1234" "12""#, true, bool);
+}
+#[test]
+fn str_starts_with_false_small_str() {
+    assert_evals_to!(r#"Str.startsWith "1234" "23""#, false, bool);
+}
 
 // #[test]
 // fn str_from_utf8_pass_single_ascii() {
@@ -732,17 +694,17 @@ fn small_str_concat_empty_first_arg() {
 //     );
 // }
 
-// #[test]
-// fn str_equality() {
-//     assert_evals_to!(r#""a" == "a""#, true, bool);
-//     assert_evals_to!(
-//         r#""loremipsumdolarsitamet" == "loremipsumdolarsitamet""#,
-//         true,
-//         bool
-//     );
-//     assert_evals_to!(r#""a" != "b""#, true, bool);
-//     assert_evals_to!(r#""a" == "b""#, false, bool);
-// }
+#[test]
+fn str_equality() {
+    assert_evals_to!(r#""a" == "a""#, true, bool);
+    assert_evals_to!(
+        r#""loremipsumdolarsitamet" == "loremipsumdolarsitamet""#,
+        true,
+        bool
+    );
+    assert_evals_to!(r#""a" != "b""#, true, bool);
+    assert_evals_to!(r#""a" == "b""#, false, bool);
+}
 
 // #[test]
 // fn nested_recursive_literal() {
@@ -763,8 +725,8 @@ fn small_str_concat_empty_first_arg() {
 //                                 |> Str.concat ") ("
 //                                 |> Str.concat (printExpr b)
 //                                 |> Str.concat ")"
-//                         Val v -> "Val " |> Str.concat (Str.fromInt v)
-//                         Var v -> "Var " |> Str.concat (Str.fromInt v)
+//                         Val v -> "Val " |> Str.concat (Num.toStr v)
+//                         Var v -> "Var " |> Str.concat (Num.toStr v)
 
 //                 printExpr expr
 //                 "#
@@ -774,50 +736,45 @@ fn small_str_concat_empty_first_arg() {
 //     );
 // }
 
-// #[test]
-// fn str_join_comma_small() {
-//     assert_evals_to!(
-//         r#"Str.joinWith ["1", "2"] ", " "#,
-//         RocStr::from("1, 2"),
-//         RocStr
-//     );
-// }
+#[test]
+fn str_join_comma_small() {
+    assert_evals_to!(
+        r#"Str.joinWith ["1", "2"] ", " "#,
+        RocStr::from("1, 2"),
+        RocStr
+    );
+}
 
-// #[test]
-// fn str_join_comma_big() {
-//     assert_evals_to!(
-//         r#"Str.joinWith ["10000000", "2000000", "30000000"] ", " "#,
-//         RocStr::from("10000000, 2000000, 30000000"),
-//         RocStr
-//     );
-// }
+#[test]
+fn str_join_comma_big() {
+    assert_evals_to!(
+        r#"Str.joinWith ["10000000", "2000000", "30000000"] ", " "#,
+        RocStr::from("10000000, 2000000, 30000000"),
+        RocStr
+    );
+}
 
-// #[test]
-// fn str_join_comma_single() {
-//     assert_evals_to!(r#"Str.joinWith ["1"] ", " "#, RocStr::from("1"), RocStr);
-// }
+#[test]
+fn str_join_comma_single() {
+    assert_evals_to!(r#"Str.joinWith ["1"] ", " "#, RocStr::from("1"), RocStr);
+}
 
-// #[test]
-// fn str_from_float() {
-//     assert_evals_to!(r#"Str.fromFloat 3.14"#, RocStr::from("3.14"), RocStr);
-// }
-
-// #[test]
-// fn str_to_utf8() {
-//     assert_evals_to!(
-//         r#"Str.toUtf8 "hello""#,
-//         RocList::from_slice(&[104, 101, 108, 108, 111]),
-//         RocList<u8>
-//     );
-//     assert_evals_to!(
-//         r#"Str.toUtf8 "this is a long string""#,
-//         RocList::from_slice(&[
-//             116, 104, 105, 115, 32, 105, 115, 32, 97, 32, 108, 111, 110, 103, 32, 115, 116, 114,
-//             105, 110, 103
-//         ]),
-//         RocList<u8>
-//     );
-// }
+#[test]
+fn str_to_utf8() {
+    assert_evals_to!(
+        r#"Str.toUtf8 "hello""#,
+        RocList::from_slice(&[104, 101, 108, 108, 111]),
+        RocList<u8>
+    );
+    assert_evals_to!(
+        r#"Str.toUtf8 "this is a long string""#,
+        RocList::from_slice(&[
+            116, 104, 105, 115, 32, 105, 115, 32, 97, 32, 108, 111, 110, 103, 32, 115, 116, 114,
+            105, 110, 103
+        ]),
+        RocList<u8>
+    );
+}
 
 // #[test]
 // fn str_from_utf8_range() {
@@ -934,121 +891,233 @@ fn small_str_concat_empty_first_arg() {
 //     );
 // }
 
-// #[test]
-// fn str_repeat_small() {
-//     assert_evals_to!(
-//         indoc!(r#"Str.repeat "Roc" 3"#),
-//         RocStr::from("RocRocRoc"),
-//         RocStr
-//     );
-// }
+#[test]
+fn str_repeat_small() {
+    assert_evals_to!(
+        indoc!(r#"Str.repeat "Roc" 2"#),
+        RocStr::from("RocRoc"),
+        RocStr
+    );
+}
 
-// #[test]
-// fn str_repeat_big() {
-//     assert_evals_to!(
-//         indoc!(r#"Str.repeat "more than 16 characters" 2"#),
-//         RocStr::from("more than 16 charactersmore than 16 characters"),
-//         RocStr
-//     );
-// }
+#[test]
+fn str_repeat_big() {
+    assert_evals_to!(
+        indoc!(r#"Str.repeat "more than 16 characters" 2"#),
+        RocStr::from("more than 16 charactersmore than 16 characters"),
+        RocStr
+    );
+}
 
-// #[test]
-// fn str_repeat_empty_string() {
-//     assert_evals_to!(indoc!(r#"Str.repeat "" 3"#), RocStr::from(""), RocStr);
-// }
+#[test]
+fn str_repeat_empty_string() {
+    assert_evals_to!(indoc!(r#"Str.repeat "" 3"#), RocStr::from(""), RocStr);
+}
 
-// #[test]
-// fn str_repeat_zero_times() {
-//     assert_evals_to!(indoc!(r#"Str.repeat "Roc" 0"#), RocStr::from(""), RocStr);
-// }
+#[test]
+fn str_repeat_zero_times() {
+    assert_evals_to!(indoc!(r#"Str.repeat "Roc" 0"#), RocStr::from(""), RocStr);
+}
 
-// #[test]
-// fn str_trim_empty_string() {
-//     assert_evals_to!(indoc!(r#"Str.trim """#), RocStr::from(""), RocStr);
-// }
+#[test]
+fn str_trim_empty_string() {
+    assert_evals_to!(indoc!(r#"Str.trim """#), RocStr::from(""), RocStr);
+}
 
-// #[test]
-// fn str_trim_small_blank_string() {
-//     assert_evals_to!(indoc!(r#"Str.trim " ""#), RocStr::from(""), RocStr);
-// }
+#[test]
+fn str_trim_small_blank_string() {
+    assert_evals_to!(indoc!(r#"Str.trim " ""#), RocStr::from(""), RocStr);
+}
 
-// #[test]
-// fn str_trim_small_to_small() {
-//     assert_evals_to!(
-//         indoc!(r#"Str.trim "  hello world  ""#),
-//         RocStr::from("hello world"),
-//         RocStr
-//     );
-// }
+#[test]
+fn str_trim_small_to_small() {
+    assert_evals_to!(
+        indoc!(r#"Str.trim " hello ""#),
+        RocStr::from("hello"),
+        RocStr
+    );
+}
 
-// #[test]
-// fn str_trim_large_to_large_unique() {
-//     assert_evals_to!(
-//         indoc!(r#"Str.trim (Str.concat "  " "hello world from a large string ")"#),
-//         RocStr::from("hello world from a large string"),
-//         RocStr
-//     );
-// }
+#[test]
+fn str_trim_large_to_large_unique() {
+    assert_evals_to!(
+        indoc!(r#"Str.trim (Str.concat "  " "hello world from a large string ")"#),
+        RocStr::from("hello world from a large string"),
+        RocStr
+    );
+}
 
-// #[test]
-// fn str_trim_large_to_small_unique() {
-//     assert_evals_to!(
-//         indoc!(r#"Str.trim (Str.concat "  " "hello world        ")"#),
-//         RocStr::from("hello world"),
-//         RocStr
-//     );
-// }
+#[test]
+fn str_trim_large_to_small_unique() {
+    assert_evals_to!(
+        indoc!(r#"Str.trim (Str.concat "  " "hello        ")"#),
+        RocStr::from("hello"),
+        RocStr
+    );
+}
 
-// #[test]
-// fn str_trim_large_to_large_shared() {
-//     assert_evals_to!(
-//         indoc!(
-//             r#"
-//                original : Str
-//                original = " hello world world "
+#[test]
+fn str_trim_large_to_large_shared() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+               original : Str
+               original = " hello world world "
 
-//                { trimmed: Str.trim original, original: original }
-//                "#
-//         ),
-//         (
-//             RocStr::from(" hello world world "),
-//             RocStr::from("hello world world"),
-//         ),
-//         (RocStr, RocStr)
-//     );
-// }
+               { trimmed: Str.trim original, original: original }
+               "#
+        ),
+        (
+            RocStr::from(" hello world world "),
+            RocStr::from("hello world world"),
+        ),
+        (RocStr, RocStr)
+    );
+}
 
-// #[test]
-// fn str_trim_large_to_small_shared() {
-//     assert_evals_to!(
-//         indoc!(
-//             r#"
-//                original : Str
-//                original = " hello world             "
+#[test]
+fn str_trim_large_to_small_shared() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+               original : Str
+               original = " hello             "
 
-//                { trimmed: Str.trim original, original: original }
-//                "#
-//         ),
-//         (
-//             RocStr::from(" hello world             "),
-//             RocStr::from("hello world"),
-//         ),
-//         (RocStr, RocStr)
-//     );
-// }
+               { trimmed: Str.trim original, original: original }
+               "#
+        ),
+        (RocStr::from(" hello             "), RocStr::from("hello"),),
+        (RocStr, RocStr)
+    );
+}
 
-// #[test]
-// fn str_trim_small_to_small_shared() {
-//     assert_evals_to!(
-//         indoc!(
-//             r#"
-//                original : Str
-//                original = " hello world "
+#[test]
+fn str_trim_small_to_small_shared() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+               original : Str
+               original = " hello "
 
-//                { trimmed: Str.trim original, original: original }
-//                "#
-//         ),
-//         (RocStr::from(" hello world "), RocStr::from("hello world"),),
-//         (RocStr, RocStr)
-//     );
-// }
+               { trimmed: Str.trim original, original: original }
+               "#
+        ),
+        (RocStr::from(" hello "), RocStr::from("hello"),),
+        (RocStr, RocStr)
+    );
+}
+
+#[test]
+fn str_trim_left_small_blank_string() {
+    assert_evals_to!(indoc!(r#"Str.trimLeft " ""#), RocStr::from(""), RocStr);
+}
+
+#[test]
+fn str_trim_left_small_to_small() {
+    assert_evals_to!(
+        indoc!(r#"Str.trimLeft "  hello  ""#),
+        RocStr::from("hello  "),
+        RocStr
+    );
+}
+
+#[test]
+fn str_trim_left_large_to_large_unique() {
+    assert_evals_to!(
+        indoc!(r#"Str.trimLeft (Str.concat "    " "hello world from a large string ")"#),
+        RocStr::from("hello world from a large string "),
+        RocStr
+    );
+}
+
+#[test]
+fn str_trim_left_large_to_small_unique() {
+    assert_evals_to!(
+        indoc!(r#"Str.trimLeft (Str.concat "  " "hello  ")"#),
+        RocStr::from("hello  "),
+        RocStr
+    );
+}
+
+#[test]
+fn str_trim_right_small_blank_string() {
+    assert_evals_to!(indoc!(r#"Str.trimRight " ""#), RocStr::from(""), RocStr);
+}
+
+#[test]
+fn str_trim_right_small_to_small() {
+    assert_evals_to!(
+        indoc!(r#"Str.trimRight " hello ""#),
+        RocStr::from(" hello"),
+        RocStr
+    );
+}
+
+#[test]
+fn str_trim_right_large_to_large_unique() {
+    assert_evals_to!(
+        indoc!(r#"Str.trimRight (Str.concat " hello world from a large string" "    ")"#),
+        RocStr::from(" hello world from a large string"),
+        RocStr
+    );
+}
+
+#[test]
+fn str_trim_right_large_to_small_unique() {
+    assert_evals_to!(
+        indoc!(r#"Str.trimRight (Str.concat "  hello" "  ")"#),
+        RocStr::from("  hello"),
+        RocStr
+    );
+}
+
+#[test]
+fn str_trim_right_large_to_large_shared() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+               original : Str
+               original = " hello world world "
+
+               { trimmed: Str.trimRight original, original: original }
+               "#
+        ),
+        (
+            RocStr::from(" hello world world "),
+            RocStr::from(" hello world world"),
+        ),
+        (RocStr, RocStr)
+    );
+}
+
+#[test]
+fn str_trim_right_large_to_small_shared() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+               original : Str
+               original = "  hello "
+
+               { trimmed: Str.trimRight original, original: original }
+               "#
+        ),
+        (RocStr::from("  hello "), RocStr::from("  hello"),),
+        (RocStr, RocStr)
+    );
+}
+
+#[test]
+fn str_trim_right_small_to_small_shared() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+               original : Str
+               original = " hello "
+
+               { trimmed: Str.trimRight original, original: original }
+               "#
+        ),
+        (RocStr::from(" hello "), RocStr::from(" hello"),),
+        (RocStr, RocStr)
+    );
+}

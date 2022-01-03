@@ -123,17 +123,7 @@ fn hash_builtin<'a, 'ctx, 'env>(
     let ptr_bytes = env.ptr_bytes;
 
     match builtin {
-        Builtin::Int128
-        | Builtin::Int64
-        | Builtin::Int32
-        | Builtin::Int16
-        | Builtin::Int8
-        | Builtin::Int1
-        | Builtin::Float64
-        | Builtin::Float32
-        | Builtin::Float128
-        | Builtin::Decimal
-        | Builtin::Usize => {
+        Builtin::Int(_) | Builtin::Float(_) | Builtin::Bool | Builtin::Decimal => {
             let hash_bytes = store_and_use_as_u8_ptr(env, val, layout);
             hash_bitcode_fn(env, seed, hash_bytes, layout.stack_size(ptr_bytes))
         }
@@ -145,9 +135,6 @@ fn hash_builtin<'a, 'ctx, 'env>(
                 bitcode::DICT_HASH_STR,
             )
             .into_int_value()
-        }
-        Builtin::EmptyStr | Builtin::EmptyDict | Builtin::EmptyList | Builtin::EmptySet => {
-            hash_empty_collection(seed)
         }
 
         Builtin::Dict(_, _) => {
@@ -340,7 +327,6 @@ fn build_hash_tag<'a, 'ctx, 'env>(
             let seed_type = env.context.i64_type();
 
             let arg_type = basic_type_from_layout_1(env, layout);
-            dbg!(layout, arg_type);
 
             let function_value = crate::llvm::refcounting::build_header_help(
                 env,
@@ -360,7 +346,7 @@ fn build_hash_tag<'a, 'ctx, 'env>(
         .set_current_debug_location(env.context, di_location);
     let call = env
         .builder
-        .build_call(function, &[seed.into(), value], "struct_hash");
+        .build_call(function, &[seed.into(), value.into()], "struct_hash");
 
     call.set_call_convention(FAST_CALL_CONV);
 
@@ -456,9 +442,15 @@ fn hash_tag<'a, 'ctx, 'env>(
 
             env.builder.position_at_end(entry_block);
 
-            let default = cases.pop().unwrap().1;
-
-            env.builder.build_switch(current_tag_id, default, &cases);
+            match cases.pop() {
+                Some((_, default)) => {
+                    env.builder.build_switch(current_tag_id, default, &cases);
+                }
+                None => {
+                    // we're hashing empty tag unions; this code is effectively unreachable
+                    env.builder.build_unreachable();
+                }
+            }
         }
         Recursive(tags) => {
             let current_tag_id = get_tag_id(env, parent, union_layout, tag);
@@ -800,10 +792,6 @@ fn hash_list<'a, 'ctx, 'env>(
 }
 
 fn hash_null(seed: IntValue<'_>) -> IntValue<'_> {
-    seed
-}
-
-fn hash_empty_collection(seed: IntValue<'_>) -> IntValue<'_> {
     seed
 }
 

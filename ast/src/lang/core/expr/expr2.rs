@@ -1,4 +1,4 @@
-use arraystring::{typenum::U30, ArrayString};
+use arrayvec::ArrayString;
 use roc_types::subs::Variable;
 
 use crate::{
@@ -6,13 +6,14 @@ use crate::{
     mem_pool::{pool::NodeId, pool_str::PoolStr, pool_vec::PoolVec},
 };
 use roc_can::expr::Recursive;
+use roc_module::called_via::CalledVia;
 use roc_module::low_level::LowLevel;
-use roc_module::operator::CalledVia;
 use roc_module::symbol::Symbol;
 
 use super::record_field::RecordField;
 
-pub type ArrString = ArrayString<U30>;
+pub const ARR_STRING_CAPACITY: usize = 24;
+pub type ArrString = ArrayString<ARR_STRING_CAPACITY>;
 
 // TODO make the inner types private?
 pub type ExprId = NodeId<Expr2>;

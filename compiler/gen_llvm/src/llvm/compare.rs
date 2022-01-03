@@ -10,8 +10,11 @@ use inkwell::values::{
 };
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
 use roc_builtins::bitcode;
+use roc_builtins::bitcode::{FloatWidth, IntWidth};
 use roc_module::symbol::Symbol;
 use roc_mono::layout::{Builtin, Layout, LayoutIds, UnionLayout};
+
+use super::build::load_roc_value;
 
 #[derive(Clone, Debug)]
 enum WhenRecursive<'a> {
@@ -88,19 +91,39 @@ fn build_eq_builtin<'a, 'ctx, 'env>(
     };
 
     match builtin {
-        Builtin::Int128 => int_cmp(IntPredicate::EQ, "eq_i128"),
-        Builtin::Int64 => int_cmp(IntPredicate::EQ, "eq_i64"),
-        Builtin::Int32 => int_cmp(IntPredicate::EQ, "eq_i32"),
-        Builtin::Int16 => int_cmp(IntPredicate::EQ, "eq_i16"),
-        Builtin::Int8 => int_cmp(IntPredicate::EQ, "eq_i8"),
-        Builtin::Int1 => int_cmp(IntPredicate::EQ, "eq_i1"),
+        Builtin::Int(int_width) => {
+            use IntWidth::*;
 
-        Builtin::Usize => int_cmp(IntPredicate::EQ, "eq_usize"),
+            let name = match int_width {
+                I128 => "eq_i128",
+                I64 => "eq_i64",
+                I32 => "eq_i32",
+                I16 => "eq_i16",
+                I8 => "eq_i8",
+                U128 => "eq_u128",
+                U64 => "eq_u64",
+                U32 => "eq_u32",
+                U16 => "eq_u16",
+                U8 => "eq_u8",
+            };
 
+            int_cmp(IntPredicate::EQ, name)
+        }
+
+        Builtin::Float(float_width) => {
+            use FloatWidth::*;
+
+            let name = match float_width {
+                F128 => "eq_f128",
+                F64 => "eq_f64",
+                F32 => "eq_f32",
+            };
+
+            float_cmp(FloatPredicate::OEQ, name)
+        }
+
+        Builtin::Bool => int_cmp(IntPredicate::EQ, "eq_i1"),
         Builtin::Decimal => call_bitcode_fn(env, &[lhs_val, rhs_val], bitcode::DEC_EQ),
-        Builtin::Float128 => float_cmp(FloatPredicate::OEQ, "eq_f128"),
-        Builtin::Float64 => float_cmp(FloatPredicate::OEQ, "eq_f64"),
-        Builtin::Float32 => float_cmp(FloatPredicate::OEQ, "eq_f32"),
 
         Builtin::Str => str_equal(env, lhs_val, rhs_val),
         Builtin::List(elem) => build_list_eq(
@@ -114,12 +137,6 @@ fn build_eq_builtin<'a, 'ctx, 'env>(
         ),
         Builtin::Set(_elem) => todo!("equality on Set"),
         Builtin::Dict(_key, _value) => todo!("equality on Dict"),
-
-        // empty structures are always equal to themselves
-        Builtin::EmptyStr => env.context.bool_type().const_int(1, false).into(),
-        Builtin::EmptyList => env.context.bool_type().const_int(1, false).into(),
-        Builtin::EmptyDict => env.context.bool_type().const_int(1, false).into(),
-        Builtin::EmptySet => env.context.bool_type().const_int(1, false).into(),
     }
 }
 
@@ -231,19 +248,39 @@ fn build_neq_builtin<'a, 'ctx, 'env>(
     };
 
     match builtin {
-        Builtin::Int128 => int_cmp(IntPredicate::NE, "neq_i128"),
-        Builtin::Int64 => int_cmp(IntPredicate::NE, "neq_i64"),
-        Builtin::Int32 => int_cmp(IntPredicate::NE, "neq_i32"),
-        Builtin::Int16 => int_cmp(IntPredicate::NE, "neq_i16"),
-        Builtin::Int8 => int_cmp(IntPredicate::NE, "neq_i8"),
-        Builtin::Int1 => int_cmp(IntPredicate::NE, "neq_i1"),
+        Builtin::Int(int_width) => {
+            use IntWidth::*;
 
-        Builtin::Usize => int_cmp(IntPredicate::NE, "neq_usize"),
+            let name = match int_width {
+                I128 => "neq_i128",
+                I64 => "neq_i64",
+                I32 => "neq_i32",
+                I16 => "neq_i16",
+                I8 => "neq_i8",
+                U128 => "neq_u128",
+                U64 => "neq_u64",
+                U32 => "neq_u32",
+                U16 => "neq_u16",
+                U8 => "neq_u8",
+            };
 
+            int_cmp(IntPredicate::NE, name)
+        }
+
+        Builtin::Float(float_width) => {
+            use FloatWidth::*;
+
+            let name = match float_width {
+                F128 => "neq_f128",
+                F64 => "neq_f64",
+                F32 => "neq_f32",
+            };
+
+            float_cmp(FloatPredicate::ONE, name)
+        }
+
+        Builtin::Bool => int_cmp(IntPredicate::NE, "neq_i1"),
         Builtin::Decimal => call_bitcode_fn(env, &[lhs_val, rhs_val], bitcode::DEC_NEQ),
-        Builtin::Float128 => float_cmp(FloatPredicate::ONE, "neq_f128"),
-        Builtin::Float64 => float_cmp(FloatPredicate::ONE, "neq_f64"),
-        Builtin::Float32 => float_cmp(FloatPredicate::ONE, "neq_f32"),
 
         Builtin::Str => {
             let is_equal = str_equal(env, lhs_val, rhs_val).into_int_value();
@@ -269,12 +306,6 @@ fn build_neq_builtin<'a, 'ctx, 'env>(
         }
         Builtin::Set(_elem) => todo!("equality on Set"),
         Builtin::Dict(_key, _value) => todo!("equality on Dict"),
-
-        // empty structures are always equal to themselves
-        Builtin::EmptyStr => env.context.bool_type().const_int(0, false).into(),
-        Builtin::EmptyList => env.context.bool_type().const_int(0, false).into(),
-        Builtin::EmptyDict => env.context.bool_type().const_int(0, false).into(),
-        Builtin::EmptySet => env.context.bool_type().const_int(0, false).into(),
     }
 }
 
@@ -492,13 +523,13 @@ fn build_list_eq_help<'a, 'ctx, 'env>(
             let elem1 = {
                 let elem_ptr =
                     unsafe { builder.build_in_bounds_gep(ptr1, &[curr_index], "load_index") };
-                builder.build_load(elem_ptr, "get_elem")
+                load_roc_value(env, *element_layout, elem_ptr, "get_elem")
             };
 
             let elem2 = {
                 let elem_ptr =
                     unsafe { builder.build_in_bounds_gep(ptr2, &[curr_index], "load_index") };
-                builder.build_load(elem_ptr, "get_elem")
+                load_roc_value(env, *element_layout, elem_ptr, "get_elem")
             };
 
             let are_equal = build_eq(
@@ -773,7 +804,9 @@ fn build_tag_eq<'a, 'ctx, 'env>(
     env.builder.position_at_end(block);
     env.builder
         .set_current_debug_location(env.context, di_location);
-    let call = env.builder.build_call(function, &[tag1, tag2], "tag_eq");
+    let call = env
+        .builder
+        .build_call(function, &[tag1.into(), tag2.into()], "tag_eq");
 
     call.set_call_convention(FAST_CALL_CONV);
 
@@ -841,6 +874,10 @@ fn build_tag_eq_help<'a, 'ctx, 'env>(
     use UnionLayout::*;
 
     match union_layout {
+        NonRecursive(&[]) => {
+            // we're comparing empty tag unions; this code is effectively unreachable
+            env.builder.build_unreachable();
+        }
         NonRecursive(tags) => {
             let ptr_equal = env.builder.build_int_compare(
                 IntPredicate::EQ,
@@ -901,9 +938,15 @@ fn build_tag_eq_help<'a, 'ctx, 'env>(
 
             env.builder.position_at_end(compare_tag_fields);
 
-            let default = cases.pop().unwrap().1;
-
-            env.builder.build_switch(id1, default, &cases);
+            match cases.pop() {
+                Some((_, default)) => {
+                    env.builder.build_switch(id1, default, &cases);
+                }
+                None => {
+                    // we're comparing empty tag unions; this code is effectively unreachable
+                    env.builder.build_unreachable();
+                }
+            }
         }
         Recursive(tags) => {
             let ptr_equal = env.builder.build_int_compare(

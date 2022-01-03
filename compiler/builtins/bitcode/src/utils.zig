@@ -92,18 +92,23 @@ pub const REFCOUNT_ONE_ISIZE: isize = std.math.minInt(isize);
 pub const REFCOUNT_ONE: usize = @bitCast(usize, REFCOUNT_ONE_ISIZE);
 
 pub const IntWidth = enum(u8) {
-    U8,
-    U16,
-    U32,
-    U64,
-    U128,
-    I8,
-    I16,
-    I32,
-    I64,
-    I128,
-    Usize,
+    U8 = 0,
+    U16 = 1,
+    U32 = 2,
+    U64 = 3,
+    U128 = 4,
+    I8 = 5,
+    I16 = 6,
+    I32 = 7,
+    I64 = 8,
+    I128 = 9,
 };
+
+pub fn increfC(ptr_to_refcount: *isize, amount: isize) callconv(.C) void {
+    var refcount = ptr_to_refcount.*;
+    var masked_amount = if (refcount == REFCOUNT_MAX_ISIZE) 0 else amount;
+    ptr_to_refcount.* = refcount + masked_amount;
+}
 
 pub fn decrefC(
     bytes_or_null: ?[*]isize,
@@ -242,7 +247,7 @@ pub const RocResult = extern struct {
         // - the tag is the first field
         // - the tag is usize bytes wide
         // - Ok has tag_id 1, because Err < Ok
-        const usizes: [*]usize = @ptrCast([*]usize, @alignCast(8, self.bytes));
+        const usizes: [*]usize = @ptrCast([*]usize, @alignCast(@alignOf(usize), self.bytes));
 
         return usizes[0] == 1;
     }
@@ -262,3 +267,17 @@ pub const UpdateMode = enum(u8) {
     Immutable = 0,
     InPlace = 1,
 };
+
+test "increfC, refcounted data" {
+    var mock_rc: isize = REFCOUNT_ONE_ISIZE + 17;
+    var ptr_to_refcount: *isize = &mock_rc;
+    increfC(ptr_to_refcount, 2);
+    try std.testing.expectEqual(mock_rc, REFCOUNT_ONE_ISIZE + 19);
+}
+
+test "increfC, static data" {
+    var mock_rc: isize = REFCOUNT_MAX_ISIZE;
+    var ptr_to_refcount: *isize = &mock_rc;
+    increfC(ptr_to_refcount, 2);
+    try std.testing.expectEqual(mock_rc, REFCOUNT_MAX_ISIZE);
+}
