@@ -2270,6 +2270,116 @@ fn generate_runtime_error_function<'a>(
     }
 }
 
+fn call_closure_representation<'a>(
+    env: &mut Env<'a, '_>,
+    proc_name: Symbol,
+    closure_representation: ClosureRepresentation<'a>,
+    captured: &[(Symbol, Variable)],
+    mut specialized_body: Stmt<'a>,
+) -> Stmt<'a> {
+    match closure_representation {
+        ClosureRepresentation::Union {
+            alphabetic_order_fields: field_layouts,
+            union_layout,
+            tag_id,
+            ..
+        } => {
+            debug_assert!(matches!(union_layout, UnionLayout::NonRecursive(_)));
+            debug_assert_eq!(field_layouts.len(), captured.len());
+
+            // captured variables are in symbol-alphabetic order, but now we want
+            // them ordered by their alignment requirements
+            let mut combined = Vec::from_iter_in(
+                captured.iter().map(|(x, _)| x).zip(field_layouts.iter()),
+                env.arena,
+            );
+
+            let ptr_bytes = env.target_info;
+
+            combined.sort_by(|(_, layout1), (_, layout2)| {
+                let size1 = layout1.alignment_bytes(ptr_bytes);
+                let size2 = layout2.alignment_bytes(ptr_bytes);
+
+                size2.cmp(&size1)
+            });
+
+            for (index, (symbol, layout)) in combined.iter().enumerate() {
+                let expr = Expr::UnionAtIndex {
+                    tag_id,
+                    structure: Symbol::ARG_CLOSURE,
+                    index: index as u64,
+                    union_layout,
+                };
+
+                specialized_body =
+                    Stmt::Let(**symbol, expr, **layout, env.arena.alloc(specialized_body));
+            }
+        }
+        ClosureRepresentation::AlphabeticOrderStruct(field_layouts) => {
+            // captured variables are in symbol-alphabetic order, but now we want
+            // them ordered by their alignment requirements
+            let mut combined = Vec::from_iter_in(
+                captured.iter().map(|(x, _)| x).zip(field_layouts.iter()),
+                env.arena,
+            );
+
+            let ptr_bytes = env.target_info;
+
+            combined.sort_by(|(_, layout1), (_, layout2)| {
+                let size1 = layout1.alignment_bytes(ptr_bytes);
+                let size2 = layout2.alignment_bytes(ptr_bytes);
+
+                size2.cmp(&size1)
+            });
+
+            debug_assert_eq!(
+                captured.len(),
+                field_layouts.len(),
+                "{:?} captures {:?} but has layout {:?}",
+                proc_name,
+                &captured,
+                &field_layouts
+            );
+
+            for (index, (symbol, layout)) in combined.iter().enumerate() {
+                let expr = Expr::StructAtIndex {
+                    index: index as _,
+                    field_layouts,
+                    structure: Symbol::ARG_CLOSURE,
+                };
+
+                specialized_body =
+                    Stmt::Let(**symbol, expr, **layout, env.arena.alloc(specialized_body));
+            }
+            //                                    let symbol = captured[0].0;
+            //
+            //                                    substitute_in_exprs(
+            //                                        env.arena,
+            //                                        &mut specialized_body,
+            //                                        symbol,
+            //                                        Symbol::ARG_CLOSURE,
+            //                                    );
+        }
+
+        ClosureRepresentation::Other(layout) => match layout {
+            Layout::Builtin(Builtin::Bool) => {
+                // just ignore this value
+                // IDEA don't pass this value in the future
+            }
+            Layout::Builtin(Builtin::Int(IntWidth::U8)) => {
+                // just ignore this value
+                // IDEA don't pass this value in the future
+            }
+            other => {
+                // NOTE other values always should be wrapped in a 1-element record
+                unreachable!("{:?} is not a valid closure data representation", other)
+            }
+        },
+    }
+
+    specialized_body
+}
+
 fn specialize_external<'a>(
     env: &mut Env<'a, '_>,
     procs: &mut Procs<'a>,
@@ -2452,118 +2562,24 @@ fn specialize_external<'a>(
         } => {
             // unpack the closure symbols, if any
             match (opt_closure_layout, captured_symbols) {
-                (Some(closure_layout), CapturedSymbols::Captured(captured)) => {
+                (Some(lambda_set), CapturedSymbols::Captured(captured)) => {
                     // debug_assert!(!captured.is_empty());
 
-                    match closure_layout.layout_for_member(proc_name) {
-                        ClosureRepresentation::Union {
-                            alphabetic_order_fields: field_layouts,
-                            union_layout,
-                            tag_id,
-                            ..
-                        } => {
-                            debug_assert!(matches!(union_layout, UnionLayout::NonRecursive(_)));
-                            debug_assert_eq!(field_layouts.len(), captured.len());
-
-                            // captured variables are in symbol-alphabetic order, but now we want
-                            // them ordered by their alignment requirements
-                            let mut combined = Vec::from_iter_in(
-                                captured.iter().map(|(x, _)| x).zip(field_layouts.iter()),
-                                env.arena,
-                            );
-
-                            let ptr_bytes = env.target_info;
-
-                            combined.sort_by(|(_, layout1), (_, layout2)| {
-                                let size1 = layout1.alignment_bytes(ptr_bytes);
-                                let size2 = layout2.alignment_bytes(ptr_bytes);
-
-                                size2.cmp(&size1)
-                            });
-
-                            for (index, (symbol, layout)) in combined.iter().enumerate() {
-                                let expr = Expr::UnionAtIndex {
-                                    tag_id,
-                                    structure: Symbol::ARG_CLOSURE,
-                                    index: index as u64,
-                                    union_layout,
-                                };
-
-                                specialized_body = Stmt::Let(
-                                    **symbol,
-                                    expr,
-                                    **layout,
-                                    env.arena.alloc(specialized_body),
-                                );
-                            }
-                        }
-                        ClosureRepresentation::AlphabeticOrderStruct(field_layouts) => {
-                            // captured variables are in symbol-alphabetic order, but now we want
-                            // them ordered by their alignment requirements
-                            let mut combined = Vec::from_iter_in(
-                                captured.iter().map(|(x, _)| x).zip(field_layouts.iter()),
-                                env.arena,
-                            );
-
-                            let ptr_bytes = env.target_info;
-
-                            combined.sort_by(|(_, layout1), (_, layout2)| {
-                                let size1 = layout1.alignment_bytes(ptr_bytes);
-                                let size2 = layout2.alignment_bytes(ptr_bytes);
-
-                                size2.cmp(&size1)
-                            });
-
-                            debug_assert_eq!(
-                                captured.len(),
-                                field_layouts.len(),
-                                "{:?} captures {:?} but has layout {:?}",
+                    match lambda_set.layout_for_member(proc_name) {
+                        Some(representation) => {
+                            // call the function with the closure
+                            specialized_body = call_closure_representation(
+                                env,
                                 proc_name,
-                                &captured,
-                                &field_layouts
+                                representation,
+                                captured,
+                                specialized_body,
                             );
-
-                            for (index, (symbol, layout)) in combined.iter().enumerate() {
-                                let expr = Expr::StructAtIndex {
-                                    index: index as _,
-                                    field_layouts,
-                                    structure: Symbol::ARG_CLOSURE,
-                                };
-
-                                specialized_body = Stmt::Let(
-                                    **symbol,
-                                    expr,
-                                    **layout,
-                                    env.arena.alloc(specialized_body),
-                                );
-                            }
-                            //                                    let symbol = captured[0].0;
-                            //
-                            //                                    substitute_in_exprs(
-                            //                                        env.arena,
-                            //                                        &mut specialized_body,
-                            //                                        symbol,
-                            //                                        Symbol::ARG_CLOSURE,
-                            //                                    );
                         }
-
-                        ClosureRepresentation::Other(layout) => match layout {
-                            Layout::Builtin(Builtin::Bool) => {
-                                // just ignore this value
-                                // IDEA don't pass this value in the future
-                            }
-                            Layout::Builtin(Builtin::Int(IntWidth::U8)) => {
-                                // just ignore this value
-                                // IDEA don't pass this value in the future
-                            }
-                            other => {
-                                // NOTE other values always should be wrapped in a 1-element record
-                                unreachable!(
-                                    "{:?} is not a valid closure data representation",
-                                    other
-                                )
-                            }
-                        },
+                        None => {
+                            // here we must build the closure value
+                            todo!()
+                        }
                     }
                 }
                 (None, CapturedSymbols::None) | (None, CapturedSymbols::Captured([])) => {}
@@ -4573,110 +4589,127 @@ fn construct_closure_data<'a>(
 ) -> Stmt<'a> {
     let lambda_set_layout = Layout::LambdaSet(lambda_set);
 
-    let mut result = match lambda_set.layout_for_member(name) {
-        ClosureRepresentation::Union {
-            tag_id,
-            alphabetic_order_fields: field_layouts,
-            tag_name,
-            union_layout,
-        } => {
-            // captured variables are in symbol-alphabetic order, but now we want
-            // them ordered by their alignment requirements
-            let mut combined = Vec::from_iter_in(
-                symbols.iter().map(|&&(s, _)| s).zip(field_layouts.iter()),
-                env.arena,
-            );
+    match lambda_set.layout_for_member(name) {
+        None => {
+            // TODO invalid
+            dbg!(symbols);
+            hole.clone()
+        }
+        Some(representation) => {
+            let mut result = match representation {
+                ClosureRepresentation::Union {
+                    tag_id,
+                    alphabetic_order_fields: field_layouts,
+                    tag_name,
+                    union_layout,
+                } => {
+                    // captured variables are in symbol-alphabetic order, but now we want
+                    // them ordered by their alignment requirements
+                    let mut combined = Vec::from_iter_in(
+                        symbols.iter().map(|&&(s, _)| s).zip(field_layouts.iter()),
+                        env.arena,
+                    );
 
-            let ptr_bytes = env.target_info;
+                    let ptr_bytes = env.target_info;
 
-            combined.sort_by(|(_, layout1), (_, layout2)| {
-                let size1 = layout1.alignment_bytes(ptr_bytes);
-                let size2 = layout2.alignment_bytes(ptr_bytes);
+                    combined.sort_by(|(_, layout1), (_, layout2)| {
+                        let size1 = layout1.alignment_bytes(ptr_bytes);
+                        let size2 = layout2.alignment_bytes(ptr_bytes);
 
-                size2.cmp(&size1)
-            });
+                        size2.cmp(&size1)
+                    });
 
-            let symbols =
-                Vec::from_iter_in(combined.iter().map(|(a, _)| *a), env.arena).into_bump_slice();
+                    let symbols = Vec::from_iter_in(combined.iter().map(|(a, _)| *a), env.arena)
+                        .into_bump_slice();
 
-            let expr = Expr::Tag {
-                tag_id,
-                tag_layout: union_layout,
-                tag_name,
-                arguments: symbols,
+                    let expr = Expr::Tag {
+                        tag_id,
+                        tag_layout: union_layout,
+                        tag_name,
+                        arguments: symbols,
+                    };
+
+                    Stmt::Let(assigned, expr, lambda_set_layout, env.arena.alloc(hole))
+                }
+                ClosureRepresentation::AlphabeticOrderStruct(field_layouts) => {
+                    debug_assert_eq!(field_layouts.len(), symbols.len());
+
+                    // captured variables are in symbol-alphabetic order, but now we want
+                    // them ordered by their alignment requirements
+                    let mut combined = Vec::from_iter_in(
+                        symbols.iter().map(|&(s, _)| s).zip(field_layouts.iter()),
+                        env.arena,
+                    );
+
+                    let ptr_bytes = env.target_info;
+
+                    combined.sort_by(|(_, layout1), (_, layout2)| {
+                        let size1 = layout1.alignment_bytes(ptr_bytes);
+                        let size2 = layout2.alignment_bytes(ptr_bytes);
+
+                        size2.cmp(&size1)
+                    });
+
+                    let symbols = Vec::from_iter_in(combined.iter().map(|(a, _)| **a), env.arena)
+                        .into_bump_slice();
+                    let field_layouts =
+                        Vec::from_iter_in(combined.iter().map(|(_, b)| **b), env.arena)
+                            .into_bump_slice();
+
+                    debug_assert_eq!(
+                        Layout::Struct(field_layouts),
+                        lambda_set.runtime_representation()
+                    );
+
+                    let expr = Expr::Struct(symbols);
+
+                    Stmt::Let(assigned, expr, lambda_set_layout, hole)
+                }
+                ClosureRepresentation::Other(Layout::Builtin(Builtin::Bool)) => {
+                    debug_assert_eq!(symbols.len(), 0);
+
+                    debug_assert_eq!(lambda_set.set.len(), 2);
+                    let tag_id = name != lambda_set.set[0].0;
+                    let expr = Expr::Literal(Literal::Bool(tag_id));
+
+                    Stmt::Let(assigned, expr, lambda_set_layout, hole)
+                }
+                ClosureRepresentation::Other(Layout::Builtin(Builtin::Int(IntWidth::U8))) => {
+                    debug_assert_eq!(symbols.len(), 0);
+
+                    debug_assert!(lambda_set.set.len() > 2);
+                    let tag_id = lambda_set.set.iter().position(|(s, _)| *s == name).unwrap() as u8;
+                    let expr = Expr::Literal(Literal::Byte(tag_id));
+
+                    Stmt::Let(assigned, expr, lambda_set_layout, hole)
+                }
+                _ => unreachable!(),
             };
 
-            Stmt::Let(assigned, expr, lambda_set_layout, env.arena.alloc(hole))
-        }
-        ClosureRepresentation::AlphabeticOrderStruct(field_layouts) => {
-            debug_assert_eq!(field_layouts.len(), symbols.len());
+            // Some of the captured symbols may be references to polymorphic expressions,
+            // which have not been specialized yet. We need to perform those
+            // specializations now so that there are real symbols to capture.
+            //
+            // TODO: this is not quite right. What we should actually be doing is removing references to
+            // polymorphic expressions from the captured symbols, and allowing the specializations of those
+            // symbols to be inlined when specializing the closure body elsewhere.
+            for &&(symbol, var) in symbols {
+                if procs.partial_exprs.contains(symbol) {
+                    result = reuse_function_symbol(
+                        env,
+                        procs,
+                        layout_cache,
+                        Some(var),
+                        symbol,
+                        result,
+                        symbol,
+                    );
+                }
+            }
 
-            // captured variables are in symbol-alphabetic order, but now we want
-            // them ordered by their alignment requirements
-            let mut combined = Vec::from_iter_in(
-                symbols.iter().map(|&(s, _)| s).zip(field_layouts.iter()),
-                env.arena,
-            );
-
-            let ptr_bytes = env.target_info;
-
-            combined.sort_by(|(_, layout1), (_, layout2)| {
-                let size1 = layout1.alignment_bytes(ptr_bytes);
-                let size2 = layout2.alignment_bytes(ptr_bytes);
-
-                size2.cmp(&size1)
-            });
-
-            let symbols =
-                Vec::from_iter_in(combined.iter().map(|(a, _)| **a), env.arena).into_bump_slice();
-            let field_layouts =
-                Vec::from_iter_in(combined.iter().map(|(_, b)| **b), env.arena).into_bump_slice();
-
-            debug_assert_eq!(
-                Layout::Struct(field_layouts),
-                lambda_set.runtime_representation()
-            );
-
-            let expr = Expr::Struct(symbols);
-
-            Stmt::Let(assigned, expr, lambda_set_layout, hole)
-        }
-        ClosureRepresentation::Other(Layout::Builtin(Builtin::Bool)) => {
-            debug_assert_eq!(symbols.len(), 0);
-
-            debug_assert_eq!(lambda_set.set.len(), 2);
-            let tag_id = name != lambda_set.set[0].0;
-            let expr = Expr::Literal(Literal::Bool(tag_id));
-
-            Stmt::Let(assigned, expr, lambda_set_layout, hole)
-        }
-        ClosureRepresentation::Other(Layout::Builtin(Builtin::Int(IntWidth::U8))) => {
-            debug_assert_eq!(symbols.len(), 0);
-
-            debug_assert!(lambda_set.set.len() > 2);
-            let tag_id = lambda_set.set.iter().position(|(s, _)| *s == name).unwrap() as u8;
-            let expr = Expr::Literal(Literal::Byte(tag_id));
-
-            Stmt::Let(assigned, expr, lambda_set_layout, hole)
-        }
-        _ => unreachable!(),
-    };
-
-    // Some of the captured symbols may be references to polymorphic expressions,
-    // which have not been specialized yet. We need to perform those
-    // specializations now so that there are real symbols to capture.
-    //
-    // TODO: this is not quite right. What we should actually be doing is removing references to
-    // polymorphic expressions from the captured symbols, and allowing the specializations of those
-    // symbols to be inlined when specializing the closure body elsewhere.
-    for &&(symbol, var) in symbols {
-        if procs.partial_exprs.contains(symbol) {
-            result =
-                reuse_function_symbol(env, procs, layout_cache, Some(var), symbol, result, symbol);
+            result
         }
     }
-
-    result
 }
 
 #[allow(clippy::too_many_arguments)]

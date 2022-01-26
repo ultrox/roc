@@ -590,7 +590,8 @@ impl<'a> LambdaSet<'a> {
     }
 
     pub fn member_does_not_need_closure_argument(&self, function_symbol: Symbol) -> bool {
-        match self.layout_for_member(function_symbol) {
+        // TODO what if the unwrap panics?
+        match self.layout_for_member(function_symbol).unwrap() {
             ClosureRepresentation::Union {
                 alphabetic_order_fields,
                 ..
@@ -600,13 +601,12 @@ impl<'a> LambdaSet<'a> {
         }
     }
 
-    pub fn layout_for_member(&self, function_symbol: Symbol) -> ClosureRepresentation<'a> {
-        debug_assert!(
-            self.set.iter().any(|(s, _)| *s == function_symbol),
-            "function symbol not in set"
-        );
+    pub fn layout_for_member(&self, function_symbol: Symbol) -> Option<ClosureRepresentation<'a>> {
+        if !self.set.iter().any(|(s, _)| *s == function_symbol) {
+            return None;
+        }
 
-        match self.representation {
+        let representation = match self.representation {
             Layout::Union(union) => {
                 // here we rely on the fact that a union in a closure would be stored in a one-element record.
                 // a closure representation that is itself union must be a of the shape `Closure1 ... | Closure2 ...`
@@ -652,7 +652,9 @@ impl<'a> LambdaSet<'a> {
                 ClosureRepresentation::AlphabeticOrderStruct(fields)
             }
             _ => ClosureRepresentation::Other(*self.representation),
-        }
+        };
+
+        Some(representation)
     }
 
     pub fn extend_argument_list(
