@@ -3218,8 +3218,28 @@ fn anonymous_function_returned_from_nested_def() {
             f =
                   n = 1
                   \{} -> n
-            g = f {}
-            g
+            f {}
+            "#
+        ),
+        1,
+        u64
+    );
+}
+
+#[test]
+#[cfg(any(feature = "gen-llvm"))]
+fn anonymous_function_returned_from_if() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+            f =
+                if 1 == 1 then
+                    n = 1
+                    \{} -> n
+                else
+                    x = 2
+                    \{} -> x
+            f {}
             "#
         ),
         1,
