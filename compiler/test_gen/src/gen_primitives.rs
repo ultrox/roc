@@ -3207,3 +3207,22 @@ fn polymophic_expression_captured_inside_closure() {
         u8
     );
 }
+
+// see https://github.com/rtfeldman/roc/issues/2403
+#[test]
+#[cfg(any(feature = "gen-llvm"))]
+fn anonymous_function_returned_from_nested_def() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+            f =
+                  n = 1
+                  \{} -> n
+            g = f {}
+            g
+            "#
+        ),
+        1,
+        u64
+    );
+}
