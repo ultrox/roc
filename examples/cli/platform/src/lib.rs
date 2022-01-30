@@ -2,14 +2,14 @@
 
 use core::alloc::Layout;
 use core::ffi::c_void;
-use core::mem::MaybeUninit;
+use core::mem::{ManuallyDrop, MaybeUninit};
 use libc;
 use roc_std::RocStr;
 use std::ffi::CStr;
 use std::os::raw::c_char;
 
 extern "C" {
-    #[link_name = "roc__mainForHost_1_exposed"]
+    #[link_name = "roc__mainForHost_1_exposed_generic"]
     fn roc_main(output: *mut u8) -> ();
 
     #[link_name = "roc__mainForHost_size"]
@@ -119,13 +119,8 @@ pub extern "C" fn roc_fx_getLine() -> RocStr {
 }
 
 #[no_mangle]
-pub extern "C" fn roc_fx_putLine(line: RocStr) -> () {
+pub extern "C" fn roc_fx_putLine(line: ManuallyDrop<RocStr>) {
     let bytes = line.as_slice();
     let string = unsafe { std::str::from_utf8_unchecked(bytes) };
     println!("{}", string);
-
-    // don't mess with the refcount!
-    core::mem::forget(line);
-
-    ()
 }
