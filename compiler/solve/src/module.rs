@@ -40,7 +40,7 @@ pub fn run_solve(
     (solved_subs, solved_env, problems)
 }
 
-pub fn make_solved_types(
+fn make_solved_types(
     solved_env: &solve::Env,
     solved_subs: &Solved<Subs>,
     exposed_vars_by_symbol: &MutMap<Symbol, Variable>,
