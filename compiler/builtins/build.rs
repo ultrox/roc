@@ -48,6 +48,13 @@ fn main() {
         "builtins-i386",
     );
 
+    generate_bc_file(
+        &bitcode_path,
+        &build_script_dir_path,
+        "ir-thumbv7emhf",
+        "builtins-thumbv7emhf",
+    );
+
     // OBJECT FILES
 
     generate_object_file(
@@ -62,6 +69,13 @@ fn main() {
         "BUILTINS_WASM32_O",
         "wasm32-object",
         "builtins-wasm32.o",
+    );
+
+    generate_object_file(
+        &bitcode_path,
+        "BUILTINS_THUMBV7EMHF_O",
+        "thumbv7emhf-object",
+        "builtins-thumbv7emhf.o",
     );
 
     get_zig_files(bitcode_path.as_path(), &|path| {

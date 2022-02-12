@@ -11,7 +11,7 @@ const Failure = struct {
 };
 
 // BEGIN FAILURES GLOBALS ///////////////////
-var failures_mutex = std.Thread.Mutex{};
+// var failures_mutex = std.Thread.Mutex{};
 var failures: [*]Failure = undefined;
 var failure_length: usize = 0;
 var failure_capacity: usize = 0;
@@ -37,8 +37,8 @@ pub fn expectFailed(
     // defer failures_mutex.release();
     //
     // 👆 👆 👆 IF UPGRADING TO ZIG 0.9, LOOK HERE! 👆 👆 👆
-    const held = failures_mutex.acquire();
-    defer held.release();
+    // const held = failures_mutex.acquire();
+    // defer held.release();
 
     // If we don't have enough capacity to add a failure, allocate a new failures pointer.
     if (failure_length >= failure_capacity) {
@@ -96,8 +96,8 @@ pub fn getExpectFailures() []Failure {
     // defer failures_mutex.release();
     //
     // 👆 👆 👆 IF UPGRADING TO ZIG 0.9, LOOK HERE! 👆 👆 👆
-    const held = failures_mutex.acquire();
-    defer held.release();
+    // const held = failures_mutex.acquire();
+    // defer held.release();
 
     if (failure_length > 0) {
         // defensively clone failures, in case someone modifies the originals after the mutex has been released.
@@ -131,8 +131,8 @@ pub fn deinitFailures() void {
     // defer failures_mutex.release();
     //
     // 👆 👆 👆 IF UPGRADING TO ZIG 0.9, LOOK HERE! 👆 👆 👆
-    const held = failures_mutex.acquire();
-    defer held.release();
+    // const held = failures_mutex.acquire();
+    // defer held.release();
 
     utils.dealloc(@ptrCast([*]u8, failures), @alignOf(Failure));
     failure_length = 0;

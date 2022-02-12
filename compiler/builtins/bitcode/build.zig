@@ -30,15 +30,18 @@ pub fn build(b: *Builder) void {
     });
     const i386_target = makeI386Target();
     const wasm32_target = makeWasm32Target();
+    const thumbv7emhf_target = makeThumbv7emhfTarget();
 
     // LLVM IR
     generateLlvmIrFile(b, mode, host_target, main_path, "ir", "builtins-host");
     generateLlvmIrFile(b, mode, i386_target, main_path, "ir-i386", "builtins-i386");
     generateLlvmIrFile(b, mode, wasm32_target, main_path, "ir-wasm32", "builtins-wasm32");
+    generateLlvmIrFile(b, mode, thumbv7emhf_target, main_path, "ir-thumbv7emhf", "builtins-thumbv7emhf");
 
     // Generate Object Files
     generateObjectFile(b, mode, host_target, main_path, "object", "builtins-host");
     generateObjectFile(b, mode, wasm32_target, main_path, "wasm32-object", "builtins-wasm32");
+    generateObjectFile(b, mode, thumbv7emhf_target, main_path, "thumbv7emhf-object", "builtins-thumbv7emhf");
 
     removeInstallSteps(b);
 }
@@ -104,6 +107,19 @@ fn makeWasm32Target() CrossTarget {
     target.cpu_arch = std.Target.Cpu.Arch.wasm32;
     target.os_tag = std.Target.Os.Tag.freestanding;
     target.abi = std.Target.Abi.none;
+
+    return target;
+}
+
+fn makeThumbv7emhfTarget() CrossTarget {
+    var target = CrossTarget.parse(.{}) catch unreachable;
+
+    // 32-bit wasm
+
+    target.cpu_arch = std.Target.Cpu.Arch.arm;
+    target.cpu_model = .{ .explicit = &std.Target.arm.cpu.cortex_m4 };
+    target.os_tag = std.Target.Os.Tag.freestanding;
+    target.abi = std.Target.Abi.eabihf;
 
     return target;
 }

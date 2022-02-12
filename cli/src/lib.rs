@@ -480,6 +480,7 @@ enum Backend {
     X86_32,
     X86_64,
     Wasm32,
+    Thumbv7emhf,
 }
 
 impl Default for Backend {
@@ -495,6 +496,7 @@ impl Backend {
             Backend::X86_32 => "x86_32",
             Backend::X86_64 => "x86_64",
             Backend::Wasm32 => "wasm32",
+            Backend::Thumbv7emhf => "thumbv7emhf",
         }
     }
 
@@ -504,6 +506,7 @@ impl Backend {
         Backend::X86_32.as_str(),
         Backend::X86_64.as_str(),
         Backend::Wasm32.as_str(),
+        Backend::Thumbv7emhf.as_str(),
     ];
 
     fn to_triple(&self) -> Triple {
@@ -532,6 +535,13 @@ impl Backend {
 
                 triple
             }
+            Backend::Thumbv7emhf => {
+                triple.architecture = Architecture::Arm(target_lexicon::ArmArchitecture::Thumbv7em);
+                triple.binary_format = BinaryFormat::Elf;
+                triple.environment = target_lexicon::Environment::Eabihf;
+
+                triple
+            }
         }
     }
 }
@@ -551,6 +561,7 @@ impl std::str::FromStr for Backend {
             "x86_32" => Ok(Backend::X86_32),
             "x86_64" => Ok(Backend::X86_64),
             "wasm32" => Ok(Backend::Wasm32),
+            "thumbv7emhf" => Ok(Backend::Thumbv7emhf),
             _ => Err(()),
         }
     }

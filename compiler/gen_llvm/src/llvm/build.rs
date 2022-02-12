@@ -64,7 +64,7 @@ use roc_mono::ir::{
 };
 use roc_mono::layout::{Builtin, LambdaSet, Layout, LayoutIds, TagIdIntType, UnionLayout};
 use roc_target::TargetInfo;
-use target_lexicon::{Architecture, OperatingSystem, Triple};
+use target_lexicon::{Architecture, ArmArchitecture, Environment, OperatingSystem, Triple};
 
 /// This is for Inkwell's FunctionValue::verify - we want to know the verification
 /// output in debug builds, but we don't want it to print to stdout in release builds!
@@ -421,6 +421,13 @@ pub fn module_from_builtins<'ctx>(
                 ..
             } => {
                 include_bytes!("../../../builtins/bitcode/builtins-i386.bc")
+            }
+            Triple {
+                architecture: Architecture::Arm(ArmArchitecture::Thumbv7em),
+                environment: Environment::Eabihf,
+                ..
+            } => {
+                include_bytes!("../../../builtins/bitcode/builtins-thumbv7emhf.bc")
             }
             _ => panic!(
                 "The zig builtins are not currently built for this target: {:?}",
