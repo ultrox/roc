@@ -5,7 +5,7 @@ use inkwell::{
 };
 #[cfg(feature = "llvm")]
 use roc_mono::ir::OptLevel;
-use target_lexicon::{Architecture, OperatingSystem, Triple};
+use target_lexicon::{Architecture, ArmArchitecture, Environment, OperatingSystem, Triple};
 
 pub fn target_triple_str(target: &Triple) -> &'static str {
     // Best guide I've found on how to determine these magic strings:
@@ -26,6 +26,11 @@ pub fn target_triple_str(target: &Triple) -> &'static str {
             architecture: Architecture::Wasm32,
             ..
         } => "wasm32-unknown-unknown",
+        Triple {
+            architecture: Architecture::Arm(ArmArchitecture::Thumbv7em),
+            environment: Environment::Eabihf,
+            ..
+        } => "thumbv7em-unknown-eabihf",
         Triple {
             architecture: Architecture::Aarch64(_),
             operating_system: OperatingSystem::Linux,
@@ -80,6 +85,9 @@ pub fn arch_str(target: &Triple) -> &'static str {
         Architecture::X86_64 if cfg!(feature = "target-x86_64") => "x86-64",
         Architecture::X86_32(_) if cfg!(feature = "target-x86") => "x86",
         Architecture::Aarch64(_) if cfg!(feature = "target-aarch64") => "aarch64",
+        // Architecture::Arm(ArmArchitecture::Thumbv7em) if cfg!(feature = "target-arm") => {
+        //     "thumbv7em"
+        // }
         Architecture::Arm(_) if cfg!(feature = "target-arm") => "arm",
         Architecture::Wasm32 if cfg!(feature = "target-webassembly") => "wasm32",
         _ => panic!(

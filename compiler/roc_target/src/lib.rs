@@ -47,6 +47,7 @@ pub enum Architecture {
     Aarch64,
     Arm,
     Wasm32,
+    Thumbv7em,
 }
 
 impl Architecture {
@@ -55,7 +56,7 @@ impl Architecture {
 
         match self {
             X86_64 | Aarch64 | Arm => PtrWidth::Bytes8,
-            X86_32 | Wasm32 => PtrWidth::Bytes4,
+            X86_32 | Wasm32 | Thumbv7em => PtrWidth::Bytes4,
         }
     }
 }
@@ -66,6 +67,9 @@ impl From<target_lexicon::Architecture> for Architecture {
             target_lexicon::Architecture::X86_64 => Architecture::X86_64,
             target_lexicon::Architecture::X86_32(_) => Architecture::X86_32,
             target_lexicon::Architecture::Aarch64(_) => Architecture::Aarch64,
+            target_lexicon::Architecture::Arm(target_lexicon::ArmArchitecture::Thumbv7em) => {
+                Architecture::Thumbv7em
+            }
             target_lexicon::Architecture::Arm(_) => Architecture::Arm,
             target_lexicon::Architecture::Wasm32 => Architecture::Wasm32,
             _ => unreachable!("unsupported architecture"),

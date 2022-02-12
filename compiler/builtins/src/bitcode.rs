@@ -60,7 +60,7 @@ impl FloatWidth {
                 | Architecture::Aarch64
                 | Architecture::Arm
                 | Architecture::Wasm32 => 8,
-                Architecture::X86_32 => 4,
+                Architecture::X86_32 | Architecture::Thumbv7em => 4,
             },
             F128 => align_of::<i128>() as u32,
         }
@@ -128,7 +128,7 @@ impl IntWidth {
                 | Architecture::Aarch64
                 | Architecture::Arm
                 | Architecture::Wasm32 => 8,
-                Architecture::X86_32 => 4,
+                Architecture::X86_32 | Architecture::Thumbv7em => 4,
             },
             U128 | I128 => align_of::<i128>() as u32,
         }
