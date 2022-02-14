@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::env;
 use std::io;
 use std::path::{Path, PathBuf};
+use roc_error_macros::internal_error;
 use std::process::{Child, Command, Output};
 use target_lexicon::{Architecture, OperatingSystem, Triple};
 
@@ -24,6 +25,7 @@ pub enum LinkType {
     // (e.g. is_present returns `1 as bool`), this will be 1 as well.
     Executable = 0,
     Dylib = 1,
+    None = 2,
 }
 
 /// input_paths can include the host as well as the app. e.g. &["host.o", "roc_app.o"]
@@ -745,6 +747,7 @@ fn link_linux(
                 output_path,
             )
         }
+        LinkType::None => internal_error!("We should not be linking when no link is specified"),
     };
 
     let env_path = env::var("PATH").unwrap_or_else(|_| "".to_string());
@@ -816,6 +819,7 @@ fn link_macos(
 
             ("-dylib", output_path)
         }
+        LinkType::None => internal_error!("We should not be linking when no link is specified"),
     };
 
     let arch = match target.architecture {

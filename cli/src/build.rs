@@ -243,7 +243,11 @@ pub fn build_file<'a>(
 
     // Step 2: link the precompiled host and compiled app
     let link_start = SystemTime::now();
-    let outcome = if surgically_link {
+    let outcome = if link_type == LinkType::None  {
+        binary_path.set_extension("o");
+        std::fs::copy(app_o_file, binary_path.as_path()).unwrap();
+         BuildOutcome::NoProblems
+    } else if surgically_link {
         roc_linker::link_preprocessed_host(target, &host_input_path, app_o_file, &binary_path)
             .map_err(|_| {
                 todo!("gracefully handle failing to surgically link");
