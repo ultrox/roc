@@ -15,7 +15,7 @@ use indoc::indoc;
 use roc_std::{RocResult, RocStr};
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
 fn with_default() {
     assert_evals_to!(
         indoc!(
@@ -45,7 +45,7 @@ fn with_default() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
 fn result_map() {
     assert_evals_to!(
         indoc!(
@@ -79,7 +79,7 @@ fn result_map() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
 fn result_map_err() {
     assert_evals_to!(
         indoc!(
@@ -113,7 +113,7 @@ fn result_map_err() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
 fn err_type_var() {
     assert_evals_to!(
         indoc!(
@@ -128,7 +128,7 @@ fn err_type_var() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
 fn err_type_var_annotation() {
     assert_evals_to!(
         indoc!(
@@ -146,7 +146,7 @@ fn err_type_var_annotation() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
 fn err_empty_tag_union() {
     assert_evals_to!(
         indoc!(
@@ -164,7 +164,7 @@ fn err_empty_tag_union() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
 fn is_ok() {
     assert_evals_to!(
         indoc!(
@@ -194,7 +194,7 @@ fn is_ok() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
 fn is_err() {
     assert_evals_to!(
         indoc!(
@@ -224,7 +224,7 @@ fn is_err() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
 fn roc_result_ok() {
     assert_evals_to!(
         indoc!(
@@ -241,7 +241,7 @@ fn roc_result_ok() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
 fn roc_result_err() {
     assert_evals_to!(
         indoc!(

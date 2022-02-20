@@ -48,5 +48,7 @@ indoc = "1.0.3"
 default = ["gen-llvm"]
 gen-llvm = []
 gen-dev = []
+gen-dev-x86-64 = ["gen-dev"]
+gen-dev-aarch64 = ["gen-dev"]
 gen-wasm = []
 wasm-cli-run = []

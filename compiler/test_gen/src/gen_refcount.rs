@@ -13,7 +13,7 @@ use roc_std::{RocList, RocStr};
 type Pointer = usize;
 
 #[test]
-#[cfg(any(feature = "gen-wasm"))]
+#[cfg(not(any(feature = "gen-llvm", feature = "gen-dev")))]
 fn str_inc() {
     assert_refcounts!(
         indoc!(
@@ -32,7 +32,7 @@ fn str_inc() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-wasm"))]
+#[cfg(not(any(feature = "gen-llvm", feature = "gen-dev")))]
 fn str_dealloc() {
     assert_refcounts!(
         indoc!(
@@ -48,7 +48,7 @@ fn str_dealloc() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-wasm"))]
+#[cfg(not(any(feature = "gen-llvm", feature = "gen-dev")))]
 fn list_int_inc() {
     assert_refcounts!(
         indoc!(
@@ -69,7 +69,7 @@ fn list_int_inc() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-wasm"))]
+#[cfg(not(any(feature = "gen-llvm", feature = "gen-dev")))]
 fn list_int_dealloc() {
     assert_refcounts!(
         indoc!(
@@ -90,7 +90,7 @@ fn list_int_dealloc() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-wasm"))]
+#[cfg(not(any(feature = "gen-llvm", feature = "gen-dev")))]
 fn list_str_inc() {
     assert_refcounts!(
         indoc!(
@@ -110,7 +110,7 @@ fn list_str_inc() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-wasm"))]
+#[cfg(not(any(feature = "gen-llvm", feature = "gen-dev")))]
 fn list_str_dealloc() {
     assert_refcounts!(
         indoc!(
@@ -130,7 +130,7 @@ fn list_str_dealloc() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-wasm"))]
+#[cfg(not(any(feature = "gen-llvm", feature = "gen-dev")))]
 fn struct_inc() {
     assert_refcounts!(
         indoc!(
@@ -147,7 +147,7 @@ fn struct_inc() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-wasm"))]
+#[cfg(not(any(feature = "gen-llvm", feature = "gen-dev")))]
 fn struct_dealloc() {
     assert_refcounts!(
         indoc!(
@@ -165,7 +165,7 @@ fn struct_dealloc() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-wasm"))]
+#[cfg(not(any(feature = "gen-llvm", feature = "gen-dev")))]
 fn union_nonrecursive_inc() {
     type TwoStr = (RocStr, RocStr, i64);
 
@@ -191,7 +191,7 @@ fn union_nonrecursive_inc() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-wasm"))]
+#[cfg(not(any(feature = "gen-llvm", feature = "gen-dev")))]
 fn union_nonrecursive_dec() {
     assert_refcounts!(
         indoc!(
@@ -214,7 +214,7 @@ fn union_nonrecursive_dec() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-wasm"))]
+#[cfg(not(any(feature = "gen-llvm", feature = "gen-dev")))]
 fn union_recursive_inc() {
     assert_refcounts!(
         indoc!(
@@ -242,7 +242,7 @@ fn union_recursive_inc() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-wasm"))]
+#[cfg(not(any(feature = "gen-llvm", feature = "gen-dev")))]
 fn union_recursive_dec() {
     assert_refcounts!(
         indoc!(
@@ -272,7 +272,7 @@ fn union_recursive_dec() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-wasm"))]
+#[cfg(not(any(feature = "gen-llvm", feature = "gen-dev")))]
 fn refcount_different_rosetrees_inc() {
     // Requires two different Inc procedures for `List (Rose I64)` and `List (Rose Str)`
     // even though both appear in the mono Layout as `List(RecursivePointer)`
@@ -312,7 +312,7 @@ fn refcount_different_rosetrees_inc() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-wasm"))]
+#[cfg(not(any(feature = "gen-llvm", feature = "gen-dev")))]
 fn refcount_different_rosetrees_dec() {
     // Requires two different Dec procedures for `List (Rose I64)` and `List (Rose Str)`
     // even though both appear in the mono Layout as `List(RecursivePointer)`
@@ -353,7 +353,7 @@ fn refcount_different_rosetrees_dec() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-wasm"))]
+#[cfg(not(any(feature = "gen-llvm", feature = "gen-dev")))]
 fn union_linked_list_inc() {
     assert_refcounts!(
         indoc!(
@@ -379,7 +379,7 @@ fn union_linked_list_inc() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-wasm"))]
+#[cfg(not(any(feature = "gen-llvm", feature = "gen-dev")))]
 fn union_linked_list_dec() {
     assert_refcounts!(
         indoc!(
@@ -407,7 +407,7 @@ fn union_linked_list_dec() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-wasm"))]
+#[cfg(not(any(feature = "gen-llvm", feature = "gen-dev")))]
 fn union_linked_list_long_dec() {
     assert_refcounts!(
         indoc!(

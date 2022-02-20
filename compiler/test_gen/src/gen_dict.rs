@@ -13,7 +13,7 @@ use indoc::indoc;
 use roc_std::{RocList, RocStr};
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
 fn dict_empty_len() {
     assert_evals_to!(
         indoc!(
@@ -27,7 +27,7 @@ fn dict_empty_len() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
 fn dict_insert_empty() {
     assert_evals_to!(
         indoc!(
@@ -42,7 +42,7 @@ fn dict_insert_empty() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
 fn dict_empty_contains() {
     assert_evals_to!(
         indoc!(
@@ -59,7 +59,7 @@ fn dict_empty_contains() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
 fn dict_nonempty_contains() {
     assert_evals_to!(
         indoc!(
@@ -76,7 +76,7 @@ fn dict_nonempty_contains() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
 fn dict_empty_remove() {
     assert_evals_to!(
         indoc!(
@@ -95,7 +95,7 @@ fn dict_empty_remove() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
 fn dict_nonempty_remove() {
     assert_evals_to!(
         indoc!(
@@ -114,7 +114,7 @@ fn dict_nonempty_remove() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
 fn dict_nonempty_get() {
     assert_evals_to!(
         indoc!(
@@ -157,7 +157,7 @@ fn dict_nonempty_get() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
 fn keys() {
     assert_evals_to!(
         indoc!(
@@ -179,7 +179,7 @@ fn keys() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
 fn values() {
     assert_evals_to!(
         indoc!(
@@ -201,7 +201,7 @@ fn values() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
 fn from_list_with_fold() {
     assert_evals_to!(
         indoc!(
@@ -244,7 +244,7 @@ fn from_list_with_fold() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
 fn small_str_keys() {
     assert_evals_to!(
         indoc!(
@@ -266,7 +266,7 @@ fn small_str_keys() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
 fn big_str_keys() {
     assert_evals_to!(
         indoc!(
@@ -292,7 +292,7 @@ fn big_str_keys() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
 fn big_str_values() {
     assert_evals_to!(
         indoc!(
@@ -317,7 +317,7 @@ fn big_str_values() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
 fn unit_values() {
     assert_evals_to!(
         indoc!(
@@ -339,7 +339,7 @@ fn unit_values() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
 fn single() {
     assert_evals_to!(
         indoc!(
@@ -357,7 +357,7 @@ fn single() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
 fn union() {
     assert_evals_to!(
         indoc!(
@@ -375,7 +375,7 @@ fn union() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
 fn union_prefer_first() {
     assert_evals_to!(
         indoc!(
@@ -393,7 +393,7 @@ fn union_prefer_first() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
 fn intersection() {
     assert_evals_to!(
         indoc!(
@@ -424,7 +424,7 @@ fn intersection() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
 fn intersection_prefer_first() {
     assert_evals_to!(
         indoc!(
@@ -455,7 +455,7 @@ fn intersection_prefer_first() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
 fn difference() {
     assert_evals_to!(
         indoc!(
@@ -486,7 +486,7 @@ fn difference() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
 fn difference_prefer_first() {
     assert_evals_to!(
         indoc!(
@@ -517,7 +517,7 @@ fn difference_prefer_first() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
 fn walk_sum_keys() {
     assert_evals_to!(
         indoc!(
