@@ -391,7 +391,7 @@ fn f64_float_alias() {
     );
 }
 #[test]
-#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
+#[cfg(not(any(feature = "gen-dev-aarch64", feature = "gen-wasm")))]
 fn f32_float_alias() {
     assert_evals_to!(
         indoc!(
@@ -781,7 +781,7 @@ fn gen_dec_neq() {
 }
 
 #[test]
-#[cfg(not(any(feature = "gen-dev")))]
+#[cfg(not(any(feature = "gen-dev-aarch64")))]
 fn gen_wrap_int_neq() {
     assert_evals_to!(
         indoc!(
@@ -1071,7 +1071,7 @@ fn bitwise_or() {
 }
 
 #[test]
-#[cfg(not(any(feature = "gen-dev")))]
+#[cfg(not(any(feature = "gen-dev-aarch64")))]
 fn lt_i64() {
     assert_evals_to!("1 < 2", true, bool);
     assert_evals_to!("1 < 1", false, bool);
@@ -1080,7 +1080,7 @@ fn lt_i64() {
 }
 
 #[test]
-#[cfg(not(any(feature = "gen-dev")))]
+#[cfg(not(any(feature = "gen-dev-aarch64")))]
 fn lte_i64() {
     assert_evals_to!("1 <= 1", true, bool);
     assert_evals_to!("2 <= 1", false, bool);
@@ -1098,7 +1098,7 @@ fn gt_i64() {
 }
 
 #[test]
-#[cfg(not(any(feature = "gen-dev")))]
+#[cfg(not(any(feature = "gen-dev-aarch64")))]
 fn gte_i64() {
     assert_evals_to!("1 >= 1", true, bool);
     assert_evals_to!("1 >= 2", false, bool);
@@ -1264,7 +1264,7 @@ fn neg_min_int_overflow() {
 }
 
 #[test]
-#[cfg(not(any(feature = "gen-dev")))]
+#[cfg(not(any(feature = "gen-dev-aarch64")))]
 fn gen_wrap_int_neg() {
     assert_evals_to!(
         indoc!(
@@ -1782,7 +1782,7 @@ fn shift_left_by() {
 }
 
 #[test]
-#[cfg(not(any(feature = "gen-dev")))]
+#[cfg(not(any(feature = "gen-dev-aarch64")))]
 #[ignore]
 fn shift_right_by() {
     // Sign Extended Right Shift
@@ -1792,7 +1792,7 @@ fn shift_right_by() {
 }
 
 #[test]
-#[cfg(not(any(feature = "gen-dev")))]
+#[cfg(not(any(feature = "gen-dev-aarch64")))]
 #[ignore]
 fn shift_right_zf_by() {
     // Logical Right Shift
@@ -2235,7 +2235,7 @@ fn bytes_to_u32_random_u8s() {
 }
 
 #[test]
-#[cfg(not(any(feature = "gen-dev")))]
+#[cfg(not(any(feature = "gen-dev-aarch64")))]
 fn when_on_i32() {
     assert_evals_to!(
         indoc!(
@@ -2258,7 +2258,7 @@ fn when_on_i32() {
 }
 
 #[test]
-#[cfg(not(any(feature = "gen-dev")))]
+#[cfg(not(any(feature = "gen-dev-aarch64")))]
 fn when_on_i16() {
     assert_evals_to!(
         indoc!(
@@ -2403,7 +2403,7 @@ fn sub_saturated() {
 }
 
 #[test]
-#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
+#[cfg(not(any(feature = "gen-dev-aarch64", feature = "gen-wasm")))]
 fn monomorphized_ints() {
     assert_evals_to!(
         indoc!(
@@ -2422,7 +2422,7 @@ fn monomorphized_ints() {
 }
 
 #[test]
-#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
+#[cfg(not(any(feature = "gen-dev-aarch64", feature = "gen-wasm")))]
 fn monomorphized_floats() {
     assert_evals_to!(
         indoc!(
@@ -2441,7 +2441,7 @@ fn monomorphized_floats() {
 }
 
 #[test]
-#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
+#[cfg(not(any(feature = "gen-dev-aarch64", feature = "gen-wasm")))]
 fn monomorphized_ints_names_dont_conflict() {
     assert_evals_to!(
         indoc!(
