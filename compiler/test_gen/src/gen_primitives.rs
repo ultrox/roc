@@ -250,7 +250,7 @@ fn gen_large_when_int() {
 }
 
 #[test]
-#[cfg(not(any(feature = "gen-dev-aarch64", feature = "gen-wasm")))]
+#[cfg(not(any(feature = "gen-dev", feature = "gen-wasm")))]
 fn gen_large_when_float() {
     assert_evals_to!(
         indoc!(
