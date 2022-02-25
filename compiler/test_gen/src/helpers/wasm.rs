@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use wasmer::{Memory, WasmPtr};
 
 use crate::helpers::from_wasmer_memory::FromWasmerMemory;
-use roc_can::builtins::builtin_defs_map;
 use roc_collections::all::{MutMap, MutSet};
 use roc_gen_wasm::wasm32_result::Wasm32Result;
 use roc_gen_wasm::{DEBUG_LOG_SETTINGS, MEMORY_NAME};
@@ -94,7 +93,6 @@ fn compile_roc_to_wasm_bytes<'a, T: Wasm32Result>(
         src_dir,
         exposed_types,
         roc_target::TargetInfo::default_wasm32(),
-        builtin_defs_map,
     );
 
     let loaded = loaded.expect("failed to load module");
@@ -196,10 +194,7 @@ where
     match test_wrapper.call(&[]) {
         Err(e) => Err(format!("{:?}", e)),
         Ok(result) => {
-            let address = match result[0] {
-                wasmer::Value::I32(a) => a,
-                _ => panic!(),
-            };
+            let address = result[0].unwrap_i32();
 
             if false {
                 println!("test_wrapper returned 0x{:x}", address);
@@ -241,10 +236,7 @@ where
     let init_result = init_refcount_test.call(&[wasmer::Value::I32(expected_len)]);
     let refcount_vector_addr = match init_result {
         Err(e) => return Err(format!("{:?}", e)),
-        Ok(result) => match result[0] {
-            wasmer::Value::I32(a) => a,
-            _ => panic!(),
-        },
+        Ok(result) => result[0].unwrap_i32(),
     };
 
     // Run the test

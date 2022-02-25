@@ -10,7 +10,6 @@ mod helpers;
 #[cfg(test)]
 mod solve_expr {
     use crate::helpers::with_larger_debug_stack;
-    use roc_can::builtins::builtin_defs_map;
     use roc_collections::all::MutMap;
     use roc_types::pretty_print::{content_to_string, name_all_type_vars};
 
@@ -64,7 +63,6 @@ mod solve_expr {
                 dir.path(),
                 exposed_types,
                 roc_target::TargetInfo::default_x86_64(),
-                builtin_defs_map,
             );
 
             dir.close()?;
@@ -5210,6 +5208,70 @@ mod solve_expr {
                 "#
             ),
             "Bar U8",
+        )
+    }
+
+    // https://github.com/rtfeldman/roc/issues/2379
+    #[test]
+    fn copy_vars_referencing_copied_vars() {
+        infer_eq_without_problem(
+            indoc!(
+                r#"
+                Job : [ Job [ Command ] (List Job) ]
+
+                job : Job
+
+                job
+                "#
+            ),
+            "Job",
+        )
+    }
+
+    #[test]
+    fn copy_vars_referencing_copied_vars_specialized() {
+        infer_eq_without_problem(
+            indoc!(
+                r#"
+                Job a : [ Job [ Command ] (Job a) (List (Job a)) a ]
+
+                job : Job Str
+
+                when job is
+                    Job _ j lst _ ->
+                        when j is
+                            Job _ _ _ s ->
+                                { j, lst, s }
+                "#
+            ),
+            // TODO: this means that we're doing our job correctly, as now both `Job a`s have been
+            // specialized to the same type, and the second destructuring proves the reified type
+            // is `Job Str`. But we should just print the structure of the recursive type directly.
+            // See https://github.com/rtfeldman/roc/issues/2513
+            "{ j : a, lst : List a, s : Str }",
+        )
+    }
+
+    #[test]
+    fn to_int() {
+        infer_eq_without_problem(
+            indoc!(
+                r#"
+                {
+                    toI8: Num.toI8,
+                    toI16: Num.toI16,
+                    toI32: Num.toI32,
+                    toI64: Num.toI64,
+                    toI128: Num.toI128,
+                    toU8: Num.toU8,
+                    toU16: Num.toU16,
+                    toU32: Num.toU32,
+                    toU64: Num.toU64,
+                    toU128: Num.toU128,
+                }
+                "#
+            ),
+            r#"{ toI128 : Int * -> I128, toI16 : Int * -> I16, toI32 : Int * -> I32, toI64 : Int * -> I64, toI8 : Int * -> I8, toU128 : Int * -> U128, toU16 : Int * -> U16, toU32 : Int * -> U32, toU64 : Int * -> U64, toU8 : Int * -> U8 }"#,
         )
     }
 }
