@@ -56,7 +56,7 @@ use morphic_lib::{
 };
 use roc_builtins::bitcode::{self, FloatWidth, IntWidth, IntrinsicName};
 use roc_builtins::{float_intrinsic, llvm_int_intrinsic};
-use roc_collections::all::{ImMap, MutMap, MutSet};
+use roc_collections::all::{default_hasher, ImMap, MutMap, MutSet};
 use roc_error_macros::internal_error;
 use roc_module::low_level::LowLevel;
 use roc_module::symbol::{Interns, ModuleId, Symbol};
@@ -66,7 +66,9 @@ use roc_mono::ir::{
 };
 use roc_mono::layout::{Builtin, LambdaSet, Layout, LayoutIds, TagIdIntType, UnionLayout};
 use roc_target::TargetInfo;
-use target_lexicon::{Architecture, ArmArchitecture, Environment, OperatingSystem, Triple};
+use target_lexicon::{
+    Architecture, ArmArchitecture, BinaryFormat, Environment, OperatingSystem, Triple,
+};
 
 /// This is for Inkwell's FunctionValue::verify - we want to know the verification
 /// output in debug builds, but we don't want it to print to stdout in release builds!
@@ -7398,6 +7400,9 @@ pub fn add_func<'ctx>(
     linkage: Linkage,
     call_conv: u32,
 ) -> FunctionValue<'ctx> {
+    use std::hash::{BuildHasher, Hash, Hasher};
+    use std::str::FromStr;
+
     if cfg!(debug_assertions) {
         if let Some(func) = module.get_function(name) {
             panic!("Attempting to redefine LLVM function {}, which was already defined in this module as:\n\n{:?}", name, func);
@@ -7405,8 +7410,50 @@ pub fn add_func<'ctx>(
     }
 
     let fn_val = module.add_function(name, typ, Some(linkage));
-
     fn_val.set_call_conventions(call_conv);
+
+    if let Ok(triple_str) = &module.get_triple().as_str().to_str() {
+        if let Ok(triple) = Triple::from_str(triple_str) {
+            let bf = if matches!(triple.binary_format, BinaryFormat::Unknown) {
+                if matches!(
+                    triple.operating_system,
+                    OperatingSystem::Darwin | OperatingSystem::MacOSX { .. }
+                ) || matches!(triple.vendor, target_lexicon::Vendor::Apple)
+                {
+                    BinaryFormat::Macho
+                } else if matches!(triple.operating_system, OperatingSystem::Windows) {
+                    BinaryFormat::Coff
+                } else if matches!(
+                    triple.architecture,
+                    Architecture::Wasm32 | Architecture::Wasm64
+                ) {
+                    BinaryFormat::Wasm
+                } else {
+                    // Assume Elf by default.
+                    BinaryFormat::Elf
+                }
+            } else {
+                triple.binary_format
+            };
+
+            match bf {
+                BinaryFormat::Elf => {
+                    let section_name = format!(".text.{}", name);
+                    fn_val.as_global_value().set_section(&section_name);
+                }
+                BinaryFormat::Macho => {
+                    // In macho the limit is 16 bytes for the segment and section name.
+                    // Use a hash to make this hopefully unique.
+                    let mut s = default_hasher().build_hasher();
+                    name.hash(&mut s);
+                    let section_name = format!("__TEXT,{:0x}", s.finish());
+                    fn_val.as_global_value().set_section(&section_name[..16]);
+                }
+                // Function sections not yet supported. Just ignore it.
+                _ => {}
+            }
+        }
+    }
 
     fn_val
 }
