@@ -26,7 +26,10 @@ then
     cargo build --target wasm32-unknown-unknown -p roc_repl_wasm --release
     wasm-bindgen --target web --keep-debug target/wasm32-unknown-unknown/release/roc_repl_wasm.wasm --out-dir repl_wasm/pkg/
 else
-    wasm-pack build --target web repl_wasm
+    # This is the normal path
+    # We use `--profiling` because it gives us an optimized binary with debug info
+    # That's good because we're very likely to crash on "todo" features! We're not actually profiling!
+    wasm-pack build --target web --profiling repl_wasm
 fi
 
 cp repl_wasm/pkg/*.wasm $WWW_DIR
