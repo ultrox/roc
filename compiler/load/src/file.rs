@@ -2039,7 +2039,7 @@ fn finish_specialization(
     subs: Subs,
     exposed_to_host: ExposedToHost,
 ) -> Result<MonomorphizedModule, LoadingProblem> {
-    if false {
+    if true {
         println!(
             "total Type clones: {} ",
             roc_types::types::get_type_clone_count()
@@ -3167,6 +3167,8 @@ fn run_solve<'a>(
     let actual_constraint =
         constraints.let_import_constraint(rigid_vars, def_types, constraint, &import_variables);
 
+    // dbg!(&constraints, &constraint);
+
     let mut solve_aliases = default_aliases();
 
     for (name, alias) in aliases.iter() {
@@ -3287,6 +3289,8 @@ fn canonicalize_and_constrain<'a>(
         ..
     } = parsed;
 
+    let before = roc_types::types::get_type_clone_count();
+
     let mut var_store = VarStore::default();
     let canonicalized = canonicalize_module_defs(
         arena,
@@ -3300,6 +3304,16 @@ fn canonicalize_and_constrain<'a>(
         exposed_imports,
         &exposed_symbols,
         &mut var_store,
+    );
+
+    let after = roc_types::types::get_type_clone_count();
+
+    println!(
+        "canonicalize of {:?} cloned Type {} times ({} -> {})",
+        module_id,
+        after - before,
+        before,
+        after
     );
 
     let canonicalize_end = SystemTime::now();
@@ -3325,9 +3339,22 @@ fn canonicalize_and_constrain<'a>(
                 }
             };
 
+            let before = roc_types::types::get_type_clone_count();
+
             let mut constraints = Constraints::new();
+
             let constraint =
                 constrain_module(&mut constraints, &module_output.declarations, module_id);
+
+            let after = roc_types::types::get_type_clone_count();
+
+            println!(
+                "constraint gen of {:?} cloned Type {} times ({} -> {})",
+                module_id,
+                after - before,
+                before,
+                after
+            );
 
             let module = Module {
                 module_id,

@@ -257,13 +257,17 @@ impl Clone for Type {
                 lambda_set_variables,
                 actual,
                 kind,
-            } => Self::Alias {
-                symbol: *symbol,
-                type_arguments: type_arguments.clone(),
-                lambda_set_variables: lambda_set_variables.clone(),
-                actual: actual.clone(),
-                kind: *kind,
-            },
+            } => {
+                // unsafe { TYPE_CLONE_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) };
+
+                Self::Alias {
+                    symbol: *symbol,
+                    type_arguments: type_arguments.clone(),
+                    lambda_set_variables: lambda_set_variables.clone(),
+                    actual: actual.clone(),
+                    kind: *kind,
+                }
+            }
             Self::HostExposedAlias {
                 name,
                 type_arguments,
@@ -886,7 +890,12 @@ impl Type {
                     TypeExtension::Closed => Ok(()),
                 }
             }
-            DelayedAlias(AliasCommon { type_arguments, .. }) => {
+            DelayedAlias(AliasCommon {
+                type_arguments,
+                lambda_set_variables,
+                ..
+            }) => {
+                dbg!(&lambda_set_variables);
                 for (_, ta) in type_arguments {
                     ta.substitute_alias(rep_symbol, rep_args, actual)?;
                 }
@@ -966,12 +975,16 @@ impl Type {
             DelayedAlias(AliasCommon {
                 symbol,
                 type_arguments,
+                lambda_set_variables,
                 ..
             }) => {
                 symbol == &rep_symbol
                     || type_arguments
                         .iter()
                         .any(|v| v.1.contains_symbol(rep_symbol))
+                    || lambda_set_variables
+                        .iter()
+                        .any(|v| v.0.contains_symbol(rep_symbol))
             }
             Alias {
                 symbol: alias_symbol,
@@ -1120,6 +1133,45 @@ impl Type {
             }
             Apply(symbol, args, _) => {
                 if let Some(alias) = aliases.get(symbol) {
+                    // !is_import && is_structural
+                    if true {
+                        let mut type_var_to_arg = Vec::new();
+
+                        dbg!(&args);
+
+                        for (loc_var, arg_ann) in alias.type_variables.iter().zip(args) {
+                            let name = loc_var.value.0.clone();
+
+                            type_var_to_arg.push((name, arg_ann.clone()));
+                        }
+
+                        let mut lambda_set_variables =
+                            Vec::with_capacity(alias.lambda_set_variables.len());
+
+                        dbg!(&var_store);
+
+                        for _ in 0..alias.lambda_set_variables.len() {
+                            let lvar = var_store.fresh();
+
+                            // introduced_variables.insert_lambda_set(lvar);
+                            introduced.insert(lvar);
+
+                            lambda_set_variables.push(LambdaSet(Type::Variable(lvar)));
+                        }
+
+                        let alias = Type::DelayedAlias(AliasCommon {
+                            symbol: *symbol,
+                            type_arguments: type_var_to_arg,
+                            lambda_set_variables,
+                        });
+
+                        dbg!(&alias);
+
+                        *self = alias;
+                    } else {
+                        todo!()
+                    }
+                    /*
                     if args.len() != alias.type_variables.len() {
                         *self = Type::Erroneous(Problem::BadTypeArguments {
                             symbol: *symbol,
@@ -1164,6 +1216,8 @@ impl Type {
                         }
                     }
 
+                    dbg!(&actual);
+
                     actual.instantiate_aliases(region, aliases, var_store, introduced);
 
                     actual.substitute(&substitution);
@@ -1184,14 +1238,18 @@ impl Type {
 
                         actual = Type::RecursiveTagUnion(new_rec_var, tags, ext);
                     }
-
-                    *self = Type::Alias {
+                    let alias = Type::Alias {
                         symbol: *symbol,
                         type_arguments: named_args,
                         lambda_set_variables,
                         actual: Box::new(actual),
                         kind: alias.kind,
                     };
+
+                    dbg!(&alias);
+
+                    *self = alias;
+                    */
                 } else {
                     // one of the special-cased Apply types.
                     for x in args {
@@ -1406,9 +1464,17 @@ fn variables_help(tipe: &Type, accum: &mut ImSet<Variable>) {
             // this rec var doesn't need to be in flex_vars or rigid_vars
             accum.remove(rec);
         }
-        DelayedAlias(AliasCommon { type_arguments, .. }) => {
+        DelayedAlias(AliasCommon {
+            type_arguments,
+            lambda_set_variables,
+            ..
+        }) => {
             for (_, arg) in type_arguments {
                 variables_help(arg, accum);
+            }
+
+            for lambda_set in lambda_set_variables {
+                variables_help(&lambda_set.0, accum);
             }
         }
         Alias {
@@ -1530,9 +1596,21 @@ fn variables_help_detailed(tipe: &Type, accum: &mut VariableDetail) {
 
             accum.recursion_variables.insert(*rec);
         }
-        DelayedAlias(AliasCommon { type_arguments, .. }) => {
+        DelayedAlias(AliasCommon {
+            type_arguments,
+            lambda_set_variables,
+            ..
+        }) => {
             for (_, arg) in type_arguments {
                 variables_help_detailed(arg, accum);
+            }
+
+            for lambda_set in lambda_set_variables {
+                if let Type::Variable(v) = lambda_set.0 {
+                    accum.lambda_set_variables.push(v);
+                } else {
+                    variables_help_detailed(&lambda_set.0, accum);
+                }
             }
         }
         Alias {

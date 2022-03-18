@@ -1371,6 +1371,7 @@ fn type_to_variable<'a>(
     let result = helper!(typ);
 
     while let Some(TypeToVar::Defer(typ, destination)) = stack.pop() {
+        // println!("--> {:?}", destination);
         match typ {
             Variable(_) | EmptyRec | EmptyTagUnion => {
                 unreachable!("This variant should never be deferred!")
@@ -1533,6 +1534,8 @@ fn type_to_variable<'a>(
                 lambda_set_variables,
             }) => {
                 let kind = AliasKind::Structural;
+
+                dbg!(destination, &lambda_set_variables);
 
                 let alias_variables = {
                     let length = type_arguments.len() + lambda_set_variables.len();
@@ -2515,6 +2518,8 @@ fn deep_copy_var_help(
     // Below, we actually push a new variable onto subs meaning the `copy`
     // variable is in-bounds before it is ever used.
     let copy = unsafe { Variable::from_index(subs_len as u32) };
+
+    println!("copy {:?} -> {:?}", var, copy);
 
     pools.get_mut(max_rank).push(copy);
 

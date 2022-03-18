@@ -1136,6 +1136,30 @@ fn io_poc_effect() {
 
 #[test]
 #[cfg(any(feature = "gen-llvm"))]
+fn foobar() {
+    assert_non_opt_evals_to!(
+        indoc!(
+            r#"
+            app "test" provides [ main ] to "./platform"
+
+            Effect a : [ @Effect ({} -> a) ]
+
+            succeed : a -> Effect a
+            succeed = \x -> @Effect \{} -> x
+
+            main : Effect F64
+            main =
+                succeed 3.14
+
+            "#
+        ),
+        3.14,
+        f64
+    );
+}
+
+#[test]
+#[cfg(any(feature = "gen-llvm"))]
 fn io_poc_desugared() {
     assert_evals_to!(
         indoc!(
