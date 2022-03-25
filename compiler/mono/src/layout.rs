@@ -1016,7 +1016,7 @@ impl<'a> Layout<'a> {
         match self {
             Layout::Builtin(builtin) => {
                 use Builtin::*;
-                matches!(builtin, Str | List(_) | Dict(_, _) | Set(_))
+                matches!(builtin, Str | List(_))
             }
             Layout::Union(UnionLayout::NonRecursive(_)) => true,
             Layout::LambdaSet(lambda_set) => {

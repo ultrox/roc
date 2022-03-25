@@ -1439,11 +1439,15 @@ fn build_rec_union_recursive_decrement<'a, 'ctx, 'env>(
                     .build_struct_gep(struct_ptr, i as u32, "gep_recursive_pointer")
                     .unwrap();
 
-                let field = env
-                    .builder
-                    .build_load(elem_pointer, "decrement_struct_field");
+                if field_layout.is_passed_by_reference() {
+                    deferred_nonrec.push((elem_pointer.into(), field_layout));
+                } else {
+                    let field = env
+                        .builder
+                        .build_load(elem_pointer, "decrement_struct_field");
 
-                deferred_nonrec.push((field, field_layout));
+                    deferred_nonrec.push((field, field_layout));
+                }
             }
         }
 

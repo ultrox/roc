@@ -403,12 +403,5 @@ pub fn str_equal<'a, 'ctx, 'env>(
     value1: BasicValueEnum<'ctx>,
     value2: BasicValueEnum<'ctx>,
 ) -> BasicValueEnum<'ctx> {
-    let str1_i128 = str_to_c_abi(env, value1);
-    let str2_i128 = str_to_c_abi(env, value2);
-
-    call_bitcode_fn(
-        env,
-        &[str1_i128.into(), str2_i128.into()],
-        bitcode::STR_EQUAL,
-    )
+    call_bitcode_fn(env, &[value1, value2], bitcode::STR_EQUAL)
 }

@@ -14,7 +14,7 @@ use roc_builtins::bitcode::{FloatWidth, IntWidth};
 use roc_module::symbol::Symbol;
 use roc_mono::layout::{Builtin, Layout, LayoutIds, UnionLayout};
 
-use super::build::load_roc_value;
+use super::build::{load_roc_value, use_roc_value};
 use super::build_list::list_struct_len;
 use super::convert::argument_type_from_union_layout;
 
@@ -133,8 +133,8 @@ fn build_eq_builtin<'a, 'ctx, 'env>(
             layout_ids,
             &Layout::Builtin(*builtin),
             elem,
-            lhs_val.into_struct_value(),
-            rhs_val.into_struct_value(),
+            lhs_val.into_pointer_value(),
+            rhs_val.into_pointer_value(),
             when_recursive,
         ),
         Builtin::Set(_elem) => todo!("equality on Set"),
@@ -304,8 +304,8 @@ fn build_neq_builtin<'a, 'ctx, 'env>(
                 layout_ids,
                 &Layout::Builtin(*builtin),
                 elem,
-                lhs_val.into_struct_value(),
-                rhs_val.into_struct_value(),
+                lhs_val.into_pointer_value(),
+                rhs_val.into_pointer_value(),
                 when_recursive,
             )
             .into_int_value();
@@ -401,8 +401,8 @@ fn build_list_eq<'a, 'ctx, 'env>(
     layout_ids: &mut LayoutIds<'a>,
     list_layout: &Layout<'a>,
     element_layout: &Layout<'a>,
-    list1: StructValue<'ctx>,
-    list2: StructValue<'ctx>,
+    list1: PointerValue<'ctx>,
+    list2: PointerValue<'ctx>,
     when_recursive: WhenRecursive<'a>,
 ) -> BasicValueEnum<'ctx> {
     let block = env.builder.get_insert_block().expect("to be in a function");
@@ -440,6 +440,10 @@ fn build_list_eq<'a, 'ctx, 'env>(
     env.builder.position_at_end(block);
     env.builder
         .set_current_debug_location(env.context, di_location);
+
+    // TODO optimize by comparing on pointers directly
+    let list1 = env.builder.build_load(list1, "load_list_for_compare");
+    let list2 = env.builder.build_load(list2, "load_list_for_compare");
     let call = env
         .builder
         .build_call(function, &[list1.into(), list2.into()], "list_eq");
@@ -756,8 +760,8 @@ fn build_struct_eq_help<'a, 'ctx, 'env>(
             build_eq(
                 env,
                 layout_ids,
-                field1,
-                field2,
+                use_roc_value(env, *field_layout, field1, "field1"),
+                use_roc_value(env, *field_layout, field2, "field2"),
                 field_layout,
                 field_layout,
                 when_recursive.clone(),

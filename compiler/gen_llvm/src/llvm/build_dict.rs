@@ -7,7 +7,9 @@ use crate::llvm::build::{
     Scope,
 };
 use crate::llvm::build_list::{layout_width, pass_as_opaque};
-use crate::llvm::convert::{basic_type_from_layout, zig_dict_type, zig_list_type};
+use crate::llvm::convert::{
+    argument_type_from_layout, basic_type_from_layout, zig_dict_type, zig_list_type,
+};
 use crate::llvm::refcounting::Mode;
 use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::context::Context;
@@ -19,6 +21,8 @@ use roc_module::symbol::Symbol;
 use roc_mono::layout::{Builtin, Layout, LayoutIds};
 use roc_target::TargetInfo;
 
+use super::bitcode::call_list_bitcode_fn;
+use super::build::{create_entry_block_alloca, store_roc_value};
 use super::build_list::list_to_c_abi;
 
 #[repr(transparent)]
@@ -105,11 +109,14 @@ pub fn dict_insert<'a, 'ctx, 'env>(
 
     let u8_ptr = env.context.i8_type().ptr_type(AddressSpace::Generic);
 
-    let key_ptr = builder.build_alloca(key.get_type(), "key_ptr");
-    let value_ptr = builder.build_alloca(value.get_type(), "value_ptr");
+    let key_type = basic_type_from_layout(env, key_layout);
+    let value_type = basic_type_from_layout(env, value_layout);
 
-    env.builder.build_store(key_ptr, key);
-    env.builder.build_store(value_ptr, value);
+    let key_ptr = builder.build_alloca(key_type, "key_ptr");
+    let value_ptr = builder.build_alloca(value_type, "value_ptr");
+
+    store_roc_value(env, *key_layout, key_ptr, key);
+    store_roc_value(env, *value_layout, value_ptr, value);
 
     let key_width = env
         .ptr_int()
@@ -431,9 +438,7 @@ pub fn dict_keys<'a, 'ctx, 'env>(
 
     let inc_key_fn = build_inc_wrapper(env, layout_ids, key_layout);
 
-    let list_ptr = builder.build_alloca(zig_list_type(env), "list_ptr");
-
-    call_void_bitcode_fn(
+    call_list_bitcode_fn(
         env,
         &[
             pass_dict_c_abi(env, dict),
@@ -441,21 +446,9 @@ pub fn dict_keys<'a, 'ctx, 'env>(
             key_width.into(),
             value_width.into(),
             inc_key_fn.as_global_value().as_pointer_value().into(),
-            list_ptr.into(),
         ],
         bitcode::DICT_KEYS,
-    );
-
-    let list_ptr = env
-        .builder
-        .build_bitcast(
-            list_ptr,
-            super::convert::zig_list_type(env).ptr_type(AddressSpace::Generic),
-            "to_roc_list",
-        )
-        .into_pointer_value();
-
-    env.builder.build_load(list_ptr, "load_keys_list")
+    )
 }
 
 fn pass_dict_c_abi<'a, 'ctx, 'env>(
@@ -689,9 +682,7 @@ pub fn dict_values<'a, 'ctx, 'env>(
 
     let inc_value_fn = build_inc_wrapper(env, layout_ids, value_layout);
 
-    let list_ptr = builder.build_alloca(zig_list_type, "list_ptr");
-
-    call_void_bitcode_fn(
+    call_list_bitcode_fn(
         env,
         &[
             pass_dict_c_abi(env, dict),
@@ -699,21 +690,9 @@ pub fn dict_values<'a, 'ctx, 'env>(
             key_width.into(),
             value_width.into(),
             inc_value_fn.as_global_value().as_pointer_value().into(),
-            list_ptr.into(),
         ],
         bitcode::DICT_VALUES,
-    );
-
-    let list_ptr = env
-        .builder
-        .build_bitcast(
-            list_ptr,
-            super::convert::zig_list_type(env).ptr_type(AddressSpace::Generic),
-            "to_roc_list",
-        )
-        .into_pointer_value();
-
-    env.builder.build_load(list_ptr, "load_keys_list")
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -744,7 +723,7 @@ pub fn set_from_list<'a, 'ctx, 'env>(
     call_void_bitcode_fn(
         env,
         &[
-            list_to_c_abi(env, list).into(),
+            list,
             alignment_iv.into(),
             key_width.into(),
             value_width.into(),
@@ -806,7 +785,7 @@ fn build_hash_wrapper<'a, 'ctx, 'env>(
 
             let value_cast = env
                 .builder
-                .build_bitcast(value_ptr, value_type, "load_opaque")
+                .build_bitcast(value_ptr, value_type, "cast_to_known_type")
                 .into_pointer_value();
 
             let val_arg = load_roc_value(env, *layout, value_cast, "load_opaque");

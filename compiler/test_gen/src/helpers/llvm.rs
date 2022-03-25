@@ -244,6 +244,9 @@ fn create_llvm_module<'a>(
 
     module_pass.run_on(env.module);
 
+    let app_ll_file = Path::new("/tmp/test.ll");
+    env.module.print_to_file(&app_ll_file).unwrap();
+
     // Verify the module
     if let Err(errors) = env.module.verify() {
         panic!("Errors defining module:\n\n{}", errors.to_string());
