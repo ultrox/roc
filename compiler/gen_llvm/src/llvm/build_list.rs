@@ -25,19 +25,19 @@ pub fn list_symbol_to_c_abi<'a, 'ctx, 'env>(
     scope: &Scope<'a, 'ctx>,
     symbol: Symbol,
 ) -> PointerValue<'ctx> {
-    let parent = env
-        .builder
-        .get_insert_block()
-        .and_then(|b| b.get_parent())
-        .unwrap();
+    //    let parent = env
+    //        .builder
+    //        .get_insert_block()
+    //        .and_then(|b| b.get_parent())
+    //        .unwrap();
+    //
+    //    let list_type = super::convert::zig_list_type(env);
+    //    let list_alloca = create_entry_block_alloca(env, parent, list_type.into(), "list_alloca");
+    //
+    //    let list = ;
+    //    env.builder.build_store(list_alloca, list);
 
-    let list_type = super::convert::zig_list_type(env);
-    let list_alloca = create_entry_block_alloca(env, parent, list_type.into(), "list_alloca");
-
-    let list = load_symbol(scope, &symbol);
-    env.builder.build_store(list_alloca, list);
-
-    list_alloca
+    load_symbol(scope, &symbol).into_pointer_value()
 }
 
 pub fn list_to_c_abi<'a, 'ctx, 'env>(
@@ -188,14 +188,14 @@ pub fn list_get_unsafe<'a, 'ctx, 'env>(
     parent: FunctionValue<'ctx>,
     element_layout: &Layout<'a>,
     elem_index: IntValue<'ctx>,
-    wrapper_struct: StructValue<'ctx>,
+    wrapper_struct: PointerValue<'ctx>,
 ) -> BasicValueEnum<'ctx> {
     let builder = env.builder;
 
     let elem_type = basic_type_from_layout(env, element_layout);
     let ptr_type = elem_type.ptr_type(AddressSpace::Generic);
     // Load the pointer to the array data
-    let array_data_ptr = load_list_ptr(builder, wrapper_struct, ptr_type);
+    let array_data_ptr = load_list_ptr_ptr(builder, wrapper_struct, ptr_type);
 
     // Assume the bounds have already been checked earlier
     // (e.g. by List.get or List.first, which wrap List.#getUnsafe)
@@ -397,7 +397,19 @@ fn bounds_check_comparison<'ctx>(
 }
 
 /// List.len : List elem -> Int
-pub fn list_len<'ctx>(
+pub fn list_ptr_len<'ctx>(
+    builder: &Builder<'ctx>,
+    wrapper_struct_ptr: PointerValue<'ctx>,
+) -> IntValue<'ctx> {
+    let ptr = builder
+        .build_struct_gep(wrapper_struct_ptr, Builtin::WRAPPER_LEN, "list_len")
+        .unwrap();
+
+    builder.build_load(ptr, "load_list_len").into_int_value()
+}
+
+/// List.len : List elem -> Int
+pub fn list_struct_len<'ctx>(
     builder: &Builder<'ctx>,
     wrapper_struct: StructValue<'ctx>,
 ) -> IntValue<'ctx> {
@@ -1242,12 +1254,19 @@ where
     phi.as_basic_value()
 }
 
-pub fn empty_polymorphic_list<'a, 'ctx, 'env>(env: &Env<'a, 'ctx, 'env>) -> BasicValueEnum<'ctx> {
+pub fn empty_polymorphic_list<'a, 'ctx, 'env>(env: &Env<'a, 'ctx, 'env>) -> PointerValue<'ctx> {
     let struct_type = super::convert::zig_list_type(env);
 
     // The pointer should be null (aka zero) and the length should be zero,
     // so the whole struct should be a const_zero
-    BasicValueEnum::StructValue(struct_type.const_zero())
+    let ptr = env
+        .context
+        .i8_type()
+        .ptr_type(AddressSpace::Generic)
+        .const_null();
+    let len = env.ptr_int().const_zero();
+
+    super::build_list::store_list_ptr(env, ptr, len)
 }
 
 pub fn load_list<'ctx>(
@@ -1263,6 +1282,22 @@ pub fn load_list<'ctx>(
         .into_int_value();
 
     (length, ptr)
+}
+
+pub fn load_list_ptr_ptr<'ctx>(
+    builder: &Builder<'ctx>,
+    wrapper_struct: PointerValue<'ctx>,
+    ptr_type: PointerType<'ctx>,
+) -> PointerValue<'ctx> {
+    // a `*const *mut u8` pointer
+    let generic_ptr_ptr = builder
+        .build_struct_gep(wrapper_struct, Builtin::WRAPPER_PTR, "read_list_ptr")
+        .unwrap();
+
+    let generic_ptr = builder.build_load(generic_ptr_ptr, "load_ptr_to_list_elements");
+
+    // cast to the expected pointer type
+    cast_basic_basic(builder, generic_ptr.into(), ptr_type.into()).into_pointer_value()
 }
 
 pub fn load_list_ptr<'ctx>(
@@ -1303,11 +1338,36 @@ pub fn allocate_list<'a, 'ctx, 'env>(
     allocate_with_refcount_help(env, basic_type, alignment_bytes, number_of_data_bytes, rc1)
 }
 
-pub fn store_list<'a, 'ctx, 'env>(
+pub fn store_list_ptr<'a, 'ctx, 'env>(
     env: &Env<'a, 'ctx, 'env>,
     pointer_to_first_element: PointerValue<'ctx>,
     len: IntValue<'ctx>,
-) -> BasicValueEnum<'ctx> {
+) -> PointerValue<'ctx> {
+    let list_struct = store_list_struct(env, pointer_to_first_element, len);
+
+    let parent = env
+        .builder
+        .get_insert_block()
+        .and_then(|b| b.get_parent())
+        .unwrap();
+
+    let alloca = create_entry_block_alloca(
+        env,
+        parent,
+        list_struct.get_type().into(),
+        "store_list_alloca",
+    );
+
+    env.builder.build_store(alloca, list_struct);
+
+    alloca
+}
+
+pub fn store_list_struct<'a, 'ctx, 'env>(
+    env: &Env<'a, 'ctx, 'env>,
+    pointer_to_first_element: PointerValue<'ctx>,
+    len: IntValue<'ctx>,
+) -> StructValue<'ctx> {
     let builder = env.builder;
 
     let struct_type = super::convert::zig_list_type(env);
@@ -1329,11 +1389,13 @@ pub fn store_list<'a, 'ctx, 'env>(
         .build_insert_value(struct_val, len, Builtin::WRAPPER_LEN, "insert_len")
         .unwrap();
 
-    builder.build_bitcast(
-        struct_val.into_struct_value(),
-        super::convert::zig_list_type(env),
-        "cast_collection",
-    )
+    builder
+        .build_bitcast(
+            struct_val.into_struct_value(),
+            super::convert::zig_list_type(env),
+            "cast_collection",
+        )
+        .into_struct_value()
 }
 
 pub fn decref<'a, 'ctx, 'env>(

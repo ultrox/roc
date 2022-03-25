@@ -12,8 +12,8 @@ use crate::llvm::build_hash::generic_hash;
 use crate::llvm::build_list::{
     self, allocate_list, empty_polymorphic_list, list_all, list_any, list_append, list_concat,
     list_contains, list_drop_at, list_find_unsafe, list_get_unsafe, list_join, list_keep_errs,
-    list_keep_if, list_keep_oks, list_len, list_map, list_map2, list_map3, list_map4,
-    list_map_with_index, list_prepend, list_range, list_repeat, list_replace_unsafe, list_reverse,
+    list_keep_if, list_keep_oks, list_map, list_map2, list_map3, list_map4, list_map_with_index,
+    list_prepend, list_ptr_len, list_range, list_repeat, list_replace_unsafe, list_reverse,
     list_single, list_sort_with, list_sublist, list_swap, list_to_c_abi,
 };
 use crate::llvm::build_str::{
@@ -1264,8 +1264,8 @@ pub fn build_exp_expr<'a, 'ctx, 'env>(
             }
         }
 
-        EmptyArray => empty_polymorphic_list(env),
-        Array { elem_layout, elems } => list_literal(env, scope, elem_layout, elems),
+        EmptyArray => empty_polymorphic_list(env).into(),
+        Array { elem_layout, elems } => list_literal(env, scope, elem_layout, elems).into(),
         RuntimeErrorFunction(_) => todo!(),
 
         UnionAtIndex {
@@ -2288,7 +2288,7 @@ fn list_literal<'a, 'ctx, 'env>(
     scope: &Scope<'a, 'ctx>,
     element_layout: &Layout<'a>,
     elems: &[ListLiteralElement],
-) -> BasicValueEnum<'ctx> {
+) -> PointerValue<'ctx> {
     let ctx = env.context;
     let builder = env.builder;
 
@@ -2389,7 +2389,7 @@ fn list_literal<'a, 'ctx, 'env>(
                     .build_in_bounds_gep(global, &[zero, offset], "first_element_pointer")
             };
 
-            super::build_list::store_list(env, ptr, list_length_intval)
+            super::build_list::store_list_ptr(env, ptr, list_length_intval)
         } else {
             // some of our elements are non-constant, so we must allocate space on the heap
             let ptr = allocate_list(env, element_layout, list_length_intval);
@@ -2413,7 +2413,7 @@ fn list_literal<'a, 'ctx, 'env>(
                 builder.build_store(elem_ptr, val);
             }
 
-            super::build_list::store_list(env, ptr, list_length_intval)
+            super::build_list::store_list_ptr(env, ptr, list_length_intval)
         }
     } else {
         let ptr = allocate_list(env, element_layout, list_length_intval);
@@ -2432,7 +2432,7 @@ fn list_literal<'a, 'ctx, 'env>(
             store_roc_value(env, *element_layout, elem_ptr, val);
         }
 
-        super::build_list::store_list(env, ptr, list_length_intval)
+        super::build_list::store_list_ptr(env, ptr, list_length_intval)
     }
 }
 
@@ -2784,6 +2784,8 @@ pub fn build_exp_stmt<'a, 'ctx, 'env>(
                 }
                 Dec(symbol) => {
                     let (value, layout) = load_symbol_and_layout(scope, symbol);
+
+                    dbg!(value);
 
                     if layout.contains_refcounted() {
                         decrement_refcount_layout(env, parent, layout_ids, value, layout);
@@ -5538,7 +5540,7 @@ fn run_low_level<'a, 'ctx, 'env>(
 
             let arg = load_symbol(scope, &args[0]);
 
-            list_len(env.builder, arg.into_struct_value()).into()
+            list_ptr_len(env.builder, arg.into_pointer_value()).into()
         }
         ListSingle => {
             // List.single : a -> List a
@@ -5697,7 +5699,7 @@ fn run_low_level<'a, 'ctx, 'env>(
             debug_assert_eq!(args.len(), 2);
 
             let (wrapper_struct, list_layout) = load_symbol_and_layout(scope, &args[0]);
-            let wrapper_struct = wrapper_struct.into_struct_value();
+            let wrapper_struct = wrapper_struct.into_pointer_value();
             let elem_index = load_symbol(scope, &args[1]).into_int_value();
 
             let element_layout = list_element_layout!(list_layout);
@@ -6243,6 +6245,10 @@ enum RocReturn {
 impl RocReturn {
     fn roc_return_by_pointer(layout: Layout) -> bool {
         match layout {
+            Layout::Builtin(builtin) => {
+                use Builtin::*;
+                matches!(builtin, Str | List(_) | Dict(_, _) | Set(_))
+            }
             Layout::Union(UnionLayout::NonRecursive(_)) => true,
             Layout::LambdaSet(lambda_set) => {
                 RocReturn::roc_return_by_pointer(lambda_set.runtime_representation())

@@ -2,7 +2,7 @@ use crate::llvm::bitcode::{
     call_bitcode_fn, call_list_bitcode_fn, call_str_bitcode_fn, call_void_bitcode_fn,
 };
 use crate::llvm::build::{complex_bitcast, Env, Scope};
-use crate::llvm::build_list::{allocate_list, pass_update_mode, store_list};
+use crate::llvm::build_list::{allocate_list, pass_update_mode, store_list_ptr};
 use inkwell::builder::Builder;
 use inkwell::values::{BasicValueEnum, IntValue, PointerValue, StructValue};
 use inkwell::AddressSpace;
@@ -54,7 +54,7 @@ pub fn str_split<'a, 'ctx, 'env>(
     // get the RocStr type defined by zig
     let roc_str_type = env.module.get_struct_type("str.RocStr").unwrap();
 
-    // convert `*mut { *mut u8, i64 }` to `*mut RocStr`
+    // convert `*mut { *mut i8, i64, i64 }` to `*mut RocStr`
     let ret_list_ptr_zig_rocstr = builder.build_bitcast(
         ret_list_ptr,
         roc_str_type.ptr_type(AddressSpace::Generic),
@@ -71,7 +71,9 @@ pub fn str_split<'a, 'ctx, 'env>(
         bitcode::STR_STR_SPLIT_IN_PLACE,
     );
 
-    store_list(env, ret_list_ptr, segment_count)
+    let list = store_list_ptr(env, ret_list_ptr, segment_count);
+
+    list.into()
 }
 
 pub fn str_symbol_to_c_abi<'a, 'ctx, 'env>(
@@ -88,6 +90,7 @@ pub fn str_to_c_abi<'a, 'ctx, 'env>(
     env: &Env<'a, 'ctx, 'env>,
     value: BasicValueEnum<'ctx>,
 ) -> PointerValue<'ctx> {
+    /*
     let parent = env
         .builder
         .get_insert_block()
@@ -100,6 +103,8 @@ pub fn str_to_c_abi<'a, 'ctx, 'env>(
     env.builder.build_store(string_alloca, value);
 
     string_alloca
+    */
+    value.into_pointer_value()
 }
 
 pub fn destructure<'ctx>(

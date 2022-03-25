@@ -4,8 +4,8 @@ use crate::llvm::build::{
     add_func, cast_basic_basic, get_tag_id, tag_pointer_clear_tag_id, use_roc_value, Env,
     FAST_CALL_CONV, TAG_DATA_INDEX, TAG_ID_INDEX,
 };
-use crate::llvm::build_list::{incrementing_elem_loop, list_len, load_list};
-use crate::llvm::convert::basic_type_from_layout;
+use crate::llvm::build_list::{incrementing_elem_loop, list_ptr_len, load_list};
+use crate::llvm::convert::{argument_type_from_layout, basic_type_from_layout};
 use bumpalo::collections::Vec;
 use inkwell::basic_block::BasicBlock;
 use inkwell::context::Context;
@@ -687,7 +687,7 @@ fn modify_refcount_list<'a, 'ctx, 'env>(
     let function = match env.module.get_function(fn_name.as_str()) {
         Some(function_value) => function_value,
         None => {
-            let basic_type = basic_type_from_layout(env, layout);
+            let basic_type = argument_type_from_layout(env, layout);
             let function_value = build_header(env, basic_type, mode, &fn_name);
 
             modify_refcount_list_help(
@@ -744,9 +744,11 @@ fn modify_refcount_list_help<'a, 'ctx, 'env>(
     arg_val.set_name(arg_symbol.as_str(&env.interns));
 
     let parent = fn_val;
-    let original_wrapper = arg_val.into_struct_value();
 
-    let len = list_len(builder, original_wrapper);
+    // TODO just use the pointer directly in this function body
+    let len = list_ptr_len(builder, arg_val.into_pointer_value());
+    let arg_val = env.builder.build_load(arg_val.into_pointer_value(), "");
+    let original_wrapper = arg_val.into_struct_value();
 
     let is_non_empty = builder.build_int_compare(
         IntPredicate::UGT,
@@ -824,7 +826,7 @@ fn modify_refcount_str<'a, 'ctx, 'env>(
     let function = match env.module.get_function(fn_name.as_str()) {
         Some(function_value) => function_value,
         None => {
-            let basic_type = basic_type_from_layout(env, layout);
+            let basic_type = argument_type_from_layout(env, layout);
             let function_value = build_header(env, basic_type, mode, &fn_name);
 
             modify_refcount_str_help(env, mode, layout, function_value);
@@ -864,6 +866,8 @@ fn modify_refcount_str_help<'a, 'ctx, 'env>(
 
     let parent = fn_val;
 
+    // TODO just use the pointer directly in this function body
+    let arg_val = env.builder.build_load(arg_val.into_pointer_value(), "");
     let str_wrapper = arg_val.into_struct_value();
 
     let capacity = builder

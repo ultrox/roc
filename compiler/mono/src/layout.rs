@@ -1014,6 +1014,10 @@ impl<'a> Layout<'a> {
 
     pub fn is_passed_by_reference(&self) -> bool {
         match self {
+            Layout::Builtin(builtin) => {
+                use Builtin::*;
+                matches!(builtin, Str | List(_) | Dict(_, _) | Set(_))
+            }
             Layout::Union(UnionLayout::NonRecursive(_)) => true,
             Layout::LambdaSet(lambda_set) => {
                 lambda_set.runtime_representation().is_passed_by_reference()

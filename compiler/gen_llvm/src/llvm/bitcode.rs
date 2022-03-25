@@ -58,7 +58,7 @@ pub fn call_list_bitcode_fn<'a, 'ctx, 'env>(
 
     call_void_bitcode_fn(env, &arguments, fn_name);
 
-    env.builder.build_load(result, "load_list")
+    result.into()
 }
 
 pub fn call_str_bitcode_fn<'a, 'ctx, 'env>(
@@ -83,7 +83,7 @@ pub fn call_str_bitcode_fn<'a, 'ctx, 'env>(
 
     call_void_bitcode_fn(env, &arguments, fn_name);
 
-    env.builder.build_load(result, "load_str")
+    result.into()
 }
 
 pub fn call_void_bitcode_fn<'a, 'ctx, 'env>(
