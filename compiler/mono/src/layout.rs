@@ -1129,7 +1129,7 @@ impl<'a> Layout<'a> {
                 .runtime_representation()
                 .allocation_alignment_bytes(target_info),
             Layout::RecursivePointer => unreachable!("should be looked up to get an actual layout"),
-            Layout::Boxed(inner) => inner.allocation_alignment_bytes(target_info),
+            Layout::Boxed(inner) => inner.alignment_bytes(target_info),
         }
     }
 
