@@ -884,10 +884,8 @@ pub fn build_exp_literal<'a, 'ctx, 'env>(
 
                 let struct_type = str_type;
 
-                let mut struct_val;
-
                 // Store the pointer
-                struct_val = builder
+                let mut struct_val = builder
                     .build_insert_value(
                         struct_type.get_undef(),
                         ptr,
@@ -1021,7 +1019,7 @@ fn struct_pointer_from_fields<'a, 'ctx, 'env, I>(
     input_pointer: PointerValue<'ctx>,
     values: I,
 ) where
-    I: Iterator<Item = (usize, BasicValueEnum<'ctx>)>,
+    I: Iterator<Item = (usize, (Layout<'a>, BasicValueEnum<'ctx>))>,
 {
     let struct_ptr = env
         .builder
@@ -1033,13 +1031,13 @@ fn struct_pointer_from_fields<'a, 'ctx, 'env, I>(
         .into_pointer_value();
 
     // Insert field exprs into struct_val
-    for (index, field_val) in values {
+    for (index, (field_layout, field_value)) in values {
         let field_ptr = env
             .builder
             .build_struct_gep(struct_ptr, index as u32, "field_struct_gep")
             .unwrap();
 
-        env.builder.build_store(field_ptr, field_val);
+        store_roc_value(env, field_layout, field_ptr, field_value);
     }
 }
 
@@ -1138,7 +1136,7 @@ pub fn build_exp_expr<'a, 'ctx, 'env>(
                 layout.alignment_bytes(env.target_info),
             );
 
-            env.builder.build_store(allocation, value);
+            store_roc_value(env, *layout, allocation, value);
 
             allocation.into()
         }
@@ -1148,8 +1146,7 @@ pub fn build_exp_expr<'a, 'ctx, 'env>(
 
             debug_assert!(value.is_pointer_value());
 
-            env.builder
-                .build_load(value.into_pointer_value(), "load_boxed_value")
+            load_roc_value(env, *layout, value.into_pointer_value(), "load_boxed_value")
         }
 
         Reset { symbol, .. } => {
@@ -1415,53 +1412,11 @@ fn build_wrapped_tag<'a, 'ctx, 'env>(
     reuse_allocation: Option<PointerValue<'ctx>>,
     parent: FunctionValue<'ctx>,
 ) -> BasicValueEnum<'ctx> {
-    let ctx = env.context;
     let builder = env.builder;
 
     let tag_id_layout = union_layout.tag_id_layout();
 
-    // Determine types
-    let num_fields = arguments.len() + 1;
-    let mut field_types = Vec::with_capacity_in(num_fields, env.arena);
-    let mut field_vals = Vec::with_capacity_in(num_fields, env.arena);
-
-    for (field_symbol, tag_field_layout) in arguments.iter().zip(tag_field_layouts.iter()) {
-        let (val, _val_layout) = load_symbol_and_layout(scope, field_symbol);
-
-        let field_type = basic_type_from_layout(env, tag_field_layout);
-
-        field_types.push(field_type);
-
-        if let Layout::RecursivePointer = tag_field_layout {
-            debug_assert!(val.is_pointer_value());
-
-            // we store recursive pointers as `i64*`
-            let ptr = env.builder.build_bitcast(
-                val,
-                ctx.i64_type().ptr_type(AddressSpace::Generic),
-                "cast_recursive_pointer",
-            );
-
-            field_vals.push(ptr);
-        } else if matches!(
-            tag_field_layout,
-            Layout::Union(UnionLayout::NonRecursive(_))
-        ) {
-            debug_assert!(val.is_pointer_value());
-
-            // We store non-recursive unions without any indirection.
-            let reified = env
-                .builder
-                .build_load(val.into_pointer_value(), "load_non_recursive");
-
-            field_vals.push(reified);
-        } else {
-            // this check fails for recursive tag unions, but can be helpful while debugging
-            // debug_assert_eq!(tag_field_layout, val_layout);
-
-            field_vals.push(val);
-        }
-    }
+    let (field_types, field_values) = build_tag_fields(env, scope, tag_field_layouts, arguments);
 
     // Create the struct_type
     let raw_data_ptr = allocate_tag(env, parent, reuse_allocation, union_layout, tags);
@@ -1485,7 +1440,7 @@ fn build_wrapped_tag<'a, 'ctx, 'env>(
             env,
             struct_type,
             opaque_struct_ptr,
-            field_vals.into_iter().enumerate(),
+            field_values.into_iter().enumerate(),
         );
 
         raw_data_ptr.into()
@@ -1494,14 +1449,14 @@ fn build_wrapped_tag<'a, 'ctx, 'env>(
             env,
             struct_type,
             raw_data_ptr,
-            field_vals.into_iter().enumerate(),
+            field_values.into_iter().enumerate(),
         );
 
         tag_pointer_set_tag_id(env, tag_id, raw_data_ptr).into()
     }
 }
 
-pub fn tag_alloca<'a, 'ctx, 'env>(
+pub fn entry_block_alloca_zerofill<'a, 'ctx, 'env>(
     env: &Env<'a, 'ctx, 'env>,
     basic_type: BasicTypeEnum<'ctx>,
     name: &str,
@@ -1537,7 +1492,63 @@ pub fn tag_alloca<'a, 'ctx, 'env>(
     result_alloca
 }
 
-pub fn build_tag<'a, 'ctx, 'env>(
+fn build_tag_field_value<'a, 'ctx, 'env>(
+    env: &Env<'a, 'ctx, 'env>,
+    value: BasicValueEnum<'ctx>,
+    tag_field_layout: Layout<'a>,
+) -> BasicValueEnum<'ctx> {
+    if let Layout::RecursivePointer = tag_field_layout {
+        debug_assert!(value.is_pointer_value());
+
+        // we store recursive pointers as `i64*`
+        env.builder.build_bitcast(
+            value,
+            env.context.i64_type().ptr_type(AddressSpace::Generic),
+            "cast_recursive_pointer",
+        )
+    } else if tag_field_layout.is_passed_by_reference() {
+        debug_assert!(value.is_pointer_value());
+
+        // NOTE: we rely on this being passed to `store_roc_value` so that
+        // the value is memcpy'd
+        value
+    } else {
+        // this check fails for recursive tag unions, but can be helpful while debugging
+        // debug_assert_eq!(tag_field_layout, val_layout);
+
+        value
+    }
+}
+
+fn build_tag_fields<'a, 'ctx, 'env>(
+    env: &Env<'a, 'ctx, 'env>,
+    scope: &Scope<'a, 'ctx>,
+    fields: &[Layout<'a>],
+    arguments: &[Symbol],
+) -> (
+    Vec<'a, BasicTypeEnum<'ctx>>,
+    Vec<'a, (Layout<'a>, BasicValueEnum<'ctx>)>,
+) {
+    debug_assert_eq!(fields.len(), arguments.len());
+
+    let capacity = fields.len();
+    let mut field_types = Vec::with_capacity_in(capacity, env.arena);
+    let mut field_values = Vec::with_capacity_in(capacity, env.arena);
+
+    for (field_symbol, tag_field_layout) in arguments.iter().zip(fields.iter()) {
+        let field_type = basic_type_from_layout(env, tag_field_layout);
+        field_types.push(field_type);
+
+        let raw_value = load_symbol(scope, field_symbol);
+        let field_value = build_tag_field_value(env, raw_value, *tag_field_layout);
+
+        field_values.push((*tag_field_layout, field_value));
+    }
+
+    (field_types, field_values)
+}
+
+fn build_tag<'a, 'ctx, 'env>(
     env: &Env<'a, 'ctx, 'env>,
     scope: &Scope<'a, 'ctx>,
     union_layout: &UnionLayout<'a>,
@@ -1559,7 +1570,7 @@ pub fn build_tag<'a, 'ctx, 'env>(
             let wrapper_type = env
                 .context
                 .struct_type(&[internal_type, tag_id_type.into()], false);
-            let result_alloca = tag_alloca(env, wrapper_type.into(), "opaque_tag");
+            let result_alloca = entry_block_alloca_zerofill(env, wrapper_type.into(), "opaque_tag");
 
             // Determine types
             let num_fields = arguments.len() + 1;
@@ -1688,49 +1699,21 @@ pub fn build_tag<'a, 'ctx, 'env>(
             debug_assert_eq!(tag_id, 0);
             debug_assert_eq!(arguments.len(), fields.len());
 
-            let ctx = env.context;
-
-            // Determine types
-            let num_fields = arguments.len() + 1;
-            let mut field_types = Vec::with_capacity_in(num_fields, env.arena);
-            let mut field_vals = Vec::with_capacity_in(num_fields, env.arena);
-
-            for (field_symbol, tag_field_layout) in arguments.iter().zip(fields.iter()) {
-                let val = load_symbol(scope, field_symbol);
-
-                let field_type = basic_type_from_layout(env, tag_field_layout);
-
-                field_types.push(field_type);
-
-                if let Layout::RecursivePointer = tag_field_layout {
-                    debug_assert!(val.is_pointer_value());
-
-                    // we store recursive pointers as `i64*`
-                    let ptr = env.builder.build_bitcast(
-                        val,
-                        ctx.i64_type().ptr_type(AddressSpace::Generic),
-                        "cast_recursive_pointer",
-                    );
-
-                    field_vals.push(ptr);
-                } else {
-                    // this check fails for recursive tag unions, but can be helpful while debugging
-
-                    field_vals.push(val);
-                }
-            }
+            let (field_types, field_values) = build_tag_fields(env, scope, fields, arguments);
 
             // Create the struct_type
             let data_ptr =
                 reserve_with_refcount_union_as_block_of_memory(env, *union_layout, &[fields]);
 
-            let struct_type = ctx.struct_type(field_types.into_bump_slice(), false);
+            let struct_type = env
+                .context
+                .struct_type(field_types.into_bump_slice(), false);
 
             struct_pointer_from_fields(
                 env,
                 struct_type,
                 data_ptr,
-                field_vals.into_iter().enumerate(),
+                field_values.into_iter().enumerate(),
             );
 
             data_ptr.into()
@@ -1754,56 +1737,22 @@ pub fn build_tag<'a, 'ctx, 'env>(
 
             debug_assert!(union_size == 2);
 
-            let ctx = env.context;
-
             // Determine types
-            let num_fields = arguments.len() + 1;
-            let mut field_types = Vec::with_capacity_in(num_fields, env.arena);
-            let mut field_vals = Vec::with_capacity_in(num_fields, env.arena);
-
-            debug_assert_eq!(arguments.len(), other_fields.len());
-
-            for (field_symbol, tag_field_layout) in arguments.iter().zip(other_fields.iter()) {
-                let val = load_symbol(scope, field_symbol);
-
-                // Zero-sized fields have no runtime representation.
-                // The layout of the struct expects them to be dropped!
-                if !tag_field_layout.is_dropped_because_empty() {
-                    let field_type = basic_type_from_layout(env, tag_field_layout);
-
-                    field_types.push(field_type);
-
-                    if let Layout::RecursivePointer = tag_field_layout {
-                        debug_assert!(val.is_pointer_value());
-
-                        // we store recursive pointers as `i64*`
-                        let ptr = env.builder.build_bitcast(
-                            val,
-                            ctx.i64_type().ptr_type(AddressSpace::Generic),
-                            "cast_recursive_pointer",
-                        );
-
-                        field_vals.push(ptr);
-                    } else {
-                        // this check fails for recursive tag unions, but can be helpful while debugging
-                        // debug_assert_eq!(tag_field_layout, val_layout);
-
-                        field_vals.push(val);
-                    }
-                }
-            }
+            let (field_types, field_values) = build_tag_fields(env, scope, other_fields, arguments);
 
             // Create the struct_type
             let data_ptr =
                 allocate_tag(env, parent, reuse_allocation, union_layout, &[other_fields]);
 
-            let struct_type = ctx.struct_type(field_types.into_bump_slice(), false);
+            let struct_type = env
+                .context
+                .struct_type(field_types.into_bump_slice(), false);
 
             struct_pointer_from_fields(
                 env,
                 struct_type,
                 data_ptr,
-                field_vals.into_iter().enumerate(),
+                field_values.into_iter().enumerate(),
             );
 
             data_ptr.into()
@@ -2086,7 +2035,7 @@ fn lookup_at_index_ptr2<'a, 'ctx, 'env>(
         let field_type = basic_type_from_layout(env, &field_layout);
 
         let align_bytes = field_layout.alignment_bytes(env.target_info);
-        let alloca = tag_alloca(env, field_type, "copied_tag");
+        let alloca = entry_block_alloca_zerofill(env, field_type, "copied_tag");
         if align_bytes > 0 {
             let size = env
                 .ptr_int()
@@ -2162,8 +2111,7 @@ fn reserve_with_refcount_union_as_block_of_memory<'a, 'ctx, 'env>(
 
     let alignment_bytes = fields
         .iter()
-        .map(|tag| tag.iter().map(|l| l.alignment_bytes(env.target_info)))
-        .flatten()
+        .flat_map(|tag| tag.iter().map(|l| l.alignment_bytes(env.target_info)))
         .max()
         .unwrap_or(0);
 
@@ -2176,15 +2124,11 @@ fn reserve_with_refcount_help<'a, 'ctx, 'env>(
     stack_size: u32,
     alignment_bytes: u32,
 ) -> PointerValue<'ctx> {
-    let ctx = env.context;
-
     let len_type = env.ptr_int();
 
     let value_bytes_intvalue = len_type.const_int(stack_size as u64, false);
 
-    let rc1 = crate::llvm::refcounting::refcount_1(ctx, env.target_info);
-
-    allocate_with_refcount_help(env, basic_type, alignment_bytes, value_bytes_intvalue, rc1)
+    allocate_with_refcount_help(env, basic_type, alignment_bytes, value_bytes_intvalue)
 }
 
 pub fn allocate_with_refcount<'a, 'ctx, 'env>(
@@ -2205,74 +2149,22 @@ pub fn allocate_with_refcount_help<'a, 'ctx, 'env>(
     value_type: impl BasicType<'ctx>,
     alignment_bytes: u32,
     number_of_data_bytes: IntValue<'ctx>,
-    initial_refcount: IntValue<'ctx>,
 ) -> PointerValue<'ctx> {
-    let builder = env.builder;
+    let ptr = call_bitcode_fn(
+        env,
+        &[
+            number_of_data_bytes.into(),
+            env.alignment_const(alignment_bytes).into(),
+        ],
+        roc_builtins::bitcode::UTILS_ALLOCATE_WITH_REFCOUNT,
+    )
+    .into_pointer_value();
 
-    let len_type = env.ptr_int();
-    let ptr_width_u32 = env.target_info.ptr_width() as u32;
+    let ptr_type = value_type.ptr_type(AddressSpace::Generic);
 
-    let extra_bytes = alignment_bytes.max(ptr_width_u32);
-
-    let ptr = {
-        // number of bytes we will allocated
-        let number_of_bytes = builder.build_int_add(
-            len_type.const_int(extra_bytes as u64, false),
-            number_of_data_bytes,
-            "add_extra_bytes",
-        );
-
-        env.call_alloc(number_of_bytes, alignment_bytes)
-    };
-
-    // We must return a pointer to the first element:
-    let data_ptr = {
-        let int_type = env.ptr_int();
-        let as_usize_ptr = builder
-            .build_bitcast(
-                ptr,
-                int_type.ptr_type(AddressSpace::Generic),
-                "to_usize_ptr",
-            )
-            .into_pointer_value();
-
-        let index = match extra_bytes {
-            n if n == ptr_width_u32 => 1,
-            n if n == 2 * ptr_width_u32 => 2,
-            _ => unreachable!("invalid extra_bytes, {}", extra_bytes),
-        };
-
-        let index_intvalue = int_type.const_int(index, false);
-
-        let ptr_type = value_type.ptr_type(AddressSpace::Generic);
-
-        unsafe {
-            builder.build_pointer_cast(
-                env.builder
-                    .build_in_bounds_gep(as_usize_ptr, &[index_intvalue], "get_data_ptr"),
-                ptr_type,
-                "alloc_cast_to_desired",
-            )
-        }
-    };
-
-    let refcount_ptr = match extra_bytes {
-        n if n == ptr_width_u32 => {
-            // the allocated pointer is the same as the refcounted pointer
-            unsafe { PointerToRefcount::from_ptr(env, ptr) }
-        }
-        n if n == 2 * ptr_width_u32 => {
-            // the refcount is stored just before the start of the actual data
-            // but in this case (because of alignment) not at the start of the allocated buffer
-            PointerToRefcount::from_ptr_to_data(env, data_ptr)
-        }
-        n => unreachable!("invalid extra_bytes {}", n),
-    };
-
-    // let rc1 = crate::llvm::refcounting::refcount_1(ctx, env.ptr_bytes);
-    refcount_ptr.set_refcount(env, initial_refcount);
-
-    data_ptr
+    env.builder
+        .build_bitcast(ptr, ptr_type, "alloc_cast_to_desired")
+        .into_pointer_value()
 }
 
 macro_rules! dict_key_value_layout {
@@ -2453,7 +2345,7 @@ pub fn load_roc_value<'a, 'ctx, 'env>(
     name: &str,
 ) -> BasicValueEnum<'ctx> {
     if layout.is_passed_by_reference() {
-        let alloca = tag_alloca(env, basic_type_from_layout(env, &layout), name);
+        let alloca = entry_block_alloca_zerofill(env, basic_type_from_layout(env, &layout), name);
 
         store_roc_value(env, layout, alloca, source.into());
 
@@ -2470,7 +2362,7 @@ pub fn use_roc_value<'a, 'ctx, 'env>(
     name: &str,
 ) -> BasicValueEnum<'ctx> {
     if layout.is_passed_by_reference() {
-        let alloca = tag_alloca(env, basic_type_from_layout(env, &layout), name);
+        let alloca = entry_block_alloca_zerofill(env, basic_type_from_layout(env, &layout), name);
 
         env.builder.build_store(alloca, source);
 
@@ -2501,6 +2393,8 @@ pub fn store_roc_value<'a, 'ctx, 'env>(
     value: BasicValueEnum<'ctx>,
 ) {
     if layout.is_passed_by_reference() {
+        debug_assert!(value.is_pointer_value());
+
         let align_bytes = layout.alignment_bytes(env.target_info);
 
         if align_bytes > 0 {
@@ -2614,9 +2508,10 @@ pub fn build_exp_stmt<'a, 'ctx, 'env>(
                             if value_ptr.get_first_use().is_some() {
                                 value_ptr.replace_all_uses_with(destination);
                             } else {
-                                let size = env
-                                    .ptr_int()
-                                    .const_int(layout.stack_size(env.target_info) as u64, false);
+                                let size = env.ptr_int().const_int(
+                                    layout.stack_size_without_alignment(env.target_info) as u64,
+                                    false,
+                                );
 
                                 env.builder
                                     .build_memcpy(
@@ -4689,7 +4584,7 @@ pub fn call_roc_function<'a, 'ctx, 'env>(
             let mut arguments = Vec::from_iter_in(it, env.arena);
 
             let result_type = basic_type_from_layout(env, result_layout);
-            let result_alloca = tag_alloca(env, result_type, "result_value");
+            let result_alloca = entry_block_alloca_zerofill(env, result_type, "result_value");
 
             arguments.push(result_alloca.into());
 
