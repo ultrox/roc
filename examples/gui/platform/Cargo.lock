@@ -1068,7 +1068,6 @@ dependencies = [
  "libc",
  "log",
  "nonempty",
- "page_size",
  "palette",
  "pest",
  "pest_derive",
@@ -1174,7 +1173,6 @@ checksum = "8c2352bd1d0bceb871cb9d40f24360c8133c11d7486b68b5381c1dd1a32015e3"
 dependencies = [
  "libc",
  "libloading",
- "pkg-config",
 ]
 
 [[package]]
@@ -1297,7 +1295,8 @@ dependencies = [
 [[package]]
 name = "metal"
 version = "0.23.1"
-source = "git+https://github.com/gfx-rs/metal-rs?rev=44af5cc#44af5cca340617d42d701264f9bf71d1f3e68096"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0514f491f4cc03632ab399ee01e2c1c1b12d3e1cf2d667c1ff5f87d6dcd2084"
 dependencies = [
  "bitflags",
  "block",
@@ -1368,7 +1367,7 @@ dependencies = [
 [[package]]
 name = "naga"
 version = "0.8.0"
-source = "git+https://github.com/gfx-rs/naga?rev=8e2e39e#8e2e39e4d8fa5bbb657c3b170b4f6607d703e284"
+source = "git+https://github.com/gfx-rs/naga?rev=09d35f3#09d35f363134920a9a477cefa32b29bb4416092b"
 dependencies = [
  "bit-set",
  "bitflags",
@@ -1723,16 +1722,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ef05f2882a8b3e7acc10c153ade2631f7bfc8ce00d2bf3fb8f4e9d2ae6ea5c3"
 dependencies = [
  "ttf-parser",
-]
-
-[[package]]
-name = "page_size"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eebde548fbbf1ea81a99b128872779c437752fb99f217c45245e1a61dcd9edcd"
-dependencies = [
- "libc",
- "winapi",
 ]
 
 [[package]]
@@ -2614,7 +2603,7 @@ dependencies = [
 [[package]]
 name = "wgpu"
 version = "0.12.0"
-source = "git+https://github.com/gfx-rs/wgpu?rev=0545e36#0545e36aa82709cca78c14eb3813f10eea7a9275"
+source = "git+https://github.com/gfx-rs/wgpu?branch=gecko#f99d8604039549272abf523abc0a2cc2d4ac4fb9"
 dependencies = [
  "arrayvec",
  "js-sys",
@@ -2634,7 +2623,7 @@ dependencies = [
 [[package]]
 name = "wgpu-core"
 version = "0.12.0"
-source = "git+https://github.com/gfx-rs/wgpu?rev=0545e36#0545e36aa82709cca78c14eb3813f10eea7a9275"
+source = "git+https://github.com/gfx-rs/wgpu?branch=gecko#f99d8604039549272abf523abc0a2cc2d4ac4fb9"
 dependencies = [
  "arrayvec",
  "bitflags",
@@ -2656,7 +2645,7 @@ dependencies = [
 [[package]]
 name = "wgpu-hal"
 version = "0.12.0"
-source = "git+https://github.com/gfx-rs/wgpu?rev=0545e36#0545e36aa82709cca78c14eb3813f10eea7a9275"
+source = "git+https://github.com/gfx-rs/wgpu?branch=gecko#f99d8604039549272abf523abc0a2cc2d4ac4fb9"
 dependencies = [
  "arrayvec",
  "ash",
@@ -2693,7 +2682,7 @@ dependencies = [
 [[package]]
 name = "wgpu-types"
 version = "0.12.0"
-source = "git+https://github.com/gfx-rs/wgpu?rev=0545e36#0545e36aa82709cca78c14eb3813f10eea7a9275"
+source = "git+https://github.com/gfx-rs/wgpu?branch=gecko#f99d8604039549272abf523abc0a2cc2d4ac4fb9"
 dependencies = [
  "bitflags",
 ]
@@ -2701,7 +2690,7 @@ dependencies = [
 [[package]]
 name = "wgpu_glyph"
 version = "0.16.0"
-source = "git+https://github.com/Anton-4/wgpu_glyph?rev=257d109#257d1098cbafa3c8a0a2465937b06fc730fc6ffb"
+source = "git+https://github.com/Anton-4/wgpu_glyph?rev=41e4509#41e4509d40b4729b45f8ebc886b4524be1b4cf0c"
 dependencies = [
  "bytemuck",
  "glyph_brush",
