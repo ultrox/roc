@@ -45,6 +45,41 @@ const MIN_SECTION_ALIGNMENT: usize = 0x40;
 // TODO: Analyze if this offset is always correct.
 const PLT_ADDRESS_OFFSET: u64 = 0x10;
 
+#[allow(dead_code)]
+#[repr(u32)]
+#[derive(PartialEq)]
+/// https://refspecs.linuxfoundation.org/elf/x86_64-abi-0.95.pdf
+enum RelocTypeX86_64 {
+    //                field, calculation
+    NONE = 0,      // none, none
+    _64 = 1,       // word64, S + A
+    PC32 = 2,      // word32, S + A - P
+    GOT32 = 3,     // word32, G + A
+    PLT32 = 4,     // word32, L + A - P
+    COPY = 5,      // none, none
+    GlobDat = 6,   // word64, S
+    JumpSlot = 7,  // word64, S
+    RELATIVE = 8,  // word64, B + A
+    GOTPCREL = 9,  // word32, G + GOT + A - P
+    _32 = 10,      // word32, S + A
+    _32S = 11,     // word32, S + A
+    _16 = 12,      // word16, S + A
+    PC16 = 13,     // word16, S + A - P
+    _8 = 14,       // word8, S + A
+    PC8 = 15,      // word8, S + A - P
+    DPTMOD64 = 16, // word64
+    DTPOFF64 = 17, // word64
+    TPOFF64 = 18,  // word64
+    TLSGD = 19,    // word32
+    TLSLD = 20,    // word32
+    DTPOFF32 = 21, // word32
+    GOTTPOFF = 22, // word32
+    TPOFF32 = 23,  // word32
+    PC64 = 24,     // word64, S + A - P
+    GOTOFF64 = 25, // word64, S + A - GOT
+    GOTPC32 = 26,  // word32, GOT + A - P
+}
+
 fn report_timing(label: &str, duration: Duration) {
     println!("\t{:9.3} ms   {}", duration.as_secs_f64() * 1000.0, label,);
 }
@@ -291,6 +326,11 @@ fn preprocess_impl(
     time: bool,
 ) -> io::Result<i32> {
     let total_start = SystemTime::now();
+
+    /*
+     * Executable parsing
+     */
+
     let exec_parsing_start = total_start;
     let exec_file = fs::File::open(exec_filename)?;
     let exec_mmap = unsafe { Mmap::map(&exec_file)? };
@@ -302,14 +342,20 @@ fn preprocess_impl(
             return Ok(-1);
         }
     };
+
+    // TODO(Brian): ELF-specific
     let exec_header = load_struct_inplace::<elf::FileHeader64<LittleEndian>>(exec_data, 0);
 
+    // Program Header
     let ph_offset = exec_header.e_phoff.get(NativeEndian);
     let ph_ent_size = exec_header.e_phentsize.get(NativeEndian);
     let ph_num = exec_header.e_phnum.get(NativeEndian);
+
+    // Section Header
     let sh_offset = exec_header.e_shoff.get(NativeEndian);
     let sh_ent_size = exec_header.e_shentsize.get(NativeEndian);
     let sh_num = exec_header.e_shnum.get(NativeEndian);
+
     if verbose {
         println!();
         println!("PH Offset: {:+x}", ph_offset);
@@ -320,7 +366,7 @@ fn preprocess_impl(
         println!("SH Entry Count: {}", sh_num);
     }
 
-    // TODO: Deal with other file formats and architectures.
+    // TODO(Brian): factor out into a function, deal with other file formats and architectures.
     let format = exec_obj.format();
     if format != BinaryFormat::Elf {
         println!("File Format, {:?}, not supported", format);
@@ -360,6 +406,11 @@ fn preprocess_impl(
 
     let exec_parsing_duration = exec_parsing_start.elapsed().unwrap();
 
+    /*
+     * Symbol and PLT processing
+     */
+
+    // Procedure Linkage Table (external functions whose locations were unknown when the platform was built)
     // Extract PLT related information for app functions.
     let symbol_and_plt_processing_start = SystemTime::now();
     let (plt_address, plt_offset) = match exec_obj.section_by_name(".plt") {
@@ -397,7 +448,7 @@ fn preprocess_impl(
         }
     })
     .map(|(_, reloc)| reloc)
-    .filter(|reloc| matches!(reloc.kind(), RelocationKind::Elf(7)));
+    .filter(|reloc| reloc.kind() == RelocationKind::Elf(RelocTypeX86_64::JumpSlot as u32));
 
     let app_syms: Vec<Symbol> = exec_obj
         .dynamic_symbols()
@@ -415,7 +466,7 @@ fn preprocess_impl(
         }
     })
     .map(|(_, reloc)| reloc)
-    .filter(|reloc| matches!(reloc.kind(), RelocationKind::Elf(6)))
+    .filter(|reloc| reloc.kind() == RelocationKind::Elf(RelocTypeX86_64::GlobDat as u32))
     .filter_map(|reloc| {
         for symbol in app_syms.iter() {
             if reloc.target() == RelocationTarget::Symbol(symbol.index()) {
@@ -461,6 +512,10 @@ fn preprocess_impl(
         println!("App Function Address Map: {:+x?}", app_func_addresses);
     }
     let symbol_and_plt_processing_duration = symbol_and_plt_processing_start.elapsed().unwrap();
+
+    /*
+     * Text disassembly
+     */
 
     let text_disassembly_start = SystemTime::now();
     let text_sections: Vec<Section> = exec_obj
@@ -608,6 +663,10 @@ fn preprocess_impl(
         }
     }
     let text_disassembly_duration = text_disassembly_start.elapsed().unwrap();
+
+    /*
+     * Scanning dynamic dependencies
+     */
 
     let scanning_dynamic_deps_start = SystemTime::now();
 
@@ -758,6 +817,10 @@ fn preprocess_impl(
             }
         }
     }
+
+    /*
+     * Platform generation
+     */
 
     let platform_gen_start = SystemTime::now();
 
@@ -1057,6 +1120,10 @@ fn preprocess_impl(
         println!("{:+x?}", md);
     }
 
+    /*
+     * Save metadata
+     */
+
     let saving_metadata_start = SystemTime::now();
     // This block ensure that the metadata is fully written and timed before continuing.
     {
@@ -1068,6 +1135,10 @@ fn preprocess_impl(
         };
     }
     let saving_metadata_duration = saving_metadata_start.elapsed().unwrap();
+
+    /*
+     * Flush data
+     */
 
     let flushing_data_start = SystemTime::now();
     out_mmap.flush()?;
@@ -1138,6 +1209,10 @@ fn surgery_impl(
     };
     let loading_metadata_duration = loading_metadata_start.elapsed().unwrap();
 
+    /*
+     * Parse app
+     */
+
     let app_parsing_start = SystemTime::now();
     let app_file = fs::File::open(app_filename)?;
     let app_mmap = unsafe { Mmap::map(&app_file)? };
@@ -1150,6 +1225,10 @@ fn surgery_impl(
         }
     };
     let app_parsing_duration = app_parsing_start.elapsed().unwrap();
+
+    /*
+     * Parse executable
+     */
 
     let exec_parsing_start = SystemTime::now();
     let exec_file = fs::OpenOptions::new()
@@ -1187,6 +1266,10 @@ fn surgery_impl(
         println!("SH Entry Count: {}", sh_num);
     }
     let exec_parsing_duration = exec_parsing_start.elapsed().unwrap();
+
+    /*
+     * Generate output
+     */
 
     let out_gen_start = SystemTime::now();
     // Backup section header table.
