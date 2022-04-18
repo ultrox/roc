@@ -921,6 +921,10 @@ impl<'a> Procs<'a> {
 
                             let outside_layout = layout;
 
+                            if format!("{:?}", symbol).contains("UserApp.2") {
+                                dbg!(&body.value);
+                            }
+
                             let partial_proc_id = if let Some(partial_proc_id) =
                                 self.partial_procs.symbol_to_id(symbol)
                             {
@@ -961,6 +965,10 @@ impl<'a> Procs<'a> {
                             ) {
                                 Ok((proc, layout)) => {
                                     let top_level = ProcLayout::from_raw(env.arena, layout);
+
+                                    if format!("{:?}", symbol).contains("UserApp.2") {
+                                        dbg!(&proc.body);
+                                    }
 
                                     debug_assert_eq!(
                                         outside_layout, top_level,
@@ -3502,6 +3510,7 @@ pub fn with_hole<'a>(
             mut fields,
             ..
         } => {
+            dbg!(&fields);
             let sorted_fields = match crate::layout::sort_record_fields(
                 env.arena,
                 record_var,
@@ -3898,6 +3907,14 @@ pub fn with_hole<'a>(
 
             let record_symbol = possible_reuse_symbol(env, procs, &loc_expr.value);
 
+            //            if format!("{:?}", record_symbol).contains("#UserApp.model") {
+            //                if format!("{:?}", assigned).contains("#UserApp.IdentId(182)") {
+            //                    dbg!(&loc_expr.value);
+            //                    dbg!(assigned);
+            //                    panic!()
+            //                }
+            //            }
+
             let mut stmt = match field_layouts.as_slice() {
                 [_] => {
                     let mut hole = hole.clone();
@@ -3906,6 +3923,7 @@ pub fn with_hole<'a>(
                     hole
                 }
                 _ => {
+                    dbg!(record_symbol);
                     let expr = Expr::StructAtIndex {
                         index: index.expect("field not in its own type") as u64,
                         field_layouts: field_layouts.into_bump_slice(),
@@ -6816,6 +6834,7 @@ fn specialize_symbol<'a>(
             roc_unify::unify::Mode::EQ,
         );
 
+        dbg!(symbol, original, &expr);
         let result = with_hole(
             env,
             expr.clone(),
@@ -6889,6 +6908,7 @@ fn specialize_symbol<'a>(
         }
 
         Some(partial_proc) => {
+            dbg!(&partial_proc);
             let arg_var = arg_var.unwrap_or(partial_proc.annotation);
             // this symbol is a function, that is used by-name (e.g. as an argument to another
             // function). Register it with the current variable, then create a function pointer
@@ -7004,6 +7024,7 @@ fn assign_to_symbol<'a>(
     match can_reuse_symbol(env, procs, &loc_arg.value) {
         Imported(original) | LocalFunction(original) | UnspecializedExpr(original) => {
             // for functions we must make sure they are specialized correctly
+            dbg!(original);
             specialize_symbol(
                 env,
                 procs,
@@ -7647,6 +7668,7 @@ fn call_specialized_proc<'a>(
             }
         }
     } else {
+        dbg!(proc_name, &loc_args);
         let iter = loc_args.into_iter().rev().zip(field_symbols.iter().rev());
 
         match procs

@@ -134,12 +134,14 @@ updateBlocks = \model ->
                 blockRect = { left: block.left, top: block.top, height: blockHeight, width: blockWidth }
 
                 if isOverlapping blockRect ball then
-                    { block & status: Fading 1 }
+                    { block & status: Removed }
                 else
                     block
+
             Fading amount ->
                 if amount <= 0 then
                     { block & status: Removed }
+
                 else
                     { block & status: Fading (amount - 0.1) }
 
