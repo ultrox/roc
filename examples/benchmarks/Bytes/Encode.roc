@@ -57,7 +57,7 @@ getWidths = \encoders, initial ->
 
 encode : Encoder -> List U8
 encode = \encoder ->
-    output = List.repeat (getWidth encoder) 0
+    output = List.repeat 0 (getWidth encoder)
 
     encodeHelp encoder 0 output
         |> .output
@@ -132,11 +132,10 @@ encodeHelp = \encoder, offset, output ->
             List.walk
                 bs
                 { output, offset }
-                \accum, byte ->
-                    {
-                        offset: accum.offset + 1,
-                        output: List.set accum.output offset byte,
-                    }
+                \accum, byte -> {
+                    offset: accum.offset + 1,
+                    output: List.set accum.output offset byte,
+                }
 
         Sequence _ encoders ->
             List.walk

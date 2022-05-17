@@ -16,6 +16,7 @@ const HasTagId = fn (u16, ?[*]u8) callconv(.C) extern struct { matched: bool, da
 pub const RocList = extern struct {
     bytes: ?[*]u8,
     length: usize,
+    capacity: usize,
 
     pub fn len(self: RocList) usize {
         return self.length;
@@ -26,7 +27,7 @@ pub const RocList = extern struct {
     }
 
     pub fn empty() RocList {
-        return RocList{ .bytes = null, .length = 0 };
+        return RocList{ .bytes = null, .length = 0, .capacity = 0 };
     }
 
     pub fn isUnique(self: RocList) bool {
@@ -50,6 +51,7 @@ pub const RocList = extern struct {
         return RocList{
             .bytes = utils.allocateWithRefcount(data_bytes, alignment),
             .length = length,
+            .capacity = length,
         };
     }
 
@@ -96,7 +98,7 @@ pub const RocList = extern struct {
             if (self.isUnique()) {
                 const new_source = utils.unsafeReallocate(source_ptr, alignment, self.len(), new_length, element_width);
 
-                return RocList{ .bytes = new_source, .length = new_length };
+                return RocList{ .bytes = new_source, .length = new_length, .capacity = new_length };
             }
         }
 
@@ -128,6 +130,7 @@ pub const RocList = extern struct {
         const result = RocList{
             .bytes = first_slot,
             .length = new_length,
+            .capacity = new_length,
         };
 
         utils.decref(self.bytes, old_length * element_width, alignment);
@@ -210,6 +213,7 @@ pub fn listMap(
     }
 }
 
+// List.mapWithIndex : List before, (before, Nat -> after) -> List after
 pub fn listMapWithIndex(
     list: RocList,
     caller: Caller2,
@@ -231,7 +235,8 @@ pub fn listMapWithIndex(
         }
 
         while (i < size) : (i += 1) {
-            caller(data, @ptrCast(?[*]u8, &i), source_ptr + (i * old_element_width), target_ptr + (i * new_element_width));
+            // before, Nat -> after
+            caller(data, source_ptr + (i * old_element_width), @ptrCast(?[*]u8, &i), target_ptr + (i * new_element_width));
         }
 
         return output;
@@ -550,7 +555,8 @@ pub fn listKeepResult(
         var output = RocList.allocate(alignment, list.len(), list.len() * after_width);
         const target_ptr = output.bytes orelse unreachable;
 
-        var temporary = @ptrCast([*]u8, utils.alloc(result_width, alignment));
+        // TODO handle alloc failing!
+        var temporary = utils.alloc(result_width, alignment) orelse unreachable;
 
         if (data_is_owned) {
             inc_n_data(data, size);
@@ -614,7 +620,8 @@ pub fn listWalk(
         inc_n_data(data, list.len());
     }
 
-    const bytes_ptr: [*]u8 = utils.alloc(accum_width, alignment);
+    // TODO handle alloc failing!
+    const bytes_ptr: [*]u8 = utils.alloc(accum_width, alignment) orelse unreachable;
     var b1 = output orelse unreachable;
     var b2 = bytes_ptr;
 
@@ -660,7 +667,8 @@ pub fn listWalkBackwards(
         inc_n_data(data, list.len());
     }
 
-    const bytes_ptr: [*]u8 = utils.alloc(accum_width, alignment);
+    // TODO handle alloc failing!
+    const bytes_ptr: [*]u8 = utils.alloc(accum_width, alignment) orelse unreachable;
     var b1 = output orelse unreachable;
     var b2 = bytes_ptr;
 
@@ -708,7 +716,8 @@ pub fn listWalkUntil(
         return;
     }
 
-    const bytes_ptr: [*]u8 = utils.alloc(continue_stop_width, alignment);
+    // TODO handle alloc failing!
+    const bytes_ptr: [*]u8 = utils.alloc(continue_stop_width, alignment) orelse unreachable;
 
     // NOTE: assumes data bytes are the first bytes in a tag
     @memcpy(bytes_ptr, accum orelse unreachable, accum_width);
@@ -881,11 +890,20 @@ pub fn listSublist(
         }
 
         const keep_len = std.math.min(len, size - start);
-        const drop_len = std.math.max(start, 0);
+        const drop_start_len = start;
+        const drop_end_len = size - (start + keep_len);
 
+        // Decrement the reference counts of elements before `start`.
         var i: usize = 0;
-        while (i < drop_len) : (i += 1) {
+        while (i < drop_start_len) : (i += 1) {
             const element = source_ptr + i * element_width;
+            dec(element);
+        }
+
+        // Decrement the reference counts of elements after `start + keep_len`.
+        i = 0;
+        while (i < drop_end_len) : (i += 1) {
+            const element = source_ptr + (start + keep_len + i) * element_width;
             dec(element);
         }
 
@@ -1231,7 +1249,7 @@ pub fn listConcat(list_a: RocList, list_b: RocList, alignment: u32, element_widt
                 @memcpy(new_source + list_a.len() * element_width, source_b, list_b.len() * element_width);
             }
 
-            return RocList{ .bytes = new_source, .length = total_length };
+            return RocList{ .bytes = new_source, .length = total_length, .capacity = total_length };
         }
     }
     const total_length: usize = list_a.len() + list_b.len();
@@ -1250,95 +1268,56 @@ pub fn listConcat(list_a: RocList, list_b: RocList, alignment: u32, element_widt
     return output;
 }
 
-pub fn listSetInPlace(
-    bytes: ?[*]u8,
+pub fn listReplaceInPlace(
+    list: RocList,
     index: usize,
     element: Opaque,
     element_width: usize,
-    dec: Dec,
-) callconv(.C) ?[*]u8 {
+    out_element: ?[*]u8,
+) callconv(.C) RocList {
     // INVARIANT: bounds checking happens on the roc side
     //
     // at the time of writing, the function is implemented roughly as
-    // `if inBounds then LowLevelListGet input index item else input`
+    // `if inBounds then LowLevelListReplace input index item else input`
     // so we don't do a bounds check here. Hence, the list is also non-empty,
     // because inserting into an empty list is always out of bounds
-
-    return listSetInPlaceHelp(bytes, index, element, element_width, dec);
+    return listReplaceInPlaceHelp(list, index, element, element_width, out_element);
 }
 
-pub fn listSet(
-    bytes: ?[*]u8,
-    length: usize,
+pub fn listReplace(
+    list: RocList,
     alignment: u32,
     index: usize,
     element: Opaque,
     element_width: usize,
-    dec: Dec,
-) callconv(.C) ?[*]u8 {
+    out_element: ?[*]u8,
+) callconv(.C) RocList {
     // INVARIANT: bounds checking happens on the roc side
     //
     // at the time of writing, the function is implemented roughly as
-    // `if inBounds then LowLevelListGet input index item else input`
+    // `if inBounds then LowLevelListReplace input index item else input`
     // so we don't do a bounds check here. Hence, the list is also non-empty,
     // because inserting into an empty list is always out of bounds
-    const ptr: [*]usize = @ptrCast([*]usize, @alignCast(@alignOf(usize), bytes));
-
-    if ((ptr - 1)[0] == utils.REFCOUNT_ONE) {
-        return listSetInPlaceHelp(bytes, index, element, element_width, dec);
-    } else {
-        return listSetImmutable(bytes, length, alignment, index, element, element_width, dec);
-    }
+    return listReplaceInPlaceHelp(list.makeUnique(alignment, element_width), index, element, element_width, out_element);
 }
 
-inline fn listSetInPlaceHelp(
-    bytes: ?[*]u8,
+inline fn listReplaceInPlaceHelp(
+    list: RocList,
     index: usize,
     element: Opaque,
     element_width: usize,
-    dec: Dec,
-) ?[*]u8 {
+    out_element: ?[*]u8,
+) RocList {
     // the element we will replace
-    var element_at_index = (bytes orelse undefined) + (index * element_width);
+    var element_at_index = (list.bytes orelse undefined) + (index * element_width);
 
-    // decrement its refcount
-    dec(element_at_index);
+    // copy out the old element
+    @memcpy(out_element orelse undefined, element_at_index, element_width);
 
     // copy in the new element
     @memcpy(element_at_index, element orelse undefined, element_width);
 
-    return bytes;
-}
-
-inline fn listSetImmutable(
-    old_bytes: ?[*]u8,
-    length: usize,
-    alignment: u32,
-    index: usize,
-    element: Opaque,
-    element_width: usize,
-    dec: Dec,
-) ?[*]u8 {
-    const data_bytes = length * element_width;
-
-    var new_bytes = utils.allocateWithRefcount(data_bytes, alignment);
-
-    @memcpy(new_bytes, old_bytes orelse undefined, data_bytes);
-
-    // the element we will replace
-    var element_at_index = new_bytes + (index * element_width);
-
-    // decrement its refcount
-    dec(element_at_index);
-
-    // copy in the new element
-    @memcpy(element_at_index, element orelse undefined, element_width);
-
-    // consume RC token of original
-    utils.decref(old_bytes, data_bytes, alignment);
-
-    //return list;
-    return new_bytes;
+    return list;
 }
 
 pub fn listFindUnsafe(
@@ -1347,7 +1326,6 @@ pub fn listFindUnsafe(
     data: Opaque,
     inc_n_data: IncN,
     data_is_owned: bool,
-    alignment: u32,
     element_width: usize,
     inc: Inc,
     dec: Dec,
@@ -1375,4 +1353,10 @@ pub fn listFindUnsafe(
     } else {
         return .{ .value = null, .found = false };
     }
+}
+
+pub fn listIsUnique(
+    list: RocList,
+) callconv(.C) bool {
+    return list.isEmpty() or list.isUnique();
 }

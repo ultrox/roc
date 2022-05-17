@@ -270,9 +270,9 @@ use roc_std::{RocList, RocStr};
 #[cfg(any(feature = "gen-wasm"))]
 fn small_str_literal() {
     assert_evals_to!(
-        "\"JJJJJJJ\"",
-        [0x4a, 0x4a, 0x4a, 0x4a, 0x4a, 0x4a, 0x4a, 0b1000_0111],
-        [u8; 8]
+        "\"01234567890\"",
+        [0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x30, 0x8b],
+        [u8; 12]
     );
 }
 
@@ -311,8 +311,21 @@ fn small_str_zeroed_literal() {
                     functionWithReusedSpace True
                  "#
         ),
-        [0x4a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0b1000_0001],
-        [u8; 8]
+        [
+            0x4a,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0b1000_0001
+        ],
+        [u8; 12]
     );
 }
 
@@ -320,7 +333,7 @@ fn small_str_zeroed_literal() {
 fn long_str_literal() {
     assert_evals_to!(
         "\"0123456789 123456789 123456789\"",
-        RocStr::from_slice(b"0123456789 123456789 123456789"),
+        RocStr::from("0123456789 123456789 123456789"),
         RocStr
     );
 }
@@ -328,18 +341,18 @@ fn long_str_literal() {
 #[test]
 fn small_str_concat_empty_first_arg() {
     assert_evals_to!(
-        r#"Str.concat "" "JJJJJJJ""#,
-        [0x4a, 0x4a, 0x4a, 0x4a, 0x4a, 0x4a, 0x4a, 0b1000_0111],
-        [u8; 8]
+        r#"Str.concat "" "01234567890""#,
+        [0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x30, 0x8b],
+        [u8; 12]
     );
 }
 
 #[test]
 fn small_str_concat_empty_second_arg() {
     assert_evals_to!(
-        r#"Str.concat "JJJJJJJ" """#,
-        [0x4a, 0x4a, 0x4a, 0x4a, 0x4a, 0x4a, 0x4a, 0b1000_0111],
-        [u8; 8]
+        r#"Str.concat "01234567890" """#,
+        [0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x30, 0x8b],
+        [u8; 12]
     );
 }
 
@@ -347,7 +360,7 @@ fn small_str_concat_empty_second_arg() {
 fn small_str_concat_small_to_big() {
     assert_evals_to!(
         r#"Str.concat "abc" " this is longer than 7 chars""#,
-        RocStr::from_slice(b"abc this is longer than 7 chars"),
+        RocStr::from("abc this is longer than 7 chars"),
         RocStr
     );
 }
@@ -355,9 +368,9 @@ fn small_str_concat_small_to_big() {
 #[test]
 fn small_str_concat_small_to_small_staying_small() {
     assert_evals_to!(
-        r#"Str.concat "J" "JJJJJJ""#,
-        [0x4a, 0x4a, 0x4a, 0x4a, 0x4a, 0x4a, 0x4a, 0b1000_0111],
-        [u8; 8]
+        r#"Str.concat "0" "1234567890""#,
+        [0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x30, 0x8b],
+        [u8; 12]
     );
 }
 
@@ -365,7 +378,7 @@ fn small_str_concat_small_to_small_staying_small() {
 fn small_str_concat_small_to_small_overflow_to_big() {
     assert_evals_to!(
         r#"Str.concat "abcdefg" "hijklmn""#,
-        RocStr::from_slice(b"abcdefghijklmn"),
+        RocStr::from("abcdefghijklmn"),
         RocStr
     );
 }
@@ -1119,5 +1132,217 @@ fn str_trim_right_small_to_small_shared() {
         ),
         (RocStr::from(" hello "), RocStr::from(" hello"),),
         (RocStr, RocStr)
+    );
+}
+
+#[test]
+fn str_to_nat() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+             when Str.toNat "1" is
+                 Ok n -> n
+                 Err _ -> 0
+                "#
+        ),
+        1,
+        usize
+    );
+}
+
+#[test]
+fn str_to_i128() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+             when Str.toI128 "1" is
+                 Ok n -> n
+                 Err _ -> 0
+                "#
+        ),
+        1,
+        i128
+    );
+}
+
+#[test]
+fn str_to_u128() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+             when Str.toU128 "1" is
+                 Ok n -> n
+                 Err _ -> 0
+                "#
+        ),
+        1,
+        u128
+    );
+}
+
+#[test]
+fn str_to_i64() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+             when Str.toI64 "1" is
+                 Ok n -> n
+                 Err _ -> 0
+                "#
+        ),
+        1,
+        i64
+    );
+}
+
+#[test]
+fn str_to_u64() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+             when Str.toU64 "1" is
+                 Ok n -> n
+                 Err _ -> 0
+                "#
+        ),
+        1,
+        u64
+    );
+}
+
+#[test]
+fn str_to_i32() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+             when Str.toI32 "1" is
+                 Ok n -> n
+                 Err _ -> 0
+                "#
+        ),
+        1,
+        i32
+    );
+}
+
+#[test]
+fn str_to_u32() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+             when Str.toU32 "1" is
+                 Ok n -> n
+                 Err _ -> 0
+                "#
+        ),
+        1,
+        u32
+    );
+}
+
+#[test]
+fn str_to_i16() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+             when Str.toI16 "1" is
+                 Ok n -> n
+                 Err _ -> 0
+                "#
+        ),
+        1,
+        i16
+    );
+}
+
+#[test]
+fn str_to_u16() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+             when Str.toU16 "1" is
+                 Ok n -> n
+                 Err _ -> 0
+                "#
+        ),
+        1,
+        u16
+    );
+}
+
+#[test]
+fn str_to_i8() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+             when Str.toI8 "1" is
+                 Ok n -> n
+                 Err _ -> 0
+                "#
+        ),
+        1,
+        i8
+    );
+}
+
+#[test]
+fn str_to_u8() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+             when Str.toU8 "1" is
+                 Ok n -> n
+                 Err _ -> 0
+                "#
+        ),
+        1,
+        u8
+    );
+}
+
+#[test]
+fn str_to_f64() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+             when Str.toF64 "1.0" is
+                 Ok n -> n
+                 Err _ -> 0
+             "#
+        ),
+        1.0,
+        f64
+    );
+}
+
+#[test]
+fn str_to_f32() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+             when Str.toF32 "1.0" is
+                 Ok n -> n
+                 Err _ -> 0
+             "#
+        ),
+        1.0,
+        f32
+    );
+}
+
+#[test]
+fn str_to_dec() {
+    use roc_std::RocDec;
+
+    assert_evals_to!(
+        indoc!(
+            r#"
+             when Str.toDec "1.0" is
+                 Ok n -> n
+                 Err _ -> 0
+             "#
+        ),
+        RocDec::from_str("1.0").unwrap(),
+        RocDec
     );
 }

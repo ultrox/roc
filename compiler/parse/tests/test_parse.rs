@@ -75,18 +75,31 @@ mod test_parse {
                 let mut base = std::path::PathBuf::from("tests");
                 base.push("snapshots");
                 let pass_or_fail_names = list(&base);
+                let mut extra_test_files = std::collections::HashSet::new();
                 for res in pass_or_fail_names {
-                    assert!(res == "pass" || res == "fail");
+                    assert!(res == "pass" || res == "fail", "a pass or fail filename was neither \"pass\" nor \"fail\", but rather: {:?}", res);
                     let res_dir = base.join(&res);
                     for file in list(&res_dir) {
-                        if let Some(file) = file.strip_suffix(".roc") {
-                            assert!(tests.contains(format!("{}/{}", &res, file).as_str()), "{}", file);
-                        } else if let Some(file) = file.strip_suffix(".result-ast") {
-                            assert!(tests.contains(format!("{}/{}", &res, file).as_str()), "{}", file);
+                        let test = if let Some(test) = file.strip_suffix(".roc") {
+                            test
+                        } else if let Some(test) = file.strip_suffix(".result-ast") {
+                            test
                         } else {
-                            panic!("unexpected test file found: {}", file);
+                            panic!("unexpected file found in tests/snapshots: {}", file);
+                        };
+                        let test_name = format!("{}/{}", &res, test);
+                        if !tests.contains(test_name.as_str()) {
+                            extra_test_files.insert(test_name);
                         }
                     }
+                }
+
+                if extra_test_files.len() > 0 {
+                    eprintln!("Found extra test files:");
+                    for file in extra_test_files {
+                        eprintln!("{}", file);
+                    }
+                    panic!("Add entries for these in the `snapshot_tests!` macro in test_parse.rs");
                 }
             }
 
@@ -105,16 +118,22 @@ mod test_parse {
         };
     }
 
+    // see tests/snapshots to see test input(.roc) and expected output(.result-ast)
     snapshot_tests! {
         fail/type_argument_no_arrow.expr,
         fail/type_double_comma.expr,
+        pass/plus_if.expr,
+        pass/list_closing_indent_not_enough.expr,
+        pass/ability_single_line.expr,
+        pass/ability_multi_line.expr,
+        pass/ability_demand_signature_is_multiline.expr,
+        pass/ability_two_in_a_row.expr,
         pass/add_var_with_spaces.expr,
         pass/add_with_spaces.expr,
         pass/annotated_record_destructure.expr,
         pass/annotated_tag_destructure.expr,
-        pass/apply_global_tag.expr,
-        pass/apply_parenthetical_global_tag_args.expr,
-        pass/apply_private_tag.expr,
+        pass/apply_tag.expr,
+        pass/apply_parenthetical_tag_args.expr,
         pass/apply_three_args.expr,
         pass/apply_two_args.expr,
         pass/apply_unary_negation.expr,
@@ -122,10 +141,10 @@ mod test_parse {
         pass/basic_apply.expr,
         pass/basic_docs.expr,
         pass/basic_field.expr,
-        pass/basic_global_tag.expr,
-        pass/basic_private_tag.expr,
+        pass/basic_tag.expr,
         pass/basic_var.expr,
         pass/closure_with_underscores.expr,
+        pass/comment_after_def.module,
         pass/comment_after_op.expr,
         pass/comment_before_op.expr,
         pass/comment_inside_empty_list.expr,
@@ -133,6 +152,8 @@ mod test_parse {
         pass/destructure_tag_assignment.expr,
         pass/empty_app_header.header,
         pass/empty_interface_header.header,
+        pass/empty_hosted_header.header,
+        pass/nonempty_hosted_header.header,
         pass/empty_list.expr,
         pass/empty_platform_header.header,
         pass/empty_record.expr,
@@ -140,6 +161,7 @@ mod test_parse {
         pass/equals_with_spaces.expr,
         pass/equals.expr,
         pass/expect.expr,
+        pass/record_type_with_function.expr,
         pass/float_with_underscores.expr,
         pass/full_app_header_trailing_commas.header,
         pass/full_app_header.header,
@@ -148,7 +170,10 @@ mod test_parse {
         pass/highest_int.expr,
         pass/if_def.expr,
         pass/int_with_underscore.expr,
+        pass/interface_with_newline.header,
         pass/lowest_float.expr,
+        pass/list_closing_same_indent_no_trailing_comma.expr,
+        pass/list_closing_same_indent_with_trailing_comma.expr,
         pass/lowest_int.expr,
         pass/malformed_ident_due_to_underscore.expr,
         pass/malformed_pattern_field_access.expr, // See https://github.com/rtfeldman/roc/issues/399
@@ -179,13 +204,23 @@ mod test_parse {
         pass/newline_singleton_list.expr,
         pass/nonempty_platform_header.header,
         pass/not_docs.expr,
+        pass/number_literal_suffixes.expr,
         pass/one_backpassing.expr,
         pass/one_char_string.expr,
         pass/one_def.expr,
         pass/one_minus_two.expr,
         pass/one_plus_two.expr,
         pass/one_spaced_def.expr,
+        pass/opaque_simple.module,
+        pass/opaque_with_type_arguments.module,
+        pass/opaque_reference_expr.expr,
+        pass/opaque_reference_expr_with_arguments.expr,
+        pass/opaque_reference_pattern.expr,
+        pass/opaque_reference_pattern_with_arguments.expr,
         pass/ops_with_newlines.expr,
+        pass/outdented_list.expr,
+        pass/outdented_record.expr,
+        pass/outdented_app_with_record.expr,
         pass/packed_singleton_list.expr,
         pass/parenthetical_apply.expr,
         pass/parenthetical_basic_field.expr,
@@ -197,14 +232,15 @@ mod test_parse {
         pass/pos_inf_float.expr,
         pass/positive_float.expr,
         pass/positive_int.expr,
-        pass/private_qualified_tag.expr,
+        pass/provides_type.header,
         pass/qualified_field.expr,
-        pass/qualified_global_tag.expr,
+        pass/qualified_tag.expr,
         pass/qualified_var.expr,
         pass/record_destructure_def.expr,
         pass/record_func_type_decl.expr,
         pass/record_update.expr,
         pass/record_with_if.expr,
+        pass/requires_type.header,
         pass/single_arg_closure.expr,
         pass/single_underscore_closure.expr,
         pass/space_only_after_minus.expr,
@@ -243,6 +279,11 @@ mod test_parse {
         pass/when_with_negative_numbers.expr,
         pass/when_with_numbers.expr,
         pass/when_with_records.expr,
+        pass/where_clause_function.expr,
+        pass/where_clause_non_function.expr,
+        pass/where_clause_multiple_has.expr,
+        pass/where_clause_multiple_has_across_newlines.expr,
+        pass/where_clause_on_newline.expr,
         pass/zero_float.expr,
         pass/zero_int.expr,
     }
@@ -259,20 +300,37 @@ mod test_parse {
         let input_path = parent.join(&format!("{}.{}.roc", name, ty));
         let result_path = parent.join(&format!("{}.{}.result-ast", name, ty));
 
-        let input = std::fs::read_to_string(&input_path).unwrap();
+        let input = std::fs::read_to_string(&input_path).unwrap_or_else(|err| {
+            panic!(
+                "Could not find a snapshot test result at {:?} - {:?}",
+                input_path, err
+            )
+        });
 
         let result = func(&input);
 
         let actual_result = if should_pass {
-            result.unwrap()
+            result.expect("The source code for this test did not successfully parse!")
         } else {
-            result.unwrap_err()
+            result.expect_err(
+                "The source code for this test successfully parsed, but it was not expected to!",
+            )
         };
 
         if std::env::var("ROC_PARSER_SNAPSHOT_TEST_OVERWRITE").is_ok() {
             std::fs::write(&result_path, actual_result).unwrap();
         } else {
-            let expected_result = std::fs::read_to_string(&result_path).unwrap();
+            let expected_result = std::fs::read_to_string(&result_path).unwrap_or_else(|e| {
+                panic!(
+                    "Error opening test output file {}:\n\
+                        {:?}
+                        Supposing the file is missing, consider running the tests with:\n\
+                        `env ROC_PARSER_SNAPSHOT_TEST_OVERWRITE=1 cargo test ...`\n\
+                        and committing the file that creates.",
+                    result_path.display(),
+                    e
+                );
+            });
 
             assert_multiline_str_eq!(expected_result, actual_result);
         }
@@ -284,7 +342,7 @@ mod test_parse {
         assert_eq!(Ok(expected_expr), actual);
     }
 
-    fn assert_parsing_fails<'a>(input: &'a str, _reason: SyntaxError) {
+    fn assert_parsing_fails(input: &str, _reason: SyntaxError) {
         let arena = Bump::new();
         let actual = parse_expr_with(&arena, input);
 
@@ -487,18 +545,27 @@ mod test_parse {
     }
 
     #[quickcheck]
-    fn all_f64_values_parse(num: f64) {
-        let string = num.to_string();
-        if string.contains('.') {
-            assert_parses_to(&string, Float(&string));
-        } else if num.is_nan() {
-            assert_parses_to(&string, Expr::GlobalTag(&string));
-        } else if num.is_finite() {
-            // These are whole numbers. Add the `.0` back to make float.
-            let float_string = format!("{}.0", string);
-            assert_parses_to(&float_string, Float(&float_string));
+    fn all_f64_values_parse(mut num: f64) {
+        // NaN, Infinity, -Infinity (these would all parse as tags in Roc)
+        if !num.is_finite() {
+            num = 0.0;
         }
+
+        // These can potentially be whole numbers. `Display` omits the decimal point for those,
+        // causing them to no longer be parsed as fractional numbers by Roc.
+        // Using `Debug` instead of `Display` ensures they always have a decimal point.
+        let float_string = format!("{:?}", num);
+
+        assert_parses_to(float_string.as_str(), Float(float_string.as_str()));
     }
+
+    // SINGLE QUOTE LITERAL
+    #[test]
+    fn single_quote() {
+        assert_parses_to("'b'", Expr::SingleQuote("b"));
+    }
+
+    // RECORD LITERALS
 
     // #[test]
     // fn type_signature_def() {
@@ -593,125 +660,17 @@ mod test_parse {
     // }
 
     // #[test]
-    // fn ann_private_open_union() {
+    // fn ann_open_union() {
     //     let arena = Bump::new();
     //     let newline = bumpalo::vec![in &arena; Newline];
     //     let newlines = bumpalo::vec![in &arena; Newline, Newline];
-    //     let tag1 = Tag::Private {
-    //         name: Located::new(0, 0, 8, 13, "@True"),
-    //         args: &[],
-    //     };
-    //     let tag2arg1 = Located::new(0, 0, 24, 27, TypeAnnotation::Apply("", "Two", &[]));
-    //     let tag2arg2 = Located::new(0, 0, 28, 34, TypeAnnotation::Apply("", "Things", &[]));
-    //     let tag2args = bumpalo::vec![in &arena; tag2arg1, tag2arg2];
-    //     let tag2 = Tag::Private {
-    //         name: Located::new(0, 0, 15, 23, "@Perhaps"),
-    //         args: tag2args.into_bump_slice(),
-    //     };
-    //     let tags = bumpalo::vec![in &arena;
-    //         Located::new(0, 0, 8, 13, tag1),
-    //         Located::new(0, 0, 15, 34, tag2)
-    //     ];
-    //     let loc_wildcard = Located::new(0, 0, 36, 37, TypeAnnotation::Wildcard);
-    //     let applied_ann = TypeAnnotation::TagUnion {
-    //         tags: tags.into_bump_slice(),
-    //         ext: Some(arena.alloc(loc_wildcard)),
-    //     };
-    //     let signature = Def::Annotation(
-    //         Located::new(0, 0, 0, 3, Identifier("foo")),
-    //         Located::new(0, 0, 6, 37, applied_ann),
-    //     );
-    //     let def = Def::Body(
-    //         arena.alloc(Located::new(1, 1, 0, 3, Identifier("foo"))),
-    //         arena.alloc(Located::new(1, 1, 6, 10, Expr::GlobalTag("True"))),
-    //     );
-    //     let spaced_def = Def::SpaceBefore(arena.alloc(def), newline.into_bump_slice());
-    //     let loc_def = &*arena.alloc(Located::new(1, 1, 0, 10, spaced_def));
-
-    //     let loc_ann = &*arena.alloc(Located::new(0, 0, 0, 3, signature));
-    //     let defs = &[loc_ann, loc_def];
-    //     let ret = Expr::SpaceBefore(arena.alloc(Num("42")), newlines.into_bump_slice());
-    //     let loc_ret = Located::new(3, 3, 0, 2, ret);
-    //     let expected = Defs(defs, arena.alloc(loc_ret));
-
-    //     assert_parses_to(
-    //         indoc!(
-    //             r#"
-    //             foo : [ @True, @Perhaps Two Things ]*
-    //             foo = True
-
-    //             42
-    //             "#
-    //         ),
-    //         expected,
-    //     );
-    // }
-
-    // #[test]
-    // fn ann_private_closed_union() {
-    //     let arena = Bump::new();
-    //     let newline = bumpalo::vec![in &arena; Newline];
-    //     let newlines = bumpalo::vec![in &arena; Newline, Newline];
-    //     let tag1 = Tag::Private {
-    //         name: Located::new(0, 0, 8, 13, "@True"),
-    //         args: &[],
-    //     };
-    //     let tag2arg = Located::new(0, 0, 24, 29, TypeAnnotation::Apply("", "Thing", &[]));
-    //     let tag2args = bumpalo::vec![in &arena; tag2arg];
-    //     let tag2 = Tag::Private {
-    //         name: Located::new(0, 0, 15, 23, "@Perhaps"),
-    //         args: tag2args.into_bump_slice(),
-    //     };
-    //     let tags = bumpalo::vec![in &arena;
-    //         Located::new(0, 0, 8, 13, tag1),
-    //         Located::new(0, 0, 15, 29, tag2)
-    //     ];
-    //     let applied_ann = TypeAnnotation::TagUnion {
-    //         tags: tags.into_bump_slice(),
-    //         ext: None,
-    //     };
-    //     let signature = Def::Annotation(
-    //         Located::new(0, 0, 0, 3, Identifier("foo")),
-    //         Located::new(0, 0, 6, 31, applied_ann),
-    //     );
-    //     let def = Def::Body(
-    //         arena.alloc(Located::new(1, 1, 0, 3, Identifier("foo"))),
-    //         arena.alloc(Located::new(1, 1, 6, 10, Expr::GlobalTag("True"))),
-    //     );
-    //     let spaced_def = Def::SpaceBefore(arena.alloc(def), newline.into_bump_slice());
-    //     let loc_def = &*arena.alloc(Located::new(1, 1, 0, 10, spaced_def));
-
-    //     let loc_ann = &*arena.alloc(Located::new(0, 0, 0, 3, signature));
-    //     let defs = &[loc_ann, loc_def];
-    //     let ret = Expr::SpaceBefore(arena.alloc(Num("42")), newlines.into_bump_slice());
-    //     let loc_ret = Located::new(3, 3, 0, 2, ret);
-    //     let expected = Defs(defs, arena.alloc(loc_ret));
-
-    //     assert_parses_to(
-    //         indoc!(
-    //             r#"
-    //             foo : [ @True, @Perhaps Thing ]
-    //             foo = True
-
-    //             42
-    //             "#
-    //         ),
-    //         expected,
-    //     );
-    // }
-
-    // #[test]
-    // fn ann_global_open_union() {
-    //     let arena = Bump::new();
-    //     let newline = bumpalo::vec![in &arena; Newline];
-    //     let newlines = bumpalo::vec![in &arena; Newline, Newline];
-    //     let tag1 = Tag::Global {
+    //     let tag1 = Tag::Apply {
     //         name: Located::new(0, 0, 8, 12, "True"),
     //         args: &[],
     //     };
     //     let tag2arg = Located::new(0, 0, 22, 27, TypeAnnotation::Apply("", "Thing", &[]));
     //     let tag2args = bumpalo::vec![in &arena; tag2arg];
-    //     let tag2 = Tag::Global {
+    //     let tag2 = Tag::Apply {
     //         name: Located::new(0, 0, 14, 21, "Perhaps"),
     //         args: tag2args.into_bump_slice(),
     //     };
@@ -730,7 +689,7 @@ mod test_parse {
     //     );
     //     let def = Def::Body(
     //         arena.alloc(Located::new(1, 1, 0, 3, Identifier("foo"))),
-    //         arena.alloc(Located::new(1, 1, 6, 10, Expr::GlobalTag("True"))),
+    //         arena.alloc(Located::new(1, 1, 6, 10, Expr::Tag("True"))),
     //     );
     //     let spaced_def = Def::SpaceBefore(arena.alloc(def), newline.into_bump_slice());
     //     let loc_def = &*arena.alloc(Located::new(1, 1, 0, 10, spaced_def));
@@ -755,17 +714,17 @@ mod test_parse {
     // }
 
     // #[test]
-    // fn ann_global_closed_union() {
+    // fn ann_closed_union() {
     //     let arena = Bump::new();
     //     let newline = bumpalo::vec![in &arena; Newline];
     //     let newlines = bumpalo::vec![in &arena; Newline, Newline];
-    //     let tag1 = Tag::Global {
+    //     let tag1 = Tag::Apply {
     //         name: Located::new(0, 0, 8, 12, "True"),
     //         args: &[],
     //     };
     //     let tag2arg = Located::new(0, 0, 22, 27, TypeAnnotation::Apply("", "Thing", &[]));
     //     let tag2args = bumpalo::vec![in &arena; tag2arg];
-    //     let tag2 = Tag::Global {
+    //     let tag2 = Tag::Apply {
     //         name: Located::new(0, 0, 14, 21, "Perhaps"),
     //         args: tag2args.into_bump_slice(),
     //     };
@@ -783,7 +742,7 @@ mod test_parse {
     //     );
     //     let def = Def::Body(
     //         arena.alloc(Located::new(1, 1, 0, 3, Identifier("foo"))),
-    //         arena.alloc(Located::new(1, 1, 6, 10, Expr::GlobalTag("True"))),
+    //         arena.alloc(Located::new(1, 1, 6, 10, Expr::Tag("True"))),
     //     );
     //     let spaced_def = Def::SpaceBefore(arena.alloc(def), newline.into_bump_slice());
     //     let loc_def = &*arena.alloc(Located::new(1, 1, 0, 10, spaced_def));
@@ -861,7 +820,7 @@ mod test_parse {
             }
             Err((_, _fail, _state)) => {
                 // dbg!(_fail, _state);
-                assert!(false);
+                panic!("Failed to parse!");
             }
         }
     }

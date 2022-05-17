@@ -48,7 +48,6 @@ impl Progress {
 pub enum SyntaxError<'a> {
     Unexpected(Region),
     OutdentedTooFar,
-    ConditionFailed,
     TooManyLines,
     Eof(Region),
     InvalidPattern,
@@ -59,10 +58,55 @@ pub enum SyntaxError<'a> {
     Todo,
     Type(EType<'a>),
     Pattern(EPattern<'a>),
-    Expr(EExpr<'a>),
+    Expr(EExpr<'a>, Position),
     Header(EHeader<'a>),
     Space(BadInputError),
     NotEndOfFile(Position),
+}
+pub trait SpaceProblem {
+    fn space_problem(e: BadInputError, pos: Position) -> Self;
+}
+
+macro_rules! impl_space_problem {
+    ($($name:ident $(< $lt:tt >)?),*) => {
+        $(
+            impl $(< $lt >)? SpaceProblem for $name $(< $lt >)? {
+                fn space_problem(e: BadInputError, pos: Position) -> Self {
+                    Self::Space(e, pos)
+                }
+            }
+        )*
+    };
+}
+
+impl_space_problem! {
+    EExpect<'a>,
+    EExposes,
+    EExpr<'a>,
+    EGenerates,
+    EGeneratesWith,
+    EHeader<'a>,
+    EIf<'a>,
+    EImports,
+    EInParens<'a>,
+    ELambda<'a>,
+    EList<'a>,
+    EPackageEntry<'a>,
+    EPackages<'a>,
+    EPattern<'a>,
+    EProvides<'a>,
+    ERecord<'a>,
+    ERequires<'a>,
+    EString<'a>,
+    EType<'a>,
+    ETypeInParens<'a>,
+    ETypeRecord<'a>,
+    ETypeTagUnion<'a>,
+    ETypedIdent<'a>,
+    EWhen<'a>,
+    EAbility<'a>,
+    PInParens<'a>,
+    PRecord<'a>
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,7 +116,8 @@ pub enum EHeader<'a> {
     Imports(EImports, Position),
     Requires(ERequires<'a>, Position),
     Packages(EPackages<'a>, Position),
-    Effects(EEffects<'a>, Position),
+    Generates(EGenerates, Position),
+    GeneratesWith(EGeneratesWith, Position),
 
     Space(BadInputError, Position),
     Start(Position),
@@ -166,22 +211,6 @@ pub enum EPackageEntry<'a> {
     Space(BadInputError, Position),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EEffects<'a> {
-    Space(BadInputError, Position),
-    Effects(Position),
-    Open(Position),
-    IndentEffects(Position),
-    ListStart(Position),
-    ListEnd(Position),
-    IndentListStart(Position),
-    IndentListEnd(Position),
-    TypedIdent(ETypedIdent<'a>, Position),
-    ShorthandDot(Position),
-    Shorthand(Position),
-    TypeName(Position),
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EImports {
     Open(Position),
@@ -201,6 +230,30 @@ pub enum EImports {
     IndentSetEnd(Position),
     SetStart(Position),
     SetEnd(Position),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EGenerates {
+    Open(Position),
+    Generates(Position),
+    IndentGenerates(Position),
+    Identifier(Position),
+    Space(BadInputError, Position),
+    IndentTypeStart(Position),
+    IndentTypeEnd(Position),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EGeneratesWith {
+    Open(Position),
+    With(Position),
+    IndentWith(Position),
+    IndentListStart(Position),
+    IndentListEnd(Position),
+    ListStart(Position),
+    ListEnd(Position),
+    Identifier(Position),
+    Space(BadInputError, Position),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,12 +290,10 @@ impl<'a, T> SourceError<'a, T> {
         }
     }
 
-    pub fn into_parse_problem(self, filename: std::path::PathBuf) -> ParseProblem<'a, T> {
-        ParseProblem {
-            pos: Position::default(),
-            problem: self.problem,
+    pub fn into_file_error(self, filename: std::path::PathBuf) -> FileError<'a, T> {
+        FileError {
+            problem: self,
             filename,
-            bytes: self.bytes,
         }
     }
 }
@@ -255,17 +306,12 @@ impl<'a> SyntaxError<'a> {
         }
     }
 
-    pub fn into_parse_problem(
+    pub fn into_file_error(
         self,
         filename: std::path::PathBuf,
         state: &State<'a>,
-    ) -> ParseProblem<'a, SyntaxError<'a>> {
-        ParseProblem {
-            pos: Position::default(),
-            problem: self,
-            filename,
-            bytes: state.original_bytes(),
-        }
+    ) -> FileError<'a, SyntaxError<'a>> {
+        self.into_source_error(state).into_file_error(filename)
     }
 }
 
@@ -286,6 +332,7 @@ pub enum EExpr<'a> {
     DefMissingFinalExpr2(&'a EExpr<'a>, Position),
     Type(EType<'a>, Position),
     Pattern(&'a EPattern<'a>, Position),
+    Ability(EAbility<'a>, Position),
     IndentDefBody(Position),
     IndentEquals(Position),
     IndentAnnotation(Position),
@@ -310,6 +357,7 @@ pub enum EExpr<'a> {
     InParens(EInParens<'a>, Position),
     Record(ERecord<'a>, Position),
     Str(EString<'a>, Position),
+    SingleQuote(EString<'a>, Position),
     Number(ENumber, Position),
     List(EList<'a>, Position),
 
@@ -427,6 +475,16 @@ pub enum EWhen<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EAbility<'a> {
+    Space(BadInputError, Position),
+    Type(EType<'a>, Position),
+
+    DemandAlignment(i32, Position),
+    DemandName(Position),
+    DemandColon(Position),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EIf<'a> {
     Space(BadInputError, Position),
     If(Position),
@@ -504,6 +562,8 @@ pub enum PInParens<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EType<'a> {
+    Space(BadInputError, Position),
+
     TRecord(ETypeRecord<'a>, Position),
     TTagUnion(ETypeTagUnion<'a>, Position),
     TInParens(ETypeInParens<'a>, Position),
@@ -515,8 +575,9 @@ pub enum EType<'a> {
     ///
     TStart(Position),
     TEnd(Position),
-    TSpace(BadInputError, Position),
     TFunctionArgument(Position),
+    TWhereBar(Position),
+    THasClause(Position),
     ///
     TIndentStart(Position),
     TIndentEnd(Position),
@@ -594,11 +655,9 @@ pub struct SourceError<'a, T> {
 }
 
 #[derive(Debug)]
-pub struct ParseProblem<'a, T> {
-    pub pos: Position,
-    pub problem: T,
+pub struct FileError<'a, T> {
+    pub problem: SourceError<'a, T>,
     pub filename: std::path::PathBuf,
-    pub bytes: &'a [u8],
 }
 
 pub trait Parser<'a, Output, Error> {
@@ -666,9 +725,8 @@ where
         let cur_indent = INDENT.with(|i| *i.borrow());
 
         println!(
-            "@{:>5}:{:<5}: {}{:<50}",
-            state.line,
-            state.column,
+            "{:>5?}: {}{:<50}",
+            state.pos(),
             &indent_text[..cur_indent * 2],
             self.message
         );
@@ -683,9 +741,8 @@ where
         };
 
         println!(
-            "@{:>5}:{:<5}: {}{:<50} {:<15} {:?}",
-            state.line,
-            state.column,
+            "{:<5?}: {}{:<50} {:<15} {:?}",
+            state.pos(),
             &indent_text[..cur_indent * 2],
             self.message,
             format!("{:?}", progress),
@@ -1154,11 +1211,11 @@ macro_rules! collection {
 
 #[macro_export]
 macro_rules! collection_trailing_sep_e {
-    ($opening_brace:expr, $elem:expr, $delimiter:expr, $closing_brace:expr, $min_indent:expr, $open_problem:expr, $space_problem:expr, $indent_problem:expr, $space_before:expr) => {
+    ($opening_brace:expr, $elem:expr, $delimiter:expr, $closing_brace:expr, $min_indent:expr, $open_problem:expr, $indent_problem:expr, $space_before:expr) => {
         skip_first!(
             $opening_brace,
             |arena, state| {
-                let (_, spaces, state) = space0_e($min_indent, $space_problem, $indent_problem)
+                let (_, spaces, state) = space0_e($min_indent, $indent_problem)
                     .parse(arena, state)?;
 
                 let (_, (mut parsed_elems, mut final_comments), state) =
@@ -1168,12 +1225,15 @@ macro_rules! collection_trailing_sep_e {
                                         $crate::blankspace::space0_before_optional_after(
                                             $elem,
                                             $min_indent,
-                                            $space_problem,
                                             $indent_problem,
                                             $indent_problem
                                         )
                                     ),
-                                    $crate::blankspace::space0_e($min_indent, $space_problem, $indent_problem)
+                                    $crate::blankspace::space0_e(
+                                        // we use min_indent=0 because we want to parse incorrectly indented closing braces
+                                        // and later fix these up in the formatter.
+                                        0 /* min_indent */,
+                                        $indent_problem)
                                 ).parse(arena, state)?;
 
                 let (_,_, state) =
@@ -1295,6 +1355,22 @@ where
     }
 }
 
+/// Like `specialize`, except the error function receives a Region representing the begin/end of the error
+pub fn specialize_region<'a, F, P, T, X, Y>(map_error: F, parser: P) -> impl Parser<'a, T, Y>
+where
+    F: Fn(X, Region) -> Y,
+    P: Parser<'a, T, X>,
+    Y: 'a,
+{
+    move |a, s: State<'a>| {
+        let start = s.pos();
+        match parser.parse(a, s) {
+            Ok(t) => Ok(t),
+            Err((p, error, s)) => Err((p, map_error(error, Region::new(start, s.pos())), s)),
+        }
+    }
+}
+
 pub fn specialize_ref<'a, F, P, T, X, Y>(map_error: F, parser: P) -> impl Parser<'a, T, Y>
 where
     F: Fn(&'a X, Position) -> Y,
@@ -1344,17 +1420,28 @@ where
     }
 }
 
-pub fn check_indent<'a, TE, E>(min_indent: u32, to_problem: TE) -> impl Parser<'a, (), E>
+pub fn word3<'a, ToError, E>(
+    word_1: u8,
+    word_2: u8,
+    word_3: u8,
+    to_error: ToError,
+) -> impl Parser<'a, (), E>
 where
-    TE: Fn(Position) -> E,
+    ToError: Fn(Position) -> E,
     E: 'a,
 {
-    move |_arena, state: State<'a>| {
-        dbg!(state.indent_column, min_indent);
-        if state.indent_column < min_indent {
-            Err((NoProgress, to_problem(state.pos()), state))
+    debug_assert_ne!(word_1, b'\n');
+    debug_assert_ne!(word_2, b'\n');
+    debug_assert_ne!(word_3, b'\n');
+
+    let needle = [word_1, word_2, word_3];
+
+    move |_arena: &'a Bump, state: State<'a>| {
+        if state.bytes().starts_with(&needle) {
+            let state = state.advance(3);
+            Ok((MadeProgress, (), state))
         } else {
-            Ok((NoProgress, (), state))
+            Err((NoProgress, to_error(state.pos()), state))
         }
     }
 }

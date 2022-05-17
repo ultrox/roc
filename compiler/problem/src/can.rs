@@ -5,6 +5,7 @@ use roc_module::symbol::{ModuleId, Symbol};
 use roc_parse::ast::Base;
 use roc_parse::pattern::PatternType;
 use roc_region::all::{Loc, Region};
+use roc_types::types::AliasKind;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CycleEntry {
@@ -19,28 +20,44 @@ pub enum BadPattern {
     Unsupported(PatternType),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ShadowKind {
+    Variable,
+    Alias,
+    Opaque,
+    Ability,
+}
+
 /// Problems that can occur in the course of canonicalization.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Problem {
     UnusedDef(Symbol, Region),
     UnusedImport(ModuleId, Region),
     ExposedButNotDefined(Symbol),
+    UnknownGeneratesWith(Loc<Ident>),
     /// First symbol is the name of the closure with that argument
     /// Second symbol is the name of the argument that is unused
     UnusedArgument(Symbol, Symbol, Region),
     PrecedenceProblem(PrecedenceProblem),
     // Example: (5 = 1 + 2) is an unsupported pattern in an assignment; Int patterns aren't allowed in assignments!
     UnsupportedPattern(BadPattern, Region),
-    ShadowingInAnnotation {
+    Shadowing {
         original_region: Region,
         shadow: Loc<Ident>,
+        kind: ShadowKind,
     },
     CyclicAlias(Symbol, Region, Vec<Symbol>),
     BadRecursion(Vec<CycleEntry>),
     PhantomTypeArgument {
-        alias: Symbol,
+        typ: Symbol,
         variable_region: Region,
         variable_name: Lowercase,
+    },
+    UnboundTypeVariable {
+        typ: Symbol,
+        num_unbound: usize,
+        one_occurrence: Region,
+        kind: AliasKind,
     },
     DuplicateRecordFieldValue {
         field_name: Lowercase,
@@ -78,6 +95,47 @@ pub enum Problem {
     InvalidInterpolation(Region),
     InvalidHexadecimal(Region),
     InvalidUnicodeCodePt(Region),
+    NestedDatatype {
+        alias: Symbol,
+        def_region: Region,
+        differing_recursion_region: Region,
+    },
+    InvalidExtensionType {
+        region: Region,
+        kind: ExtensionTypeKind,
+    },
+    AbilityHasTypeVariables {
+        name: Symbol,
+        variables_region: Region,
+    },
+    HasClauseIsNotAbility {
+        region: Region,
+    },
+    IllegalHasClause {
+        region: Region,
+    },
+    AbilityMemberMissingHasClause {
+        member: Symbol,
+        ability: Symbol,
+        region: Region,
+    },
+    AbilityMemberMultipleBoundVars {
+        member: Symbol,
+        ability: Symbol,
+        span_has_clauses: Region,
+        bound_var_names: Vec<Lowercase>,
+    },
+    AbilityNotOnToplevel {
+        region: Region,
+    },
+    AbilityUsedAsType(Lowercase, Symbol, Region),
+    NestedSpecialization(Symbol, Region),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ExtensionTypeKind {
+    Record,
+    TagUnion,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -102,6 +160,18 @@ pub enum IntErrorKind {
     Overflow,
     /// Integer is too small to store in target integer type.
     Underflow,
+    /// This is an integer, but it has a float numeric suffix.
+    FloatSuffix,
+    /// The integer literal overflows the width of the suffix associated with it.
+    OverflowsSuffix {
+        suffix_type: &'static str,
+        max_value: u128,
+    },
+    /// The integer literal underflows the width of the suffix associated with it.
+    UnderflowsSuffix {
+        suffix_type: &'static str,
+        min_value: i128,
+    },
 }
 
 /// Enum to store the various types of errors that can cause parsing a float to fail.
@@ -113,6 +183,8 @@ pub enum FloatErrorKind {
     NegativeInfinity,
     /// the literal is too large for f64
     PositiveInfinity,
+    /// This is a float, but it has an integer numeric suffix.
+    IntSuffix,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -120,6 +192,7 @@ pub enum RuntimeError {
     Shadowing {
         original_region: Region,
         shadow: Loc<Ident>,
+        kind: ShadowKind,
     },
     InvalidOptionalValue {
         field_name: Lowercase,
@@ -135,16 +208,55 @@ pub enum RuntimeError {
     ErroneousType,
 
     LookupNotInScope(Loc<Ident>, MutSet<Box<str>>),
+    OpaqueNotDefined {
+        usage: Loc<Ident>,
+        opaques_in_scope: MutSet<Box<str>>,
+        opt_defined_alias: Option<Region>,
+    },
+    OpaqueOutsideScope {
+        opaque: Ident,
+        referenced_region: Region,
+        imported_region: Region,
+    },
+    OpaqueNotApplied(Loc<Ident>),
+    OpaqueAppliedToMultipleArgs(Region),
     ValueNotExposed {
         module_name: ModuleName,
         ident: Ident,
         region: Region,
         exposed_values: Vec<Lowercase>,
     },
+    /// A module was referenced, but hasn't been imported anywhere in the program
+    ///
+    /// An example would be:
+    /// ```roc
+    /// app "hello"
+    ///     packages { pf: "platform" }
+    ///     imports [ pf.Stdout]
+    ///     provides [ main ] to pf
+    ///
+    /// main : Task.Task {} [] // Task isn't imported!
+    /// main = Stdout.line "I'm a Roc application!"
+    /// ```
     ModuleNotImported {
+        /// The name of the module that was referenced
         module_name: ModuleName,
+        /// A list of modules which *have* been imported
         imported_modules: MutSet<Box<str>>,
+        /// Where the problem occurred
         region: Region,
+        /// Whether or not the module exists at all
+        ///
+        /// This is used to suggest that the user import the module, as opposed to fix a
+        /// typo in the spelling.  For example, if the user typed `Task`, and the platform
+        /// exposes a `Task` module that hasn't been imported, we can sugguest that they
+        /// add the import statement.
+        ///
+        /// On the other hand, if the user typed `Tesk`, they might want to check their
+        /// spelling.
+        ///
+        /// If unsure, this should be set to `false`
+        module_exists: bool,
     },
     InvalidPrecedence(PrecedenceProblem, Region),
     MalformedIdentifier(Box<str>, roc_parse::ident::BadIdent, Region),
@@ -173,6 +285,11 @@ pub enum RuntimeError {
     VoidValue,
 
     ExposedButNotDefined(Symbol),
+
+    /// where ''
+    EmptySingleQuote(Region),
+    /// where 'aa'
+    MultipleCharsInSingleQuote(Region),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -183,4 +300,6 @@ pub enum MalformedPatternProblem {
     Unknown,
     QualifiedIdentifier,
     BadIdent(roc_parse::ident::BadIdent),
+    EmptySingleQuote,
+    MultipleCharsInSingleQuote,
 }

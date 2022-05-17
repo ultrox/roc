@@ -34,7 +34,6 @@ pub enum BinOp {
     Slash,
     DoubleSlash,
     Percent,
-    DoublePercent,
     Plus,
     Minus,
     Equals,
@@ -47,7 +46,8 @@ pub enum BinOp {
     Or,
     Pizza,
     Assignment,
-    HasType,
+    IsAliasType,
+    IsOpaqueType,
     Backpassing,
     // lowest precedence
 }
@@ -57,9 +57,9 @@ impl BinOp {
     pub fn width(self) -> u16 {
         match self {
             Caret | Star | Slash | Percent | Plus | Minus | LessThan | GreaterThan => 1,
-            DoubleSlash | DoublePercent | Equals | NotEquals | LessThanOrEq | GreaterThanOrEq
-            | And | Or | Pizza => 2,
-            Assignment | HasType | Backpassing => unreachable!(),
+            DoubleSlash | Equals | NotEquals | LessThanOrEq | GreaterThanOrEq | And | Or
+            | Pizza => 2,
+            Assignment | IsAliasType | IsOpaqueType | Backpassing => unreachable!(),
         }
     }
 }
@@ -96,27 +96,25 @@ impl BinOp {
         use self::Associativity::*;
 
         match self {
-            Pizza | Star | Slash | DoubleSlash | DoublePercent | Percent | Plus | Minus => {
-                LeftAssociative
-            }
+            Pizza | Star | Slash | DoubleSlash | Percent | Plus | Minus => LeftAssociative,
             And | Or | Caret => RightAssociative,
             Equals | NotEquals | LessThan | GreaterThan | LessThanOrEq | GreaterThanOrEq => {
                 NonAssociative
             }
-            Assignment | HasType | Backpassing => unreachable!(),
+            Assignment | IsAliasType | IsOpaqueType | Backpassing => unreachable!(),
         }
     }
 
     fn precedence(self) -> u8 {
         match self {
             Caret => 7,
-            Star | Slash | DoubleSlash | DoublePercent | Percent => 6,
+            Star | Slash | DoubleSlash | Percent => 6,
             Plus | Minus => 5,
             Equals | NotEquals | LessThan | GreaterThan | LessThanOrEq | GreaterThanOrEq => 4,
             And => 3,
             Or => 2,
             Pizza => 1,
-            Assignment | HasType | Backpassing => unreachable!(),
+            Assignment | IsAliasType | IsOpaqueType | Backpassing => unreachable!(),
         }
     }
 }
@@ -141,7 +139,6 @@ impl std::fmt::Display for BinOp {
             Slash => "/",
             DoubleSlash => "//",
             Percent => "%",
-            DoublePercent => "%%",
             Plus => "+",
             Minus => "-",
             Equals => "==",
@@ -154,7 +151,8 @@ impl std::fmt::Display for BinOp {
             Or => "||",
             Pizza => "|>",
             Assignment => "=",
-            HasType => ":",
+            IsAliasType => ":",
+            IsOpaqueType => ":=",
             Backpassing => "<-",
         };
 

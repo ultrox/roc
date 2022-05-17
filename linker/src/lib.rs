@@ -20,7 +20,6 @@ use std::io;
 use std::io::{BufReader, BufWriter};
 use std::mem;
 use std::os::raw::c_char;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, SystemTime};
@@ -67,11 +66,13 @@ pub fn build_and_preprocess_host(
     opt_level: OptLevel,
     target: &Triple,
     host_input_path: &Path,
+    preprocessed_host_path: &Path,
     exposed_to_host: Vec<String>,
+    exported_closure_types: Vec<String>,
     target_valgrind: bool,
 ) -> io::Result<()> {
     let dummy_lib = host_input_path.with_file_name("libapp.so");
-    generate_dynamic_lib(target, exposed_to_host, &dummy_lib)?;
+    generate_dynamic_lib(target, exposed_to_host, exported_closure_types, &dummy_lib)?;
     rebuild_host(
         opt_level,
         target,
@@ -122,6 +123,7 @@ pub fn link_preprocessed_host(
 fn generate_dynamic_lib(
     target: &Triple,
     exposed_to_host: Vec<String>,
+    exported_closure_types: Vec<String>,
     dummy_lib_path: &Path,
 ) -> io::Result<()> {
     let dummy_obj_file = Builder::new().prefix("roc_lib").suffix(".o").tempfile()?;
@@ -145,25 +147,37 @@ fn generate_dynamic_lib(
     let mut out_object = write::Object::new(obj_target, obj_arch, Endianness::Little);
 
     let text_section = out_object.section_id(write::StandardSection::Text);
+
+    let mut add_symbol = |name: &String| {
+        out_object.add_symbol(write::Symbol {
+            name: name.as_bytes().to_vec(),
+            value: 0,
+            size: 0,
+            kind: SymbolKind::Text,
+            scope: SymbolScope::Dynamic,
+            weak: false,
+            section: write::SymbolSection::Section(text_section),
+            flags: SymbolFlags::None,
+        });
+    };
+
     for sym in exposed_to_host {
         for name in &[
             format!("roc__{}_1_exposed", sym),
             format!("roc__{}_1_exposed_generic", sym),
-            format!("roc__{}_1_Fx_caller", sym),
-            format!("roc__{}_1_Fx_size", sym),
-            format!("roc__{}_1_Fx_result_size", sym),
             format!("roc__{}_size", sym),
         ] {
-            out_object.add_symbol(write::Symbol {
-                name: name.as_bytes().to_vec(),
-                value: 0,
-                size: 0,
-                kind: SymbolKind::Text,
-                scope: SymbolScope::Dynamic,
-                weak: false,
-                section: write::SymbolSection::Section(text_section),
-                flags: SymbolFlags::None,
-            });
+            add_symbol(name);
+        }
+
+        for closure_type in &exported_closure_types {
+            for name in &[
+                format!("roc__{}_1_{}_caller", sym, closure_type),
+                format!("roc__{}_1_{}_size", sym, closure_type),
+                format!("roc__{}_1_{}_result_size", sym, closure_type),
+            ] {
+                add_symbol(name)
+            }
         }
     }
     std::fs::write(
@@ -305,9 +319,7 @@ pub fn preprocess(
         Some(section) => {
             let file_offset = match section.compressed_file_range() {
                 Ok(
-                    range
-                    @
-                    CompressedFileRange {
+                    range @ CompressedFileRange {
                         format: CompressionFormat::None,
                         ..
                     },
@@ -577,9 +589,7 @@ pub fn preprocess(
     for sec in text_sections {
         let (file_offset, compressed) = match sec.compressed_file_range() {
             Ok(
-                range
-                @
-                CompressedFileRange {
+                range @ CompressedFileRange {
                     format: CompressionFormat::None,
                     ..
                 },
@@ -924,7 +934,9 @@ fn gen_macho_le(
         }
     };
 
-    for _ in 0..num_load_cmds {
+    for index in 0..num_load_cmds {
+        dbg!(&index);
+
         let info = load_struct_inplace::<macho::LoadCommand<LittleEndian>>(&mut out_mmap, offset);
         let cmd_size = info.cmdsize.get(NativeEndian) as usize;
 
@@ -952,7 +964,6 @@ fn gen_macho_le(
                 );
 
                 let num_sections = cmd.nsects.get(NativeEndian);
-
                 let sections = load_structs_inplace_mut::<macho::Section64<LittleEndian>>(
                     &mut out_mmap,
                     offset + cmd_size,
@@ -975,6 +986,7 @@ fn gen_macho_le(
                         LittleEndian,
                         section.offset.get(NativeEndian) + added_bytes as u32,
                     );
+
 
                     let rel_offset = section.reloff.get(NativeEndian) + added_bytes as u32;
 
@@ -1596,9 +1608,7 @@ fn scan_elf_dynamic_deps(
     };
     let dyn_offset = match dyn_sec.compressed_file_range() {
         Ok(
-            range
-            @
-            CompressedFileRange {
+            range @ CompressedFileRange {
                 format: CompressionFormat::None,
                 ..
             },
@@ -1673,9 +1683,7 @@ fn scan_elf_dynamic_deps(
     };
     let symtab_offset = match symtab_sec.compressed_file_range() {
         Ok(
-            range
-            @
-            CompressedFileRange {
+            range @ CompressedFileRange {
                 format: CompressionFormat::None,
                 ..
             },
@@ -1695,9 +1703,7 @@ fn scan_elf_dynamic_deps(
     };
     let dynsym_offset = match dynsym_sec.compressed_file_range() {
         Ok(
-            range
-            @
-            CompressedFileRange {
+            range @ CompressedFileRange {
                 format: CompressionFormat::None,
                 ..
             },
@@ -1715,9 +1721,7 @@ fn scan_elf_dynamic_deps(
     {
         match sec.compressed_file_range() {
             Ok(
-                range
-                @
-                CompressedFileRange {
+                range @ CompressedFileRange {
                     format: CompressionFormat::None,
                     ..
                 },
@@ -1838,9 +1842,14 @@ pub fn surgery(
     let flushing_data_duration = flushing_data_start.elapsed().unwrap();
 
     // Make sure the final executable has permision to execute.
-    let mut perms = fs::metadata(out_filename)?.permissions();
-    perms.set_mode(perms.mode() | 0o111);
-    fs::set_permissions(out_filename, perms)?;
+    #[cfg(target_family = "unix")]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut perms = fs::metadata(out_filename)?.permissions();
+        perms.set_mode(perms.mode() | 0o111);
+        fs::set_permissions(out_filename, perms)?;
+    }
 
     let total_duration = total_start.elapsed().unwrap();
 

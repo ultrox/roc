@@ -1,15 +1,15 @@
-use crate::target::{arch_str, target_triple_str};
-#[cfg(feature = "llvm")]
+use crate::target::{arch_str, target_zig_str};
 use libloading::{Error, Library};
 use roc_builtins::bitcode;
-// #[cfg(feature = "llvm")]
+use roc_error_macros::internal_error;
 use roc_mono::ir::OptLevel;
 use std::collections::HashMap;
 use std::env;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output};
+use std::process::{self, Child, Command, Output};
 use target_lexicon::{Architecture, OperatingSystem, Triple};
+use wasi_libc_sys::{WASI_COMPILER_RT_PATH, WASI_LIBC_PATH};
 
 fn zig_executable() -> String {
     match std::env::var("ROC_ZIG") {
@@ -20,10 +20,20 @@ fn zig_executable() -> String {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum LinkType {
-    // These numbers correspond to the --lib flag; if it's present
-    // (e.g. is_present returns `1 as bool`), this will be 1 as well.
+    // These numbers correspond to the --lib and --no-link flags
     Executable = 0,
     Dylib = 1,
+    None = 2,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum LinkingStrategy {
+    /// Compile app and host object files, then use a linker like lld or wasm-ld
+    Legacy,
+    /// Compile app and host object files, then use the Roc surgical linker
+    Surgical,
+    /// Initialise the backend from a host object file, then add the app to it. No linker needed.
+    Additive,
 }
 
 /// input_paths can include the host as well as the app. e.g. &["host.o", "roc_app.o"]
@@ -46,6 +56,10 @@ pub fn link(
             operating_system: OperatingSystem::Darwin,
             ..
         } => link_macos(target, output_path, input_paths, link_type),
+        Triple {
+            operating_system: OperatingSystem::Windows,
+            ..
+        } => link_windows(target, output_path, input_paths, link_type),
         _ => panic!("TODO gracefully handle unsupported target: {:?}", target),
     }
 }
@@ -67,16 +81,10 @@ fn find_zig_str_path() -> PathBuf {
 }
 
 fn find_wasi_libc_path() -> PathBuf {
-    let wasi_libc_path = PathBuf::from("compiler/builtins/bitcode/wasi-libc.a");
-
-    if std::path::Path::exists(&wasi_libc_path) {
-        return wasi_libc_path;
-    }
-
-    // when running the tests, we start in the /cli directory
-    let wasi_libc_path = PathBuf::from("../compiler/builtins/bitcode/wasi-libc.a");
-    if std::path::Path::exists(&wasi_libc_path) {
-        return wasi_libc_path;
+    // Environment variable defined in wasi-libc-sys/build.rs
+    let wasi_libc_pathbuf = PathBuf::from(WASI_LIBC_PATH);
+    if std::path::Path::exists(&wasi_libc_pathbuf) {
+        return wasi_libc_pathbuf;
     }
 
     panic!("cannot find `wasi-libc.a`")
@@ -137,6 +145,8 @@ pub fn build_zig_host_native(
 
     if matches!(opt_level, OptLevel::Optimize) {
         command.args(&["-O", "ReleaseSafe"]);
+    } else if matches!(opt_level, OptLevel::Size) {
+        command.args(&["-O", "ReleaseSmall"]);
     }
     command.output().unwrap()
 }
@@ -231,6 +241,8 @@ pub fn build_zig_host_native(
     ]);
     if matches!(opt_level, OptLevel::Optimize) {
         command.args(&["-O", "ReleaseSafe"]);
+    } else if matches!(opt_level, OptLevel::Size) {
+        command.args(&["-O", "ReleaseSmall"]);
     }
     command.output().unwrap()
 }
@@ -247,6 +259,14 @@ pub fn build_zig_host_wasm32(
     if shared_lib_path.is_some() {
         unimplemented!("Linking a shared library to wasm not yet implemented");
     }
+
+    let zig_target = if matches!(opt_level, OptLevel::Development) {
+        "wasm32-wasi"
+    } else {
+        // For LLVM backend wasm we are emitting a .bc file anyway so this target is OK
+        "i386-linux-musl"
+    };
+
     // NOTE currently just to get compiler warnings if the host code is invalid.
     // the produced artifact is not used
     //
@@ -256,32 +276,36 @@ pub fn build_zig_host_wasm32(
     //
     // https://github.com/ziglang/zig/issues/9414
     let mut command = Command::new(&zig_executable());
+    let args = &[
+        "build-obj",
+        zig_host_src,
+        emit_bin,
+        "--pkg-begin",
+        "str",
+        zig_str_path,
+        "--pkg-end",
+        // include the zig runtime
+        // "-fcompiler-rt",
+        // include libc
+        "--library",
+        "c",
+        "-target",
+        zig_target,
+        // "-femit-llvm-ir=/home/folkertdev/roc/roc/examples/benchmarks/platform/host.ll",
+        "-fPIC",
+        "--strip",
+    ];
+
     command
         .env_clear()
         .env("PATH", env_path)
         .env("HOME", env_home)
-        .args(&[
-            "build-obj",
-            zig_host_src,
-            emit_bin,
-            "--pkg-begin",
-            "str",
-            zig_str_path,
-            "--pkg-end",
-            // include the zig runtime
-            // "-fcompiler-rt",
-            // include libc
-            "--library",
-            "c",
-            "-target",
-            "i386-linux-musl",
-            // "wasm32-wasi",
-            // "-femit-llvm-ir=/home/folkertdev/roc/roc/examples/benchmarks/platform/host.ll",
-            "-fPIC",
-            "--strip",
-        ]);
+        .args(args);
+
     if matches!(opt_level, OptLevel::Optimize) {
         command.args(&["-O", "ReleaseSafe"]);
+    } else if matches!(opt_level, OptLevel::Size) {
+        command.args(&["-O", "ReleaseSmall"]);
     }
     command.output().unwrap()
 }
@@ -317,7 +341,9 @@ pub fn build_c_host_native(
         command.args(&["-fPIC", "-c"]);
     }
     if matches!(opt_level, OptLevel::Optimize) {
-        command.arg("-O2");
+        command.arg("-O3");
+    } else if matches!(opt_level, OptLevel::Size) {
+        command.arg("-Os");
     }
     command.output().unwrap()
 }
@@ -351,6 +377,8 @@ pub fn build_swift_host_native(
 
     if matches!(opt_level, OptLevel::Optimize) {
         command.arg("-O");
+    } else if matches!(opt_level, OptLevel::Size) {
+        command.arg("-Osize");
     }
 
     command.output().unwrap()
@@ -362,7 +390,7 @@ pub fn rebuild_host(
     host_input_path: &Path,
     shared_lib_path: Option<&Path>,
     target_valgrind: bool,
-) {
+) -> PathBuf {
     let c_host_src = host_input_path.with_file_name("host.c");
     let c_host_dest = host_input_path.with_file_name("c_host.o");
     let zig_host_src = host_input_path.with_file_name("host.zig");
@@ -372,12 +400,19 @@ pub fn rebuild_host(
     let swift_host_src = host_input_path.with_file_name("host.swift");
     let swift_host_header_src = host_input_path.with_file_name("host.h");
 
-    let host_dest_native = host_input_path.with_file_name(if shared_lib_path.is_some() {
-        "dynhost"
+    let host_dest = if matches!(target.architecture, Architecture::Wasm32) {
+        if matches!(opt_level, OptLevel::Development) {
+            host_input_path.with_file_name("host.o")
+        } else {
+            host_input_path.with_file_name("host.bc")
+        }
     } else {
-        "host.o"
-    });
-    let host_dest_wasm = host_input_path.with_file_name("host.bc");
+        host_input_path.with_file_name(if shared_lib_path.is_some() {
+            "dynhost"
+        } else {
+            "host.o"
+        })
+    };
 
     let env_path = env::var("PATH").unwrap_or_else(|_| "".to_string());
     let env_home = env::var("HOME").unwrap_or_else(|_| "".to_string());
@@ -395,7 +430,11 @@ pub fn rebuild_host(
 
         let output = match target.architecture {
             Architecture::Wasm32 => {
-                let emit_bin = format!("-femit-llvm-ir={}", host_dest_wasm.to_str().unwrap());
+                let emit_bin = if matches!(opt_level, OptLevel::Development) {
+                    format!("-femit-bin={}", host_dest.to_str().unwrap())
+                } else {
+                    format!("-femit-llvm-ir={}", host_dest.to_str().unwrap())
+                };
                 build_zig_host_wasm32(
                     &env_path,
                     &env_home,
@@ -407,7 +446,7 @@ pub fn rebuild_host(
                 )
             }
             Architecture::X86_64 => {
-                let emit_bin = format!("-femit-bin={}", host_dest_native.to_str().unwrap());
+                let emit_bin = format!("-femit-bin={}", host_dest.to_str().unwrap());
                 build_zig_host_native(
                     &env_path,
                     &env_home,
@@ -421,7 +460,7 @@ pub fn rebuild_host(
                 )
             }
             Architecture::X86_32(_) => {
-                let emit_bin = format!("-femit-bin={}", host_dest_native.to_str().unwrap());
+                let emit_bin = format!("-femit-bin={}", host_dest.to_str().unwrap());
                 build_zig_host_native(
                     &env_path,
                     &env_home,
@@ -436,14 +475,14 @@ pub fn rebuild_host(
             }
 
             Architecture::Aarch64(_) => {
-                let emit_bin = format!("-femit-bin={}", host_dest_native.to_str().unwrap());
+                let emit_bin = format!("-femit-bin={}", host_dest.to_str().unwrap());
                 build_zig_host_native(
                     &env_path,
                     &env_home,
                     &emit_bin,
                     zig_host_src.to_str().unwrap(),
                     zig_str_path.to_str().unwrap(),
-                    target_triple_str(target),
+                    target_zig_str(target),
                     opt_level,
                     shared_lib_path,
                     target_valgrind,
@@ -456,18 +495,18 @@ pub fn rebuild_host(
     } else if cargo_host_src.exists() {
         // Compile and link Cargo.toml, if it exists
         let cargo_dir = host_input_path.parent().unwrap();
-        let cargo_out_dir =
-            cargo_dir
-                .join("target")
-                .join(if matches!(opt_level, OptLevel::Optimize) {
-                    "release"
-                } else {
-                    "debug"
-                });
+        let cargo_out_dir = cargo_dir.join("target").join(
+            if matches!(opt_level, OptLevel::Optimize | OptLevel::Size) {
+                "release"
+            } else {
+                "debug"
+            },
+        );
 
         let mut command = Command::new("cargo");
         command.arg("build").current_dir(cargo_dir);
-        if matches!(opt_level, OptLevel::Optimize) {
+        // Rust doesn't expose size without editing the cargo.toml. Instead just use release.
+        if matches!(opt_level, OptLevel::Optimize | OptLevel::Size) {
             command.arg("--release");
         }
         let source_file = if shared_lib_path.is_some() {
@@ -493,7 +532,7 @@ pub fn rebuild_host(
 
         if shared_lib_path.is_some() {
             // For surgical linking, just copy the dynamically linked rust app.
-            std::fs::copy(cargo_out_dir.join("host"), host_dest_native).unwrap();
+            std::fs::copy(cargo_out_dir.join("host"), &host_dest).unwrap();
         } else {
             // Cargo hosts depend on a c wrapper for the api. Compile host.c as well.
 
@@ -517,7 +556,7 @@ pub fn rebuild_host(
                     c_host_dest.to_str().unwrap(),
                     "-lhost",
                     "-o",
-                    host_dest_native.to_str().unwrap(),
+                    host_dest.to_str().unwrap(),
                 ])
                 .output()
                 .unwrap();
@@ -542,6 +581,8 @@ pub fn rebuild_host(
         ]);
         if matches!(opt_level, OptLevel::Optimize) {
             command.arg("-O");
+        } else if matches!(opt_level, OptLevel::Size) {
+            command.arg("-C opt-level=s");
         }
         let output = command.output().unwrap();
 
@@ -553,7 +594,7 @@ pub fn rebuild_host(
             let output = build_c_host_native(
                 &env_path,
                 &env_home,
-                host_dest_native.to_str().unwrap(),
+                host_dest.to_str().unwrap(),
                 &[
                     c_host_src.to_str().unwrap(),
                     rust_host_dest.to_str().unwrap(),
@@ -581,7 +622,7 @@ pub fn rebuild_host(
                     c_host_dest.to_str().unwrap(),
                     rust_host_dest.to_str().unwrap(),
                     "-o",
-                    host_dest_native.to_str().unwrap(),
+                    host_dest.to_str().unwrap(),
                 ])
                 .output()
                 .unwrap();
@@ -606,7 +647,7 @@ pub fn rebuild_host(
         let output = build_c_host_native(
             &env_path,
             &env_home,
-            host_dest_native.to_str().unwrap(),
+            host_dest.to_str().unwrap(),
             &[c_host_src.to_str().unwrap()],
             opt_level,
             shared_lib_path,
@@ -617,7 +658,7 @@ pub fn rebuild_host(
         let output = build_swift_host_native(
             &env_path,
             &env_home,
-            host_dest_native.to_str().unwrap(),
+            host_dest.to_str().unwrap(),
             &[swift_host_src.to_str().unwrap()],
             opt_level,
             shared_lib_path,
@@ -627,6 +668,8 @@ pub fn rebuild_host(
         );
         validate_output("host.swift", "swiftc", output);
     }
+
+    host_dest
 }
 
 fn nix_path_opt() -> Option<String> {
@@ -643,6 +686,33 @@ fn library_path<const N: usize>(segments: [&str; N]) -> Option<PathBuf> {
     } else {
         None
     }
+}
+
+/// Given a list of library directories and the name of a library, find the 1st match
+///
+/// The provided list of library directories should be in the form of a list of
+/// directories, where each directory is represented by a series of path segments, like
+///
+/// ["/usr", "lib"]
+///
+/// Each directory will be checked for a file with the provided filename, and the first
+/// match will be returned.
+///
+/// If there are no matches, [`None`] will be returned.
+fn look_for_library(lib_dirs: &[&[&str]], lib_filename: &str) -> Option<PathBuf> {
+    lib_dirs
+        .iter()
+        .map(|lib_dir| {
+            lib_dir.iter().fold(PathBuf::new(), |mut path, segment| {
+                path.push(segment);
+                path
+            })
+        })
+        .map(|mut path| {
+            path.push(lib_filename);
+            path
+        })
+        .find(|path| path.exists())
 }
 
 fn link_linux(
@@ -679,28 +749,75 @@ fn link_linux(
         ));
     }
 
-    let libcrt_path =
+    // Some things we'll need to build a list of dirs to check for libraries
+    let maybe_nix_path = nix_path_opt();
+    let usr_lib_arch = ["/usr", "lib", &architecture];
+    let lib_arch = ["/lib", &architecture];
+    let nix_path_segments;
+    let lib_dirs_if_nix: [&[&str]; 5];
+    let lib_dirs_if_nonix: [&[&str]; 4];
+
+    // Build the aformentioned list
+    let lib_dirs: &[&[&str]] =
         // give preference to nix_path if it's defined, this prevents bugs
-        if let Some(nix_path) = nix_path_opt() {
-            library_path([&nix_path])
-            .unwrap()
+        if let Some(nix_path) = &maybe_nix_path {
+            nix_path_segments = [nix_path.as_str()];
+            lib_dirs_if_nix = [
+                &nix_path_segments,
+                &usr_lib_arch,
+                &lib_arch,
+                &["/usr", "lib"],
+                &["/usr", "lib64"],
+            ];
+            &lib_dirs_if_nix
         } else {
-            library_path(["/usr", "lib", &architecture])
-            .or_else(|| library_path(["/usr", "lib"]))
-            .unwrap()
+            lib_dirs_if_nonix = [
+                &usr_lib_arch,
+                &lib_arch,
+                &["/usr", "lib"],
+                &["/usr", "lib64"],
+            ];
+            &lib_dirs_if_nonix
         };
 
+    // Look for the libraries we'll need
+
     let libgcc_name = "libgcc_s.so.1";
-    let libgcc_path =
-        // give preference to nix_path if it's defined, this prevents bugs
-        if let Some(nix_path) = nix_path_opt() {
-            library_path([&nix_path, libgcc_name])
-            .unwrap()
-        } else {
-            library_path(["/lib", &architecture, libgcc_name])
-            .or_else(|| library_path(["/usr", "lib", &architecture, libgcc_name]))
-            .or_else(|| library_path(["/usr", "lib", libgcc_name]))
-            .unwrap()
+    let libgcc_path = look_for_library(lib_dirs, libgcc_name);
+
+    let crti_name = "crti.o";
+    let crti_path = look_for_library(lib_dirs, crti_name);
+
+    let crtn_name = "crtn.o";
+    let crtn_path = look_for_library(lib_dirs, crtn_name);
+
+    let scrt1_name = "Scrt1.o";
+    let scrt1_path = look_for_library(lib_dirs, scrt1_name);
+
+    // Unwrap all the paths at once so we can inform the user of all missing libs at once
+    let (libgcc_path, crti_path, crtn_path, scrt1_path) =
+        match (libgcc_path, crti_path, crtn_path, scrt1_path) {
+            (Some(libgcc), Some(crti), Some(crtn), Some(scrt1)) => (libgcc, crti, crtn, scrt1),
+            (maybe_gcc, maybe_crti, maybe_crtn, maybe_scrt1) => {
+                if maybe_gcc.is_none() {
+                    eprintln!("Couldn't find libgcc_s.so.1!");
+                    eprintln!("You may need to install libgcc\n");
+                }
+                if maybe_crti.is_none() | maybe_crtn.is_none() | maybe_scrt1.is_none() {
+                    eprintln!("Couldn't find the glibc development files!");
+                    eprintln!("We need the objects crti.o, crtn.o, and Scrt1.o");
+                    eprintln!("You may need to install the glibc development package");
+                    eprintln!("(probably called glibc-dev or glibc-devel)\n");
+                }
+
+                let dirs = lib_dirs
+                    .iter()
+                    .map(|segments| segments.join("/"))
+                    .collect::<Vec<String>>()
+                    .join("\n");
+                eprintln!("We looked in the following directories:\n{}", dirs);
+                process::exit(1);
+            }
         };
 
     let ld_linux = match target.architecture {
@@ -726,7 +843,7 @@ fn link_linux(
         LinkType::Executable => (
             // Presumably this S stands for Static, since if we include Scrt1.o
             // in the linking for dynamic builds, linking fails.
-            vec![libcrt_path.join("Scrt1.o").to_str().unwrap().to_string()],
+            vec![scrt1_path.to_string_lossy().into_owned()],
             output_path,
         ),
         LinkType::Dylib => {
@@ -754,57 +871,59 @@ fn link_linux(
                 output_path,
             )
         }
+        LinkType::None => internal_error!("link_linux should not be called with link type of none"),
     };
 
     let env_path = env::var("PATH").unwrap_or_else(|_| "".to_string());
 
-    init_arch(target);
-
     // NOTE: order of arguments to `ld` matters here!
     // The `-l` flags should go after the `.o` arguments
-    Ok((
-        Command::new("ld")
-            // Don't allow LD_ env vars to affect this
-            .env_clear()
-            .env("PATH", &env_path)
-            // Keep NIX_ env vars
-            .envs(
-                env::vars()
-                    .filter(|&(ref k, _)| k.starts_with("NIX_"))
-                    .collect::<HashMap<String, String>>(),
-            )
-            .args(&[
-                "--gc-sections",
-                "--eh-frame-hdr",
-                "-A",
-                arch_str(target),
-                "-pie",
-                libcrt_path.join("crti.o").to_str().unwrap(),
-                libcrt_path.join("crtn.o").to_str().unwrap(),
-            ])
-            .args(&base_args)
-            .args(&["-dynamic-linker", ld_linux])
-            .args(input_paths)
-            // ld.lld requires this argument, and does not accept --arch
-            // .args(&["-L/usr/lib/x86_64-linux-gnu"])
-            .args(&[
-                // Libraries - see https://github.com/rtfeldman/roc/pull/554#discussion_r496365925
-                // for discussion and further references
-                "-lc",
-                "-lm",
-                "-lpthread",
-                "-ldl",
-                "-lrt",
-                "-lutil",
-                "-lc_nonshared",
-                libgcc_path.to_str().unwrap(),
-                // Output
-                "-o",
-                output_path.as_path().to_str().unwrap(), // app (or app.so or app.dylib etc.)
-            ])
-            .spawn()?,
-        output_path,
-    ))
+
+    let mut command = Command::new("ld");
+
+    command
+        // Don't allow LD_ env vars to affect this
+        .env_clear()
+        .env("PATH", &env_path)
+        // Keep NIX_ env vars
+        .envs(
+            env::vars()
+                .filter(|&(ref k, _)| k.starts_with("NIX_"))
+                .collect::<HashMap<String, String>>(),
+        )
+        .args(&[
+            "--gc-sections",
+            "--eh-frame-hdr",
+            "-A",
+            arch_str(target),
+            "-pie",
+            &*crti_path.to_string_lossy(),
+            &*crtn_path.to_string_lossy(),
+        ])
+        .args(&base_args)
+        .args(&["-dynamic-linker", ld_linux])
+        .args(input_paths)
+        // ld.lld requires this argument, and does not accept --arch
+        // .args(&["-L/usr/lib/x86_64-linux-gnu"])
+        .args(&[
+            // Libraries - see https://github.com/rtfeldman/roc/pull/554#discussion_r496365925
+            // for discussion and further references
+            "-lc",
+            "-lm",
+            "-lpthread",
+            "-ldl",
+            "-lrt",
+            "-lutil",
+            "-lc_nonshared",
+            libgcc_path.to_str().unwrap(),
+            // Output
+            "-o",
+            output_path.as_path().to_str().unwrap(), // app (or app.so or app.dylib etc.)
+        ]);
+
+    let output = command.spawn()?;
+
+    Ok((output, output_path))
 }
 
 fn link_macos(
@@ -822,6 +941,7 @@ fn link_macos(
 
             ("-dylib", output_path)
         }
+        LinkType::None => internal_error!("link_macos should not be called with link type of none"),
     };
 
     let arch = match target.architecture {
@@ -856,17 +976,47 @@ fn link_macos(
         ld_command.arg(format!("-L{}/swift", sdk_path));
     };
 
+    let roc_link_flags = match env::var("ROC_LINK_FLAGS") {
+        Ok(flags) => {
+            println!("⚠️ CAUTION: The ROC_LINK_FLAGS environment variable is a temporary workaround, and will no longer do anything once surgical linking lands! If you're concerned about what this means for your use case, please ask about it on Zulip.");
+
+            flags
+        }
+        Err(_) => "".to_string(),
+    };
+    for roc_link_flag in roc_link_flags.split_whitespace() {
+        ld_command.arg(roc_link_flag);
+    }
+
     ld_command.args(&[
         // Libraries - see https://github.com/rtfeldman/roc/pull/554#discussion_r496392274
         // for discussion and further references
         "-lSystem",
         "-lresolv",
         "-lpthread",
+        // This `-F PATH` flag is needed for `-framework` flags to work
+        "-F",
+        "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/Frameworks/",
+        // These frameworks are needed for GUI examples to work
+        "-framework",
+        "AudioUnit",
+        "-framework",
+        "Cocoa",
+        "-framework",
+        "CoreAudio",
+        "-framework",
+        "CoreVideo",
+        "-framework",
+        "IOKit",
+        "-framework",
+        "Metal",
+        "-framework",
+        "QuartzCore",
         // "-lrt", // TODO shouldn't we need this?
         // "-lc_nonshared", // TODO shouldn't we need this?
         // "-lgcc", // TODO will eventually need compiler_rt from gcc or something - see https://github.com/rtfeldman/roc/pull/554#discussion_r496370840
-        // "-framework", // Uncomment this line & the following ro run the `rand` crate in examples/cli
-        // "Security",
+        "-framework",
+        "Security",
         // Output
         "-o",
         output_path.to_str().unwrap(), // app
@@ -941,14 +1091,22 @@ fn link_wasm32(
     Ok((child, output_path))
 }
 
-#[cfg(feature = "llvm")]
+fn link_windows(
+    _target: &Triple,
+    _output_path: PathBuf,
+    _input_paths: &[&str],
+    _link_type: LinkType,
+) -> io::Result<(Child, PathBuf)> {
+    todo!("Add windows support to the surgical linker. See issue #2608.")
+}
+
 pub fn module_to_dylib(
     module: &inkwell::module::Module,
     target: &Triple,
     opt_level: OptLevel,
 ) -> Result<Library, Error> {
     use crate::target::{self, convert_opt_level};
-    use inkwell::targets::{CodeModel, FileType, RelocMode};
+    use inkwell::targets::{FileType, RelocMode};
 
     let dir = tempfile::tempdir().unwrap();
     let filename = PathBuf::from("Test.roc");
@@ -959,9 +1117,8 @@ pub fn module_to_dylib(
 
     // Emit the .o file using position-independent code (PIC) - needed for dylibs
     let reloc = RelocMode::PIC;
-    let model = CodeModel::Default;
     let target_machine =
-        target::target_machine(target, convert_opt_level(opt_level), reloc, model).unwrap();
+        target::target_machine(target, convert_opt_level(opt_level), reloc).unwrap();
 
     target_machine
         .write_to_file(module, FileType::Object, &app_o_file)
@@ -981,7 +1138,59 @@ pub fn module_to_dylib(
     // Load the dylib
     let path = dylib_path.as_path().to_str().unwrap();
 
+    if matches!(target.architecture, Architecture::Aarch64(_)) {
+        // On AArch64 darwin machines, calling `ldopen` on Roc-generated libs from multiple threads
+        // sometimes fails with
+        //   cannot dlopen until fork() handlers have completed
+        // This may be due to codesigning. In any case, spinning until we are able to dlopen seems
+        // to be okay.
+        loop {
+            match unsafe { Library::new(path) } {
+                Ok(lib) => return Ok(lib),
+                Err(Error::DlOpen { .. }) => continue,
+                Err(other) => return Err(other),
+            }
+        }
+    }
+
     unsafe { Library::new(path) }
+}
+
+pub fn preprocess_host_wasm32(host_input_path: &Path, preprocessed_host_path: &Path) {
+    let host_input = host_input_path.to_str().unwrap();
+    let output_file = preprocessed_host_path.to_str().unwrap();
+
+    /*
+    Notes:
+        zig build-obj just gives you back the first input file, doesn't combine them!
+        zig build-lib works but doesn't emit relocations, even with --emit-relocs (bug?)
+            (gen_wasm needs relocs to adjust stack size by changing the __heap_base constant)
+        zig wasm-ld is a wrapper around wasm-ld and gives us maximum flexiblity
+            (but seems to be an unofficial API)
+    */
+
+    let mut command = Command::new(&zig_executable());
+    let args = &[
+        "wasm-ld",
+        bitcode::BUILTINS_WASM32_OBJ_PATH,
+        host_input,
+        WASI_LIBC_PATH,
+        WASI_COMPILER_RT_PATH, // builtins need __multi3, __udivti3, __fixdfti
+        "-o",
+        output_file,
+        "--export-all",
+        "--no-entry",
+        "--import-undefined",
+        // "--relocatable", // enable this when gen_wasm can handle Custom sections in any order
+    ];
+
+    command.args(args);
+
+    // println!("\npreprocess_host_wasm32");
+    // println!("zig {}\n", args.join(" "));
+
+    let output = command.output().unwrap();
+    validate_output(output_file, "zig", output)
 }
 
 fn validate_output(file_name: &str, cmd_name: &str, output: Output) {
@@ -997,14 +1206,4 @@ fn validate_output(file_name: &str, cmd_name: &str, output: Output) {
             ),
         }
     }
-}
-
-#[cfg(feature = "llvm")]
-fn init_arch(target: &Triple) {
-    crate::target::init_arch(target);
-}
-
-#[cfg(not(feature = "llvm"))]
-fn init_arch(_target: &Triple) {
-    panic!("Tried to initialize LLVM when crate was not built with `feature = \"llvm\"` enabled");
 }

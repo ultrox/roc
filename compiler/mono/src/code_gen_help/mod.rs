@@ -1,9 +1,8 @@
 use bumpalo::collections::vec::Vec;
 use bumpalo::Bump;
-use roc_builtins::bitcode::IntWidth;
-use roc_module::ident::Ident;
 use roc_module::low_level::LowLevel;
 use roc_module::symbol::{IdentIds, ModuleId, Symbol};
+use roc_target::TargetInfo;
 
 use crate::ir::{
     Call, CallSpecId, CallType, Expr, HostExposedLayouts, JoinPointId, ModifyRc, Proc, ProcLayout,
@@ -15,7 +14,7 @@ mod equality;
 mod refcount;
 
 const LAYOUT_BOOL: Layout = Layout::Builtin(Builtin::Bool);
-const LAYOUT_UNIT: Layout = Layout::Struct(&[]);
+const LAYOUT_UNIT: Layout = Layout::UNIT;
 
 const ARG_1: Symbol = Symbol::ARG_1;
 const ARG_2: Symbol = Symbol::ARG_2;
@@ -25,11 +24,18 @@ const ARG_2: Symbol = Symbol::ARG_2;
 pub const REFCOUNT_MAX: usize = 0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum HelperOp {
+pub enum HelperOp {
     Inc,
     Dec,
     DecRef(JoinPointId),
+    Reset,
     Eq,
+}
+
+impl HelperOp {
+    fn is_decref(&self) -> bool {
+        matches!(self, Self::DecRef(_))
+    }
 }
 
 #[derive(Debug)]
@@ -68,19 +74,26 @@ pub struct Context<'a> {
 pub struct CodeGenHelp<'a> {
     arena: &'a Bump,
     home: ModuleId,
-    ptr_size: u32,
+    target_info: TargetInfo,
     layout_isize: Layout<'a>,
+    union_refcount: UnionLayout<'a>,
     specializations: Vec<'a, Specialization<'a>>,
     debug_recursion_depth: usize,
 }
 
 impl<'a> CodeGenHelp<'a> {
-    pub fn new(arena: &'a Bump, intwidth_isize: IntWidth, home: ModuleId) -> Self {
+    pub fn new(arena: &'a Bump, target_info: TargetInfo, home: ModuleId) -> Self {
+        let layout_isize = Layout::isize(target_info);
+
+        // Refcount is a boxed isize. TODO: use the new Box layout when dev backends support it
+        let union_refcount = UnionLayout::NonNullableUnwrapped(arena.alloc([layout_isize]));
+
         CodeGenHelp {
             arena,
             home,
-            ptr_size: intwidth_isize.stack_size(),
-            layout_isize: Layout::Builtin(Builtin::Int(intwidth_isize)),
+            target_info,
+            layout_isize,
+            union_refcount,
             specializations: Vec::with_capacity_in(16, arena),
             debug_recursion_depth: 0,
         }
@@ -138,6 +151,56 @@ impl<'a> CodeGenHelp<'a> {
         (rc_stmt, ctx.new_linker_data)
     }
 
+    pub fn call_reset_refcount(
+        &mut self,
+        ident_ids: &mut IdentIds,
+        layout: Layout<'a>,
+        argument: Symbol,
+    ) -> (Expr<'a>, Vec<'a, (Symbol, ProcLayout<'a>)>) {
+        let mut ctx = Context {
+            new_linker_data: Vec::new_in(self.arena),
+            recursive_union: None,
+            op: HelperOp::Reset,
+        };
+
+        let proc_name = self.find_or_create_proc(ident_ids, &mut ctx, layout);
+
+        let arguments = self.arena.alloc([argument]);
+        let ret_layout = self.arena.alloc(layout);
+        let arg_layouts = self.arena.alloc([layout]);
+        let expr = Expr::Call(Call {
+            call_type: CallType::ByName {
+                name: proc_name,
+                ret_layout,
+                arg_layouts,
+                specialization_id: CallSpecId::BACKEND_DUMMY,
+            },
+            arguments,
+        });
+
+        (expr, ctx.new_linker_data)
+    }
+
+    /// Generate a refcount increment procedure, *without* a Call expression.
+    /// *This method should be rarely used* - only when the proc is to be called from Zig.
+    /// Otherwise you want to generate the Proc and the Call together, using another method.
+    pub fn gen_refcount_proc(
+        &mut self,
+        ident_ids: &mut IdentIds,
+        layout: Layout<'a>,
+        op: HelperOp,
+    ) -> (Symbol, Vec<'a, (Symbol, ProcLayout<'a>)>) {
+        let mut ctx = Context {
+            new_linker_data: Vec::new_in(self.arena),
+            recursive_union: None,
+            op,
+        };
+
+        let proc_name = self.find_or_create_proc(ident_ids, &mut ctx, layout);
+
+        (proc_name, ctx.new_linker_data)
+    }
+
     /// Replace a generic `Lowlevel::Eq` call with a specialized helper proc.
     /// The helper procs themselves are to be generated later with `generate_procs`
     pub fn call_specialized_equals(
@@ -174,7 +237,7 @@ impl<'a> CodeGenHelp<'a> {
     ) -> Option<Expr<'a>> {
         use HelperOp::*;
 
-        debug_assert!(self.debug_recursion_depth < 10);
+        // debug_assert!(self.debug_recursion_depth < 100);
         self.debug_recursion_depth += 1;
 
         let layout = if matches!(called_layout, Layout::RecursivePointer) {
@@ -188,10 +251,12 @@ impl<'a> CodeGenHelp<'a> {
             let proc_name = self.find_or_create_proc(ident_ids, ctx, layout);
 
             let (ret_layout, arg_layouts): (&'a Layout<'a>, &'a [Layout<'a>]) = {
+                let arg = self.replace_rec_ptr(ctx, layout);
                 match ctx.op {
-                    Dec | DecRef(_) => (&LAYOUT_UNIT, self.arena.alloc([layout])),
-                    Inc => (&LAYOUT_UNIT, self.arena.alloc([layout, self.layout_isize])),
-                    Eq => (&LAYOUT_BOOL, self.arena.alloc([layout, layout])),
+                    Dec | DecRef(_) => (&LAYOUT_UNIT, self.arena.alloc([arg])),
+                    Reset => (self.arena.alloc(layout), self.arena.alloc([layout])),
+                    Inc => (&LAYOUT_UNIT, self.arena.alloc([arg, self.layout_isize])),
+                    Eq => (&LAYOUT_BOOL, self.arena.alloc([arg, arg])),
                 }
             };
 
@@ -225,6 +290,8 @@ impl<'a> CodeGenHelp<'a> {
     ) -> Symbol {
         use HelperOp::*;
 
+        let layout = self.replace_rec_ptr(ctx, layout);
+
         let found = self
             .specializations
             .iter()
@@ -253,6 +320,10 @@ impl<'a> CodeGenHelp<'a> {
                 LAYOUT_UNIT,
                 refcount::refcount_generic(self, ident_ids, ctx, layout, Symbol::ARG_1),
             ),
+            Reset => (
+                layout,
+                refcount::refcount_reset_proc_body(self, ident_ids, ctx, layout, Symbol::ARG_1),
+            ),
             Eq => (
                 LAYOUT_BOOL,
                 equality::eq_generic(self, ident_ids, ctx, layout),
@@ -266,7 +337,7 @@ impl<'a> CodeGenHelp<'a> {
                     let inc_amount = (self.layout_isize, ARG_2);
                     self.arena.alloc([roc_value, inc_amount])
                 }
-                Dec | DecRef(_) => self.arena.alloc([roc_value]),
+                Dec | DecRef(_) | Reset => self.arena.alloc([roc_value]),
                 Eq => self.arena.alloc([roc_value, (layout, ARG_2)]),
             }
         };
@@ -309,6 +380,10 @@ impl<'a> CodeGenHelp<'a> {
                 arguments: self.arena.alloc([*layout]),
                 result: LAYOUT_UNIT,
             },
+            HelperOp::Reset => ProcLayout {
+                arguments: self.arena.alloc([*layout]),
+                result: *layout,
+            },
             HelperOp::DecRef(_) => unreachable!("No generated Proc for DecRef"),
             HelperOp::Eq => ProcLayout {
                 arguments: self.arena.alloc([*layout, *layout]),
@@ -320,8 +395,112 @@ impl<'a> CodeGenHelp<'a> {
     }
 
     fn create_symbol(&self, ident_ids: &mut IdentIds, debug_name: &str) -> Symbol {
-        let ident_id = ident_ids.add(Ident::from(debug_name));
+        let ident_id = ident_ids.add_str(debug_name);
         Symbol::new(self.home, ident_id)
+    }
+
+    // When creating or looking up Specializations, we need to replace RecursivePointer
+    // with the particular Union layout it represents at this point in the tree.
+    // For example if a program uses `RoseTree a : [ Tree a (List (RoseTree a)) ]`
+    // then it could have both `RoseTree I64` and `RoseTree Str`. In this case it
+    // needs *two* specializations for `List(RecursivePointer)`, not just one.
+    fn replace_rec_ptr(&self, ctx: &Context<'a>, layout: Layout<'a>) -> Layout<'a> {
+        match layout {
+            Layout::Builtin(Builtin::Dict(k, v)) => Layout::Builtin(Builtin::Dict(
+                self.arena.alloc(self.replace_rec_ptr(ctx, *k)),
+                self.arena.alloc(self.replace_rec_ptr(ctx, *v)),
+            )),
+
+            Layout::Builtin(Builtin::Set(k)) => Layout::Builtin(Builtin::Set(
+                self.arena.alloc(self.replace_rec_ptr(ctx, *k)),
+            )),
+
+            Layout::Builtin(Builtin::List(v)) => Layout::Builtin(Builtin::List(
+                self.arena.alloc(self.replace_rec_ptr(ctx, *v)),
+            )),
+
+            Layout::Builtin(_) => layout,
+
+            Layout::Struct {
+                field_layouts,
+                field_order_hash,
+            } => {
+                let new_fields_iter = field_layouts.iter().map(|f| self.replace_rec_ptr(ctx, *f));
+                Layout::Struct {
+                    field_layouts: self.arena.alloc_slice_fill_iter(new_fields_iter),
+                    field_order_hash,
+                }
+            }
+
+            Layout::Union(UnionLayout::NonRecursive(tags)) => {
+                let mut new_tags = Vec::with_capacity_in(tags.len(), self.arena);
+                for fields in tags {
+                    let mut new_fields = Vec::with_capacity_in(fields.len(), self.arena);
+                    for field in fields.iter() {
+                        new_fields.push(self.replace_rec_ptr(ctx, *field))
+                    }
+                    new_tags.push(new_fields.into_bump_slice());
+                }
+                Layout::Union(UnionLayout::NonRecursive(new_tags.into_bump_slice()))
+            }
+
+            Layout::Union(_) => {
+                // we always fully unroll recursive types. That means tha when we find a
+                // recursive tag union we can replace it with the layout
+                layout
+            }
+
+            Layout::Boxed(inner) => self.replace_rec_ptr(ctx, *inner),
+
+            Layout::LambdaSet(lambda_set) => {
+                self.replace_rec_ptr(ctx, lambda_set.runtime_representation())
+            }
+
+            // This line is the whole point of the function
+            Layout::RecursivePointer => Layout::Union(ctx.recursive_union.unwrap()),
+        }
+    }
+
+    fn union_tail_recursion_fields(
+        &self,
+        union: UnionLayout<'a>,
+    ) -> (bool, Vec<'a, Option<usize>>) {
+        use UnionLayout::*;
+        match union {
+            NonRecursive(_) => return (false, bumpalo::vec![in self.arena]),
+
+            Recursive(tags) => self.union_tail_recursion_fields_help(tags),
+
+            NonNullableUnwrapped(field_layouts) => {
+                self.union_tail_recursion_fields_help(&[field_layouts])
+            }
+
+            NullableWrapped {
+                other_tags: tags, ..
+            } => self.union_tail_recursion_fields_help(tags),
+
+            NullableUnwrapped { other_fields, .. } => {
+                self.union_tail_recursion_fields_help(&[other_fields])
+            }
+        }
+    }
+
+    fn union_tail_recursion_fields_help(
+        &self,
+        tags: &[&'a [Layout<'a>]],
+    ) -> (bool, Vec<'a, Option<usize>>) {
+        let mut can_use_tailrec = false;
+        let mut tailrec_indices = Vec::with_capacity_in(tags.len(), self.arena);
+
+        for fields in tags.iter() {
+            let found_index = fields
+                .iter()
+                .position(|f| matches!(f, Layout::RecursivePointer));
+            tailrec_indices.push(found_index);
+            can_use_tailrec |= found_index.is_some();
+        }
+
+        (can_use_tailrec, tailrec_indices)
     }
 }
 
@@ -352,22 +531,18 @@ fn layout_needs_helper_proc(layout: &Layout, op: HelperOp) -> bool {
         Layout::Builtin(Builtin::Int(_) | Builtin::Float(_) | Builtin::Bool | Builtin::Decimal) => {
             false
         }
-
         Layout::Builtin(Builtin::Str) => {
             // Str type can use either Zig functions or generated IR, since it's not generic.
             // Eq uses a Zig function, refcount uses generated IR.
             // Both are fine, they were just developed at different times.
             matches!(op, HelperOp::Inc | HelperOp::Dec | HelperOp::DecRef(_))
         }
-
         Layout::Builtin(Builtin::Dict(_, _) | Builtin::Set(_) | Builtin::List(_)) => true,
-
-        Layout::Struct(fields) => !fields.is_empty(),
-
+        Layout::Struct { .. } => true, // note: we do generate a helper for Unit, with just a Stmt::Ret
         Layout::Union(UnionLayout::NonRecursive(tags)) => !tags.is_empty(),
-
         Layout::Union(_) => true,
-
-        Layout::LambdaSet(_) | Layout::RecursivePointer => false,
+        Layout::LambdaSet(_) => true,
+        Layout::RecursivePointer => false,
+        Layout::Boxed(_) => true,
     }
 }

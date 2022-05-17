@@ -6,7 +6,7 @@ use roc_module::called_via::BinOp::Pizza;
 use roc_module::called_via::{BinOp, CalledVia};
 use roc_module::ident::ModuleName;
 use roc_parse::ast::Expr::{self, *};
-use roc_parse::ast::{AssignedField, Def, WhenBranch};
+use roc_parse::ast::{AssignedField, Def, TypeDef, ValueDef, WhenBranch};
 use roc_region::all::{Loc, Region};
 
 // BinOp precedence logic adapted from Gluon by Markus Westerlind
@@ -88,13 +88,21 @@ fn desugar_def_helps<'a>(
     })
 }
 
-pub fn desugar_def<'a>(arena: &'a Bump, def: &'a Def<'a>) -> Def<'a> {
-    use roc_parse::ast::Def::*;
+fn desugar_type_def<'a>(def: &'a TypeDef<'a>) -> TypeDef<'a> {
+    use TypeDef::*;
+
+    match def {
+        alias @ Alias { .. } => *alias,
+        opaque @ Opaque { .. } => *opaque,
+        ability @ Ability { .. } => *ability,
+    }
+}
+
+fn desugar_value_def<'a>(arena: &'a Bump, def: &'a ValueDef<'a>) -> ValueDef<'a> {
+    use ValueDef::*;
 
     match def {
         Body(loc_pattern, loc_expr) => Body(loc_pattern, desugar_expr(arena, loc_expr)),
-        SpaceBefore(def, _) | SpaceAfter(def, _) => desugar_def(arena, def),
-        alias @ Alias { .. } => *alias,
         ann @ Annotation(_, _) => *ann,
         AnnotatedBody {
             ann_pattern,
@@ -113,6 +121,16 @@ pub fn desugar_def<'a>(arena: &'a Bump, def: &'a Def<'a>) -> Def<'a> {
             let desugared_condition = &*arena.alloc(desugar_expr(arena, condition));
             Expect(desugared_condition)
         }
+    }
+}
+
+pub fn desugar_def<'a>(arena: &'a Bump, def: &'a Def<'a>) -> Def<'a> {
+    use roc_parse::ast::Def::*;
+
+    match def {
+        Type(type_def) => Type(desugar_type_def(type_def)),
+        Value(value_def) => Value(desugar_value_def(arena, value_def)),
+        SpaceBefore(def, _) | SpaceAfter(def, _) => desugar_def(arena, def),
         NotYetImplemented(s) => todo!("{}", s),
     }
 }
@@ -121,18 +139,19 @@ pub fn desugar_def<'a>(arena: &'a Bump, def: &'a Def<'a>) -> Def<'a> {
 /// then replace the BinOp nodes with Apply nodes. Also drop SpaceBefore and SpaceAfter nodes.
 pub fn desugar_expr<'a>(arena: &'a Bump, loc_expr: &'a Loc<Expr<'a>>) -> &'a Loc<Expr<'a>> {
     match &loc_expr.value {
-        Float(_)
-        | Num(_)
+        Float(..)
+        | Num(..)
         | NonBase10Int { .. }
         | Str(_)
+        | SingleQuote(_)
         | AccessorFunction(_)
         | Var { .. }
         | Underscore { .. }
         | MalformedIdent(_, _)
         | MalformedClosure
         | PrecedenceConflict { .. }
-        | GlobalTag(_)
-        | PrivateTag(_) => loc_expr,
+        | Tag(_)
+        | OpaqueRef(_) => loc_expr,
 
         Access(sub_expr, paths) => {
             let region = loc_expr.region;
@@ -170,7 +189,10 @@ pub fn desugar_expr<'a>(arena: &'a Bump, loc_expr: &'a Loc<Expr<'a>>) -> &'a Loc
         }),
 
         RecordUpdate { fields, update } => {
-            // NOTE the `update` field is always a `Var { .. }` and does not need to be desugared
+            // NOTE the `update` field is always a `Var { .. }`, we only desugar it to get rid of
+            // any spaces before/after
+            let new_update = desugar_expr(arena, update);
+
             let new_fields = fields.map_items(arena, |field| {
                 let value = desugar_field(arena, &field.value);
                 Loc {
@@ -182,7 +204,7 @@ pub fn desugar_expr<'a>(arena: &'a Bump, loc_expr: &'a Loc<Expr<'a>>) -> &'a Loc
             arena.alloc(Loc {
                 region: loc_expr.region,
                 value: RecordUpdate {
-                    update: *update,
+                    update: new_update,
                     fields: new_fields,
                 },
             })
@@ -400,9 +422,8 @@ fn binop_to_function(binop: BinOp) -> (&'static str, &'static str) {
         Caret => (ModuleName::NUM, "pow"),
         Star => (ModuleName::NUM, "mul"),
         Slash => (ModuleName::NUM, "div"),
-        DoubleSlash => (ModuleName::NUM, "divFloor"),
+        DoubleSlash => (ModuleName::NUM, "divTrunc"),
         Percent => (ModuleName::NUM, "rem"),
-        DoublePercent => (ModuleName::NUM, "mod"),
         Plus => (ModuleName::NUM, "add"),
         Minus => (ModuleName::NUM, "sub"),
         Equals => (ModuleName::BOOL, "isEq"),
@@ -415,7 +436,8 @@ fn binop_to_function(binop: BinOp) -> (&'static str, &'static str) {
         Or => (ModuleName::BOOL, "or"),
         Pizza => unreachable!("Cannot desugar the |> operator"),
         Assignment => unreachable!("Cannot desugar the = operator"),
-        HasType => unreachable!("Cannot desugar the : operator"),
+        IsAliasType => unreachable!("Cannot desugar the : operator"),
+        IsOpaqueType => unreachable!("Cannot desugar the := operator"),
         Backpassing => unreachable!("Cannot desugar the <- operator"),
     }
 }

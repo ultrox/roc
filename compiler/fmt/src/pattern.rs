@@ -28,13 +28,14 @@ impl<'a> Formattable for Pattern<'a> {
             Pattern::OptionalField(_, expr) => expr.is_multiline(),
 
             Pattern::Identifier(_)
-            | Pattern::GlobalTag(_)
-            | Pattern::PrivateTag(_)
+            | Pattern::Tag(_)
+            | Pattern::OpaqueRef(_)
             | Pattern::Apply(_, _)
-            | Pattern::NumLiteral(_)
+            | Pattern::NumLiteral(..)
             | Pattern::NonBase10Literal { .. }
-            | Pattern::FloatLiteral(_)
+            | Pattern::FloatLiteral(..)
             | Pattern::StrLiteral(_)
+            | Pattern::SingleQuote(_)
             | Pattern::Underscore(_)
             | Pattern::Malformed(_)
             | Pattern::MalformedIdent(_, _)
@@ -56,7 +57,7 @@ impl<'a> Formattable for Pattern<'a> {
                 buf.indent(indent);
                 buf.push_str(string)
             }
-            GlobalTag(name) | PrivateTag(name) => {
+            Tag(name) | OpaqueRef(name) => {
                 buf.indent(indent);
                 buf.push_str(name);
             }
@@ -84,20 +85,22 @@ impl<'a> Formattable for Pattern<'a> {
             RecordDestructure(loc_patterns) => {
                 buf.indent(indent);
                 buf.push_str("{");
-                buf.spaces(1);
 
-                let mut it = loc_patterns.iter().peekable();
+                if !loc_patterns.is_empty() {
+                    buf.spaces(1);
+                    let mut it = loc_patterns.iter().peekable();
+                    while let Some(loc_pattern) = it.next() {
+                        loc_pattern.format(buf, indent);
 
-                while let Some(loc_pattern) = it.next() {
-                    loc_pattern.format(buf, indent);
-
-                    if it.peek().is_some() {
-                        buf.push_str(",");
-                        buf.spaces(1);
+                        if it.peek().is_some() {
+                            buf.push_str(",");
+                            buf.spaces(1);
+                        }
                     }
+                    buf.spaces(1);
                 }
 
-                buf.push_str(" }");
+                buf.push_str("}");
             }
 
             RequiredField(name, loc_pattern) => {
@@ -116,17 +119,17 @@ impl<'a> Formattable for Pattern<'a> {
                 loc_pattern.format(buf, indent);
             }
 
-            NumLiteral(string) => {
+            &NumLiteral(string) => {
                 buf.indent(indent);
                 buf.push_str(string);
             }
-            NonBase10Literal {
+            &NonBase10Literal {
                 base,
                 string,
                 is_negative,
             } => {
                 buf.indent(indent);
-                if *is_negative {
+                if is_negative {
                     buf.push('-');
                 }
 
@@ -139,12 +142,17 @@ impl<'a> Formattable for Pattern<'a> {
 
                 buf.push_str(string);
             }
-            FloatLiteral(string) => {
+            &FloatLiteral(string) => {
                 buf.indent(indent);
                 buf.push_str(string);
             }
             StrLiteral(literal) => {
                 todo!("Format string literal: {:?}", literal);
+            }
+            SingleQuote(string) => {
+                buf.push('\'');
+                buf.push_str(string);
+                buf.push('\'');
             }
             Underscore(name) => {
                 buf.indent(indent);

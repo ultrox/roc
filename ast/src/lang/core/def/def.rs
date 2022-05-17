@@ -13,11 +13,12 @@
 // use crate::pattern::{bindings_from_patterns, canonicalize_pattern, Pattern};
 // use crate::procedure::References;
 use roc_collections::all::{default_hasher, ImMap, MutMap, MutSet, SendMap};
+use roc_error_macros::{todo_abilities, todo_opaques};
 use roc_module::ident::Lowercase;
 use roc_module::symbol::Symbol;
-use roc_parse::ast::{self, AliasHeader};
+use roc_parse::ast::{self, TypeDef, TypeHeader, ValueDef as AstValueDef};
 use roc_parse::pattern::PatternType;
-use roc_problem::can::{Problem, RuntimeError};
+use roc_problem::can::{Problem, RuntimeError, ShadowKind};
 use roc_region::all::{Loc, Region};
 use roc_types::subs::{VarStore, Variable};
 use std::collections::HashMap;
@@ -132,7 +133,7 @@ fn to_pending_def<'a>(
     use roc_parse::ast::Def::*;
 
     match def {
-        Annotation(loc_pattern, loc_ann) => {
+        Value(AstValueDef::Annotation(loc_pattern, loc_ann)) => {
             // This takes care of checking for shadowing and adding idents to scope.
             let (output, loc_can_pattern) = pattern::to_pattern_id(
                 env,
@@ -147,7 +148,7 @@ fn to_pending_def<'a>(
                 PendingDef::AnnotationOnly(loc_pattern, loc_can_pattern, loc_ann),
             ))
         }
-        Body(loc_pattern, loc_expr) => {
+        Value(AstValueDef::Body(loc_pattern, loc_expr)) => {
             // This takes care of checking for shadowing and adding idents to scope.
             let (output, loc_can_pattern) = pattern::to_pattern_id(
                 env,
@@ -163,13 +164,13 @@ fn to_pending_def<'a>(
             ))
         }
 
-        AnnotatedBody {
+        Value(AstValueDef::AnnotatedBody {
             ann_pattern,
             ann_type,
             comment: _,
             body_pattern,
             body_expr,
-        } => {
+        }) => {
             if ann_pattern.value.equivalent(&body_pattern.value) {
                 // NOTE: Pick the body pattern, picking the annotation one is
                 // incorrect in the presence of optional record fields!
@@ -198,10 +199,10 @@ fn to_pending_def<'a>(
             }
         }
 
-        roc_parse::ast::Def::Alias {
-            header: AliasHeader { name, vars },
+        Type(TypeDef::Alias {
+            header: TypeHeader { name, vars },
             ann,
-        } => {
+        }) => {
             let region = Region::span_across(&name.region, &ann.region);
 
             match scope.introduce(
@@ -250,9 +251,10 @@ fn to_pending_def<'a>(
                 }
 
                 Err((original_region, loc_shadowed_symbol)) => {
-                    env.problem(Problem::ShadowingInAnnotation {
+                    env.problem(Problem::Shadowing {
                         original_region,
                         shadow: loc_shadowed_symbol,
+                        kind: ShadowKind::Variable,
                     });
 
                     Some((Output::default(), PendingDef::InvalidAlias))
@@ -260,7 +262,10 @@ fn to_pending_def<'a>(
             }
         }
 
-        Expect(_) => todo!(),
+        Type(TypeDef::Opaque { .. }) => todo_opaques!(),
+        Type(TypeDef::Ability { .. }) => todo_abilities!(),
+
+        Value(AstValueDef::Expect(_)) => todo!(),
 
         SpaceBefore(sub_def, _) | SpaceAfter(sub_def, _) => {
             to_pending_def(env, sub_def, scope, pattern_type)
@@ -321,7 +326,7 @@ fn from_pending_alias<'a>(
             for loc_lowercase in vars {
                 if !named_rigids.contains_key(&loc_lowercase.value) {
                     env.problem(Problem::PhantomTypeArgument {
-                        alias: symbol,
+                        typ: symbol,
                         variable_region: loc_lowercase.region,
                         variable_name: loc_lowercase.value.clone(),
                     });
@@ -511,7 +516,7 @@ fn canonicalize_pending_def<'a>(
                             // remove its generated name from the closure map.
                             let references =
                                 env.closures.remove(&closure_symbol).unwrap_or_else(|| {
-                            panic!( r"Tried to remove symbol {:?} from procedures, but it was not found: {:?}", closure_symbol, env.closures) 
+                            panic!( r"Tried to remove symbol {:?} from procedures, but it was not found: {:?}", closure_symbol, env.closures)
                             });
 
                             // TODO should we re-insert this function into env.closures?
@@ -604,7 +609,7 @@ fn canonicalize_pending_def<'a>(
                                 pattern_id: loc_can_pattern,
                                 expr_id: env.pool.add(loc_can_expr),
                                 type_id: annotation,
-                                rigids: rigids,
+                                rigids,
                                 expr_var: env.var_store.fresh(),
                             };
 
@@ -680,7 +685,7 @@ fn canonicalize_pending_def<'a>(
                     // remove its generated name from the closure map.
                     let references =
                         env.closures.remove(&closure_symbol).unwrap_or_else(|| {
-                            panic!( r"Tried to remove symbol {:?} from procedures, but it was not found: {:?}", closure_symbol, env.closures) 
+                            panic!( r"Tried to remove symbol {:?} from procedures, but it was not found: {:?}", closure_symbol, env.closures)
                         });
 
                     // TODO should we re-insert this function into env.closures?

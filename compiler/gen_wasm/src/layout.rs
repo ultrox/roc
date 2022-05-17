@@ -2,19 +2,18 @@ use roc_builtins::bitcode::{FloatWidth, IntWidth};
 use roc_mono::layout::{Layout, UnionLayout};
 
 use crate::wasm_module::ValueType;
-use crate::{PTR_SIZE, PTR_TYPE};
-
-/// Manually keep up to date with the Zig version we are using for builtins
-pub const BUILTINS_ZIG_VERSION: ZigVersion = ZigVersion::Zig8;
+use crate::{PTR_SIZE, PTR_TYPE, TARGET_INFO};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReturnMethod {
     /// This layout is returned from a Wasm function "normally" as a Primitive
-    Primitive(ValueType),
+    Primitive(ValueType, u32),
     /// This layout is returned by writing to a pointer passed as the first argument
     WriteToPointerArg,
     /// This layout is empty and requires no return value or argument (e.g. refcount helpers)
     NoReturnValue,
+    /// This layout is returned as a packed struct in an integer. Only used by Zig, not C.
+    ZigPackedStruct,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,8 +46,7 @@ impl WasmLayout {
         use UnionLayout::*;
         use ValueType::*;
 
-        let size = layout.stack_size(PTR_SIZE);
-        let alignment_bytes = layout.alignment_bytes(PTR_SIZE);
+        let (size, alignment_bytes) = layout.stack_size_and_alignment(TARGET_INFO);
 
         match layout {
             Layout::Builtin(Int(int_width)) => {
@@ -87,9 +85,10 @@ impl WasmLayout {
                 format: StackMemoryFormat::Decimal,
             },
 
+            Layout::LambdaSet(lambda_set) => WasmLayout::new(&lambda_set.runtime_representation()),
+
             Layout::Builtin(Str | Dict(_, _) | Set(_) | List(_))
-            | Layout::Struct(_)
-            | Layout::LambdaSet(_)
+            | Layout::Struct { .. }
             | Layout::Union(NonRecursive(_)) => Self::StackMemory {
                 size,
                 alignment_bytes,
@@ -102,6 +101,7 @@ impl WasmLayout {
                 | NullableWrapped { .. }
                 | NullableUnwrapped { .. },
             )
+            | Layout::Boxed(_)
             | Layout::RecursivePointer => Self::Primitive(PTR_TYPE, PTR_SIZE),
         }
     }
@@ -123,24 +123,14 @@ impl WasmLayout {
         }
     }
 
-    pub fn return_method(&self) -> ReturnMethod {
+    pub fn return_method(&self, conv: CallConv) -> ReturnMethod {
         match self {
-            Self::Primitive(ty, _) => ReturnMethod::Primitive(*ty),
-            Self::StackMemory { size, .. } => {
-                if *size == 0 {
-                    ReturnMethod::NoReturnValue
-                } else {
-                    ReturnMethod::WriteToPointerArg
-                }
+            Self::Primitive(ty, size) => ReturnMethod::Primitive(*ty, *size),
+            Self::StackMemory { size, format, .. } => {
+                conv.stack_memory_return_method(*size, *format)
             }
         }
     }
-}
-
-#[derive(PartialEq, Eq)]
-pub enum ZigVersion {
-    Zig8,
-    Zig9,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -148,8 +138,8 @@ pub enum CallConv {
     /// The C calling convention, as defined here:
     /// https://github.com/WebAssembly/tool-conventions/blob/main/BasicCABI.md
     C,
-    /// The calling convention that Zig 0.8 or 0.9 generates for Wasm when we *ask* it
-    /// for the .C calling convention, due to bugs in both versions of the Zig compiler.
+    /// The calling convention that Zig 0.9 generates for Wasm when we *ask* it
+    /// for the .C calling convention, due to bugs in the Zig compiler.
     Zig,
 }
 
@@ -181,12 +171,38 @@ impl CallConv {
                             &[I32] // Small struct: pass by value
                         } else if size <= 8 {
                             &[I64] // Small struct: pass by value
-                        } else if size <= 12 && BUILTINS_ZIG_VERSION == ZigVersion::Zig9 {
+                        } else if size <= 12 {
                             &[I64, I32] // Medium struct: pass by value, as two Wasm arguments
                         } else if size <= 16 {
                             &[I64, I64] // Medium struct: pass by value, as two Wasm arguments
                         } else {
                             &[I32] // Large struct: pass by reference
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn stack_memory_return_method(&self, size: u32, format: StackMemoryFormat) -> ReturnMethod {
+        use ReturnMethod::*;
+        use StackMemoryFormat::*;
+
+        match format {
+            Int128 | Float128 | Decimal => WriteToPointerArg,
+
+            DataStructure => {
+                if size == 0 {
+                    return NoReturnValue;
+                }
+                match self {
+                    CallConv::C => WriteToPointerArg,
+
+                    CallConv::Zig => {
+                        if size <= 8 {
+                            ZigPackedStruct
+                        } else {
+                            WriteToPointerArg
                         }
                     }
                 }

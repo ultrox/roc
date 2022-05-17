@@ -1,35 +1,33 @@
 extern crate pulldown_cmark;
 extern crate roc_load;
-use bumpalo::{collections::String as BumpString, Bump};
-use def::defs_to_html;
-use docs_error::DocsResult;
-use expr::expr_to_html;
-use roc_builtins::std::StdLib;
-use roc_can::builtins::builtin_defs_map;
+use bumpalo::Bump;
+use docs_error::{DocsError, DocsResult};
+use html::mark_node_to_html;
 use roc_can::scope::Scope;
-use roc_collections::all::MutMap;
+use roc_code_markup::markup::nodes::MarkupNode;
+use roc_code_markup::slow_pool::SlowPool;
+use roc_highlight::highlight_parser::{highlight_defs, highlight_expr};
 use roc_load::docs::DocEntry::DocDef;
 use roc_load::docs::{DocEntry, TypeAnnotation};
 use roc_load::docs::{ModuleDocumentation, RecordField};
-use roc_load::file::{LoadedModule, LoadingProblem};
-use roc_module::symbol::{IdentIds, Interns, ModuleId, ModuleIds};
+use roc_load::{LoadedModule, LoadingProblem, Threading};
+use roc_module::symbol::{IdentIdsByModule, Interns, ModuleId};
 use roc_parse::ident::{parse_ident, Ident};
-use roc_parse::parser::SyntaxError;
 use roc_parse::state::State;
 use roc_region::all::Region;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-mod def;
 mod docs_error;
-mod expr;
 mod html;
 
-pub fn generate_docs_html(filenames: Vec<PathBuf>, std_lib: StdLib, build_dir: &Path) {
-    let loaded_modules = load_modules_for_files(filenames, std_lib);
+const BUILD_DIR: &str = "./generated-docs";
 
-    //
-    // TODO: get info from a file like "elm.json"
+pub fn generate_docs_html(filenames: Vec<PathBuf>) {
+    let build_dir = Path::new(BUILD_DIR);
+    let loaded_modules = load_modules_for_files(filenames);
+
+    // TODO: get info from a package module; this is all hardcoded for now.
     let mut package = roc_load::docs::Documentation {
         name: "roc/builtins".to_string(),
         version: "1.0.0".to_string(),
@@ -61,49 +59,61 @@ pub fn generate_docs_html(filenames: Vec<PathBuf>, std_lib: StdLib, build_dir: &
     .expect("TODO gracefully handle failing to make the favicon");
 
     let template_html = include_str!("./static/index.html")
-        .replace("<!-- search.js -->", &format!("{}search.js", base_url()))
-        .replace("<!-- styles.css -->", &format!("{}styles.css", base_url()))
-        .replace(
-            "<!-- favicon.svg -->",
-            &format!("{}favicon.svg", base_url()),
-        )
+        .replace("<!-- search.js -->", "/search.js")
+        .replace("<!-- styles.css -->", "/styles.css")
+        .replace("<!-- favicon.svg -->", "/favicon.svg")
         .replace(
             "<!-- Module links -->",
             render_sidebar(package.modules.iter().flat_map(|loaded_module| {
-                loaded_module.documentation.values().map(move |d| {
-                    let exposed_values = loaded_module
-                        .exposed_values
-                        .iter()
-                        .map(|symbol| symbol.ident_str(&loaded_module.interns).to_string())
-                        .collect::<Vec<String>>();
+                loaded_module
+                    .documentation
+                    .iter()
+                    .filter_map(move |(module_id, module)| {
+                        // TODO it seems this `documentation` dictionary has entries for
+                        // every module, but only the current module has any info in it.
+                        // We disregard the others, but probably this shouldn't bother
+                        // being a hash map in the first place if only one of its entries
+                        // actually has interesting information in it?
+                        if *module_id == loaded_module.module_id {
+                            let exposed_values = loaded_module
+                                .exposed_values
+                                .iter()
+                                .map(|symbol| symbol.as_str(&loaded_module.interns).to_string())
+                                .collect::<Vec<String>>();
 
-                    (exposed_values, d)
-                })
+                            Some((module, exposed_values))
+                        } else {
+                            None
+                        }
+                    })
             }))
             .as_str(),
         );
 
     // Write each package's module docs html file
     for loaded_module in package.modules.iter_mut() {
-        for module_docs in loaded_module.documentation.values() {
-            let module_dir = build_dir.join(module_docs.name.replace(".", "/").as_str());
+        for (module_id, module_docs) in loaded_module.documentation.iter() {
+            if *module_id == loaded_module.module_id {
+                let module_dir = build_dir.join(module_docs.name.replace('.', "/").as_str());
 
-            fs::create_dir_all(&module_dir)
-                .expect("TODO gracefully handle not being able to create the module dir");
+                fs::create_dir_all(&module_dir)
+                    .expect("TODO gracefully handle not being able to create the module dir");
 
-            let rendered_module = template_html
-                .replace(
-                    "<!-- Package Name and Version -->",
-                    render_name_and_version(package.name.as_str(), package.version.as_str())
-                        .as_str(),
-                )
-                .replace(
-                    "<!-- Module Docs -->",
-                    render_module_documentation(module_docs, loaded_module).as_str(),
+                let rendered_module = template_html
+                    .replace(
+                        "<!-- Package Name and Version -->",
+                        render_name_and_version(package.name.as_str(), package.version.as_str())
+                            .as_str(),
+                    )
+                    .replace(
+                        "<!-- Module Docs -->",
+                        render_module_documentation(module_docs, loaded_module).as_str(),
+                    );
+
+                fs::write(module_dir.join("index.html"), rendered_module).expect(
+                    "TODO gracefully handle failing to write index.html inside module's dir",
                 );
-
-            fs::write(module_dir.join("index.html"), rendered_module)
-                .expect("TODO gracefully handle failing to write html");
+            }
         }
     }
 
@@ -111,46 +121,45 @@ pub fn generate_docs_html(filenames: Vec<PathBuf>, std_lib: StdLib, build_dir: &
 }
 
 // converts plain-text code to highlighted html
-pub fn syntax_highlight_expr<'a>(
-    arena: &'a Bump,
-    buf: &mut BumpString<'a>,
-    code_str: &'a str,
-    env_module_id: ModuleId,
-    env_module_ids: &'a ModuleIds,
-    interns: &Interns,
-) -> Result<String, SyntaxError<'a>> {
+pub fn syntax_highlight_expr(code_str: &str) -> DocsResult<String> {
     let trimmed_code_str = code_str.trim_end().trim();
-    let state = State::new(trimmed_code_str.as_bytes());
+    let mut mark_node_pool = SlowPool::default();
 
-    match roc_parse::expr::test_parse_expr(0, arena, state) {
-        Ok(loc_expr) => {
-            expr_to_html(buf, loc_expr.value, env_module_id, env_module_ids, interns);
+    let mut highlighted_html_str = String::new();
 
-            Ok(buf.to_string())
+    match highlight_expr(trimmed_code_str, &mut mark_node_pool) {
+        Ok(root_mark_node_id) => {
+            let root_mark_node = mark_node_pool.get(root_mark_node_id);
+            mark_node_to_html(root_mark_node, &mark_node_pool, &mut highlighted_html_str);
+
+            Ok(highlighted_html_str)
         }
-        Err(fail) => Err(SyntaxError::Expr(fail)),
+        Err(err) => Err(DocsError::from(err)),
     }
 }
 
 // converts plain-text code to highlighted html
-pub fn syntax_highlight_top_level_defs<'a>(
-    arena: &'a Bump,
-    buf: &mut BumpString<'a>,
-    code_str: &'a str,
-    env_module_id: ModuleId,
-    interns: &mut Interns,
-) -> DocsResult<String> {
+pub fn syntax_highlight_top_level_defs(code_str: &str) -> DocsResult<String> {
     let trimmed_code_str = code_str.trim_end().trim();
 
-    match roc_parse::test_helpers::parse_defs_with(arena, trimmed_code_str) {
-        Ok(vec_loc_def) => {
-            let vec_def = vec_loc_def.iter().map(|loc| loc.value).collect();
+    let mut mark_node_pool = SlowPool::default();
 
-            defs_to_html(buf, vec_def, env_module_id, interns)?;
+    let mut highlighted_html_str = String::new();
 
-            Ok(buf.to_string())
+    match highlight_defs(trimmed_code_str, &mut mark_node_pool) {
+        Ok(mark_node_id_vec) => {
+            let def_mark_nodes: Vec<&MarkupNode> = mark_node_id_vec
+                .iter()
+                .map(|mn_id| mark_node_pool.get(*mn_id))
+                .collect();
+
+            for mn in def_mark_nodes {
+                mark_node_to_html(mn, &mark_node_pool, &mut highlighted_html_str)
+            }
+
+            Ok(highlighted_html_str)
         }
-        Err(err) => Err(err.into()),
+        Err(err) => Err(DocsError::from(err)),
     }
 }
 
@@ -340,12 +349,12 @@ fn render_name_and_version(name: &str, version: &str) -> String {
     buf
 }
 
-fn render_sidebar<'a, I: Iterator<Item = (Vec<String>, &'a ModuleDocumentation)>>(
+fn render_sidebar<'a, I: Iterator<Item = (&'a ModuleDocumentation, Vec<String>)>>(
     modules: I,
 ) -> String {
     let mut buf = String::new();
 
-    for (exposed_values, module) in modules {
+    for (module, exposed_values) in modules {
         let mut sidebar_entry_content = String::new();
 
         let name = module.name.as_str();
@@ -414,27 +423,27 @@ fn render_sidebar<'a, I: Iterator<Item = (Vec<String>, &'a ModuleDocumentation)>
     buf
 }
 
-pub fn load_modules_for_files(filenames: Vec<PathBuf>, std_lib: StdLib) -> Vec<LoadedModule> {
+pub fn load_modules_for_files(filenames: Vec<PathBuf>) -> Vec<LoadedModule> {
     let arena = Bump::new();
-    let mut modules = vec![];
+    let mut modules = Vec::with_capacity(filenames.len());
 
     for filename in filenames {
         let mut src_dir = filename.clone();
         src_dir.pop();
 
-        match roc_load::file::load_and_typecheck(
+        match roc_load::load_and_typecheck(
             &arena,
             filename,
-            &std_lib,
             src_dir.as_path(),
-            MutMap::default(),
-            std::mem::size_of::<usize>() as u32, // This is just type-checking for docs, so "target" doesn't matter
-            builtin_defs_map,
+            Default::default(),
+            roc_target::TargetInfo::default_x86_64(), // This is just type-checking for docs, so "target" doesn't matter
+            roc_reporting::report::RenderTarget::ColorTerminal,
+            Threading::AllAvailable,
         ) {
             Ok(loaded) => modules.push(loaded),
             Err(LoadingProblem::FormattedReport(report)) => {
-                println!("{}", report);
-                panic!();
+                eprintln!("{}", report);
+                std::process::exit(1);
             }
             Err(e) => panic!("{:?}", e),
         }
@@ -716,7 +725,7 @@ struct DocUrl {
 fn doc_url<'a>(
     home: ModuleId,
     exposed_values: &[&str],
-    dep_idents: &MutMap<ModuleId, IdentIds>,
+    dep_idents: &IdentIdsByModule,
     scope: &Scope,
     interns: &'a Interns,
     mut module_name: &'a str,
@@ -849,8 +858,8 @@ fn markdown_to_html(
                             }
                         }
                     }
-                    Ok((_, Ident::GlobalTag(type_name), _)) => {
-                        // This looks like a global tag name, but it could
+                    Ok((_, Ident::Tag(type_name), _)) => {
+                        // This looks like a tag name, but it could
                         // be a type alias that's in scope, e.g. [I64]
                         let DocUrl { url, title } = doc_url(
                             loaded_module.module_id,
@@ -959,17 +968,9 @@ fn markdown_to_html(
                 (0, 0)
             }
             Event::Text(CowStr::Borrowed(code_str)) if expecting_code_block => {
-                let code_block_arena = Bump::new();
-
-                let mut code_block_buf = BumpString::new_in(&code_block_arena);
 
                 match syntax_highlight_expr(
-                    &code_block_arena,
-                    &mut code_block_buf,
-                    code_str,
-                    loaded_module.module_id,
-                    &loaded_module.interns.module_ids,
-                    &loaded_module.interns
+                    code_str
                 )
                 {
                     Ok(highlighted_code_str) => {

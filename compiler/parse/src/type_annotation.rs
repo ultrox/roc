@@ -1,8 +1,12 @@
-use crate::ast::{AliasHeader, AssignedField, Pattern, Tag, TypeAnnotation};
+use crate::ast::{
+    AssignedField, CommentOrNewline, HasClause, Pattern, Spaced, Tag, TypeAnnotation, TypeHeader,
+};
 use crate::blankspace::{space0_around_ee, space0_before_e, space0_e};
+use crate::ident::lowercase_ident;
 use crate::keyword;
+use crate::parser::then;
 use crate::parser::{
-    allocated, backtrackable, optional, specialize, specialize_ref, word1, word2, EType,
+    allocated, backtrackable, optional, specialize, specialize_ref, word1, word2, word3, EType,
     ETypeApply, ETypeInParens, ETypeInlineAlias, ETypeRecord, ETypeTagUnion, ParseResult, Parser,
     Progress::{self, *},
 };
@@ -28,7 +32,6 @@ fn tag_union_type<'a>(min_indent: u32) -> impl Parser<'a, TypeAnnotation<'a>, ET
             word1(b']', ETypeTagUnion::End),
             min_indent,
             ETypeTagUnion::Open,
-            ETypeTagUnion::Space,
             ETypeTagUnion::IndentEnd,
             Tag::SpaceBefore
         )
@@ -50,7 +53,7 @@ fn tag_union_type<'a>(min_indent: u32) -> impl Parser<'a, TypeAnnotation<'a>, ET
 fn check_type_alias(
     p: Progress,
     annot: Loc<TypeAnnotation>,
-) -> impl Parser<AliasHeader, ETypeInlineAlias> {
+) -> impl Parser<TypeHeader, ETypeInlineAlias> {
     move |arena, state| match annot.value {
         TypeAnnotation::Apply("", tag_name, vars) => {
             let mut var_names = Vec::new_in(arena);
@@ -71,7 +74,7 @@ fn check_type_alias(
             let name_region =
                 Region::between(name_start, name_start.bump_column(tag_name.len() as u32));
 
-            let header = AliasHeader {
+            let header = TypeHeader {
                 name: Loc::at(name_region, tag_name),
                 vars: var_names.into_bump_slice(),
             };
@@ -85,18 +88,13 @@ fn check_type_alias(
     }
 }
 
-fn parse_type_alias_after_as<'a>(min_indent: u32) -> impl Parser<'a, AliasHeader<'a>, EType<'a>> {
+fn parse_type_alias_after_as<'a>(min_indent: u32) -> impl Parser<'a, TypeHeader<'a>, EType<'a>> {
     move |arena, state| {
-        space0_before_e(
-            term(min_indent),
-            min_indent,
-            EType::TSpace,
-            EType::TAsIndentStart,
-        )
-        .parse(arena, state)
-        .and_then(|(p, annot, state)| {
-            specialize(EType::TInlineAlias, check_type_alias(p, annot)).parse(arena, state)
-        })
+        space0_before_e(term(min_indent), min_indent, EType::TAsIndentStart)
+            .parse(arena, state)
+            .and_then(|(p, annot, state)| {
+                specialize(EType::TInlineAlias, check_type_alias(p, annot)).parse(arena, state)
+            })
     }
 }
 
@@ -122,7 +120,7 @@ fn term<'a>(min_indent: u32) -> impl Parser<'a, Loc<TypeAnnotation<'a>>, EType<'
                 map!(
                     and!(
                         skip_second!(
-                            backtrackable(space0_e(min_indent, EType::TSpace, EType::TIndentEnd)),
+                            backtrackable(space0_e(min_indent, EType::TIndentEnd)),
                             crate::parser::keyword_e(keyword::AS, EType::TEnd)
                         ),
                         parse_type_alias_after_as(min_indent)
@@ -133,7 +131,7 @@ fn term<'a>(min_indent: u32) -> impl Parser<'a, Loc<TypeAnnotation<'a>>, EType<'
             ]
         ),
         |arena: &'a Bump,
-         (loc_ann, opt_as): (Loc<TypeAnnotation<'a>>, Option<(&'a [_], AliasHeader<'a>)>)| {
+         (loc_ann, opt_as): (Loc<TypeAnnotation<'a>>, Option<(&'a [_], TypeHeader<'a>)>)| {
             match opt_as {
                 Some((spaces, alias)) => {
                     let alias_vars_region =
@@ -170,7 +168,7 @@ fn loc_applied_arg<'a>(min_indent: u32) -> impl Parser<'a, Loc<TypeAnnotation<'a
 
     map_with_arena!(
         and!(
-            backtrackable(space0_e(min_indent, EType::TSpace, EType::TIndentStart)),
+            backtrackable(space0_e(min_indent, EType::TIndentStart)),
             one_of!(
                 loc_wildcard(),
                 loc_inferred(),
@@ -201,7 +199,6 @@ fn loc_type_in_parens<'a>(
             move |arena, state| specialize_ref(ETypeInParens::Type, expression(min_indent, true))
                 .parse(arena, state),
             min_indent,
-            ETypeInParens::Space,
             ETypeInParens::IndentOpen,
             ETypeInParens::IndentEnd,
         ),
@@ -217,16 +214,9 @@ fn tag_type<'a>(min_indent: u32) -> impl Parser<'a, Tag<'a>, ETypeTagUnion<'a>> 
         let (_, args, state) = specialize_ref(ETypeTagUnion::Type, loc_applied_args_e(min_indent))
             .parse(arena, state)?;
 
-        let result = if name.value.starts_with('@') {
-            Tag::Private {
-                name,
-                args: args.into_bump_slice(),
-            }
-        } else {
-            Tag::Global {
-                name,
-                args: args.into_bump_slice(),
-            }
+        let result = Tag::Apply {
+            name,
+            args: args.into_bump_slice(),
         };
 
         Ok((MadeProgress, result, state))
@@ -247,7 +237,6 @@ where
 fn record_type_field<'a>(
     min_indent: u32,
 ) -> impl Parser<'a, AssignedField<'a, TypeAnnotation<'a>>, ETypeRecord<'a>> {
-    use crate::ident::lowercase_ident;
     use crate::parser::Either::*;
     use AssignedField::*;
 
@@ -263,7 +252,7 @@ fn record_type_field<'a>(
         debug_assert_eq!(progress, MadeProgress);
 
         let (_, spaces, state) =
-            space0_e(min_indent, ETypeRecord::Space, ETypeRecord::IndentEnd).parse(arena, state)?;
+            space0_e(min_indent, ETypeRecord::IndentEnd).parse(arena, state)?;
 
         // Having a value is optional; both `{ email }` and `{ email: blah }` work.
         // (This is true in both literals and types.)
@@ -277,13 +266,9 @@ fn record_type_field<'a>(
 
         match opt_loc_val {
             Some(First(_)) => {
-                let (_, loc_val, state) = space0_before_e(
-                    val_parser,
-                    min_indent,
-                    ETypeRecord::Space,
-                    ETypeRecord::IndentColon,
-                )
-                .parse(arena, state)?;
+                let (_, loc_val, state) =
+                    space0_before_e(val_parser, min_indent, ETypeRecord::IndentColon)
+                        .parse(arena, state)?;
 
                 Ok((
                     MadeProgress,
@@ -292,13 +277,9 @@ fn record_type_field<'a>(
                 ))
             }
             Some(Second(_)) => {
-                let (_, loc_val, state) = space0_before_e(
-                    val_parser,
-                    min_indent,
-                    ETypeRecord::Space,
-                    ETypeRecord::IndentOptional,
-                )
-                .parse(arena, state)?;
+                let (_, loc_val, state) =
+                    space0_before_e(val_parser, min_indent, ETypeRecord::IndentOptional)
+                        .parse(arena, state)?;
 
                 Ok((
                     MadeProgress,
@@ -336,7 +317,6 @@ fn record_type<'a>(min_indent: u32) -> impl Parser<'a, TypeAnnotation<'a>, EType
             word1(b'}', ETypeRecord::End),
             min_indent,
             ETypeRecord::Open,
-            ETypeRecord::Space,
             ETypeRecord::IndentEnd,
             AssignedField::SpaceBefore
         )
@@ -384,18 +364,82 @@ fn loc_applied_args_e<'a>(
     zero_or_more!(loc_applied_arg(min_indent))
 }
 
+fn has_clause<'a>(min_indent: u32) -> impl Parser<'a, Loc<HasClause<'a>>, EType<'a>> {
+    map!(
+        // Suppose we are trying to parse "a has Hash"
+        and!(
+            space0_around_ee(
+                // Parse "a", with appropriate spaces
+                specialize(
+                    |_, pos| EType::TBadTypeVariable(pos),
+                    loc!(map!(lowercase_ident(), Spaced::Item)),
+                ),
+                min_indent,
+                EType::TIndentStart,
+                EType::TIndentEnd
+            ),
+            then(
+                // Parse "has"; we don't care about this keyword
+                word3(b'h', b'a', b's', EType::THasClause),
+                // Parse "Hash"; this may be qualified from another module like "Hash.Hash"
+                |arena, state, _progress, _output| {
+                    space0_before_e(
+                        specialize(EType::TApply, loc!(parse_concrete_type)),
+                        state.column() + 1,
+                        EType::TIndentStart,
+                    )
+                    .parse(arena, state)
+                }
+            )
+        ),
+        |(var, ability): (Loc<Spaced<'a, &'a str>>, Loc<TypeAnnotation<'a>>)| {
+            let region = Region::span_across(&var.region, &ability.region);
+            let has_clause = HasClause { var, ability };
+            Loc::at(region, has_clause)
+        }
+    )
+}
+
+/// Parse a chain of `has` clauses, e.g. " | a has Hash, b has Eq".
+/// Returns the clauses and spaces before the starting "|", if there were any.
+fn has_clause_chain<'a>(
+    min_indent: u32,
+) -> impl Parser<'a, (&'a [CommentOrNewline<'a>], &'a [Loc<HasClause<'a>>]), EType<'a>> {
+    move |arena, state: State<'a>| {
+        let (_, (spaces_before, ()), state) = and!(
+            space0_e(min_indent, EType::TIndentStart),
+            word1(b'|', EType::TWhereBar)
+        )
+        .parse(arena, state)?;
+
+        let min_demand_indent = state.column() + 1;
+        // Parse the first clause (there must be one), then the rest
+        let (_, first_clause, state) = has_clause(min_demand_indent).parse(arena, state)?;
+
+        let (_, mut clauses, state) = zero_or_more!(skip_first!(
+            word1(b',', EType::THasClause),
+            has_clause(min_demand_indent)
+        ))
+        .parse(arena, state)?;
+
+        // Usually the number of clauses shouldn't be too large, so this is okay
+        clauses.insert(0, first_clause);
+
+        Ok((
+            MadeProgress,
+            (spaces_before, clauses.into_bump_slice()),
+            state,
+        ))
+    }
+}
+
 fn expression<'a>(
     min_indent: u32,
     is_trailing_comma_valid: bool,
 ) -> impl Parser<'a, Loc<TypeAnnotation<'a>>, EType<'a>> {
     (move |arena, state: State<'a>| {
-        let (p1, first, state) = space0_before_e(
-            term(min_indent),
-            min_indent,
-            EType::TSpace,
-            EType::TIndentStart,
-        )
-        .parse(arena, state)?;
+        let (p1, first, state) = space0_before_e(term(min_indent), min_indent, EType::TIndentStart)
+            .parse(arena, state)?;
 
         let result = and![
             zero_or_more!(skip_first!(
@@ -404,7 +448,6 @@ fn expression<'a>(
                     space0_around_ee(
                         term(min_indent),
                         min_indent,
-                        EType::TSpace,
                         EType::TIndentStart,
                         EType::TIndentEnd
                     ),
@@ -419,22 +462,20 @@ fn expression<'a>(
             // TODO this space0 is dropped, so newlines just before the function arrow when there
             // is only one argument are not seen by the formatter. Can we do better?
             skip_second!(
-                space0_e(min_indent, EType::TSpace, EType::TIndentStart),
+                space0_e(min_indent, EType::TIndentStart),
                 word2(b'-', b'>', EType::TStart)
             )
             .trace("type_annotation:expression:arrow")
         ]
         .parse(arena, state.clone());
 
-        match result {
+        let (progress, annot, state) = match result {
             Ok((p2, (rest, _dropped_spaces), state)) => {
-                let (p3, return_type, state) = space0_before_e(
-                    term(min_indent),
-                    min_indent,
-                    EType::TSpace,
-                    EType::TIndentStart,
-                )
-                .parse(arena, state)?;
+                let (p3, return_type, state) =
+                    space0_before_e(term(min_indent), min_indent, EType::TIndentStart)
+                        .parse(arena, state)?;
+
+                let region = Region::span_across(&first.region, &return_type.region);
 
                 // prepare arguments
                 let mut arguments = Vec::with_capacity_in(rest.len() + 1, arena);
@@ -443,16 +484,16 @@ fn expression<'a>(
                 let output = arena.alloc(arguments);
 
                 let result = Loc {
-                    region: return_type.region,
+                    region,
                     value: TypeAnnotation::Function(output, arena.alloc(return_type)),
                 };
                 let progress = p1.or(p2).or(p3);
-                Ok((progress, result, state))
+                (progress, result, state)
             }
             Err(err) => {
                 if !is_trailing_comma_valid {
                     let (_, comma, _) = optional(skip_first!(
-                        space0_e(min_indent, EType::TSpace, EType::TIndentStart),
+                        space0_e(min_indent, EType::TIndentStart),
                         word1(b',', EType::TStart)
                     ))
                     .trace("check trailing comma")
@@ -468,7 +509,36 @@ fn expression<'a>(
                 }
 
                 // We ran into trouble parsing the function bits; just return the single term
-                Ok((p1, first, state))
+                (p1, first, state)
+            }
+        };
+
+        // Finally, try to parse a where clause if there is one.
+        // The where clause must be at least as deep as where the type annotation started.
+        let min_where_clause_indent = min_indent;
+        match has_clause_chain(min_where_clause_indent).parse(arena, state.clone()) {
+            Ok((where_progress, (spaces_before, has_chain), state)) => {
+                use crate::ast::Spaceable;
+
+                let region = Region::span_across(&annot.region, &has_chain.last().unwrap().region);
+                let type_annot = if !spaces_before.is_empty() {
+                    let spaced = arena
+                        .alloc(annot.value)
+                        .with_spaces_before(spaces_before, annot.region);
+                    &*arena.alloc(spaced)
+                } else {
+                    &*arena.alloc(annot)
+                };
+                let where_annot = TypeAnnotation::Where(type_annot, has_chain);
+                Ok((
+                    where_progress.or(progress),
+                    Loc::at(region, where_annot),
+                    state,
+                ))
+            }
+            Err(_) => {
+                // Ran into a problem parsing a where clause; don't suppose there is one.
+                Ok((progress, annot, state))
             }
         }
     })

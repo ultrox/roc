@@ -1,15 +1,16 @@
-use crate::annotation::IntroducedVariables;
+use crate::abilities::SpecializationId;
+use crate::annotation::{freshen_opaque_def, IntroducedVariables};
 use crate::builtins::builtin_defs_map;
 use crate::def::{can_defs_with_return, Def};
 use crate::env::Env;
 use crate::num::{
-    finish_parsing_base, finish_parsing_float, finish_parsing_int, float_expr_from_result,
-    int_expr_from_result, num_expr_from_result,
+    finish_parsing_base, finish_parsing_float, finish_parsing_num, float_expr_from_result,
+    int_expr_from_result, num_expr_from_result, FloatBound, IntBound, NumericBound,
 };
-use crate::pattern::{canonicalize_pattern, Pattern};
+use crate::pattern::{canonicalize_pattern, BindingsFromPattern, Pattern};
 use crate::procedure::References;
 use crate::scope::Scope;
-use roc_collections::all::{ImSet, MutMap, MutSet, SendMap};
+use roc_collections::{SendMap, VecMap, VecSet};
 use roc_module::called_via::CalledVia;
 use roc_module::ident::{ForeignSymbol, Lowercase, TagName};
 use roc_module::low_level::LowLevel;
@@ -18,46 +19,64 @@ use roc_parse::ast::{self, EscapedChar, StrLiteral};
 use roc_parse::pattern::PatternType::*;
 use roc_problem::can::{PrecedenceProblem, Problem, RuntimeError};
 use roc_region::all::{Loc, Region};
-use roc_types::subs::{VarStore, Variable};
-use roc_types::types::Alias;
-use std::fmt::Debug;
+use roc_types::subs::{ExhaustiveMark, IllegalCycleMark, RedundantMark, VarStore, Variable};
+use roc_types::types::{Alias, Category, LambdaSet, OptAbleVar, Type};
+use std::fmt::{Debug, Display};
 use std::{char, u32};
 
-#[derive(Clone, Default, Debug, PartialEq)]
+#[derive(Clone, Default, Debug)]
 pub struct Output {
     pub references: References,
     pub tail_call: Option<Symbol>,
     pub introduced_variables: IntroducedVariables,
-    pub aliases: SendMap<Symbol, Alias>,
-    pub non_closures: MutSet<Symbol>,
+    pub aliases: VecMap<Symbol, Alias>,
+    pub non_closures: VecSet<Symbol>,
+    pub abilities_in_scope: Vec<Symbol>,
 }
 
 impl Output {
     pub fn union(&mut self, other: Self) {
-        self.references.union_mut(other.references);
+        self.references.union_mut(&other.references);
 
         if let (None, Some(later)) = (self.tail_call, other.tail_call) {
             self.tail_call = Some(later);
         }
 
-        self.introduced_variables.union(&other.introduced_variables);
+        self.introduced_variables
+            .union_owned(other.introduced_variables);
         self.aliases.extend(other.aliases);
         self.non_closures.extend(other.non_closures);
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub enum IntValue {
+    I128(i128),
+    U128(u128),
+}
+
+impl Display for IntValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IntValue::I128(n) => Display::fmt(&n, f),
+            IntValue::U128(n) => Display::fmt(&n, f),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub enum Expr {
     // Literals
 
     // Num stores the `a` variable in `Num a`. Not the same as the variable
     // stored in Int and Float below, which is strictly for better error messages
-    Num(Variable, Box<str>, i64),
+    Num(Variable, Box<str>, IntValue, NumericBound),
 
     // Int and Float store a variable to generate better error messages
-    Int(Variable, Variable, Box<str>, i128),
-    Float(Variable, Variable, Box<str>, f64),
+    Int(Variable, Variable, Box<str>, IntValue, IntBound),
+    Float(Variable, Variable, Box<str>, f64, FloatBound),
     Str(Box<str>),
+    SingleQuote(char),
     List {
         elem_var: Variable,
         loc_elems: Vec<Loc<Expr>>,
@@ -65,13 +84,28 @@ pub enum Expr {
 
     // Lookups
     Var(Symbol),
+    AbilityMember(
+        /// Actual member name
+        Symbol,
+        /// Specialization to use, and its variable
+        SpecializationId,
+        Variable,
+    ),
+
     // Branching
     When {
+        /// The actual condition of the when expression.
+        loc_cond: Box<Loc<Expr>>,
         cond_var: Variable,
+        /// Result type produced by the branches.
         expr_var: Variable,
         region: Region,
-        loc_cond: Box<Loc<Expr>>,
+        /// The branches of the when, and the type of the condition that they expect to be matched
+        /// against.
         branches: Vec<WhenBranch>,
+        branches_cond_var: Variable,
+        /// Whether the branches are exhaustive.
+        exhaustive: ExhaustiveMark,
     },
     If {
         cond_var: Variable,
@@ -81,8 +115,8 @@ pub enum Expr {
     },
 
     // Let
-    LetRec(Vec<Def>, Box<Loc<Expr>>, Variable),
-    LetNonRec(Box<Def>, Box<Loc<Expr>>, Variable),
+    LetRec(Vec<Def>, Box<Loc<Expr>>, IllegalCycleMark),
+    LetNonRec(Box<Def>, Box<Loc<Expr>>),
 
     /// This is *only* for calling functions, not for tag application.
     /// The Tag variant contains any applied values inside it.
@@ -122,17 +156,7 @@ pub enum Expr {
         field: Lowercase,
     },
     /// field accessor as a function, e.g. (.foo) expr
-    Accessor {
-        /// accessors are desugared to closures; they need to have a name
-        /// so the closure can have a correct lambda set
-        name: Symbol,
-        function_var: Variable,
-        record_var: Variable,
-        closure_ext_var: Variable,
-        ext_var: Variable,
-        field_var: Variable,
-        field: Lowercase,
-    },
+    Accessor(AccessorData),
 
     Update {
         record_var: Variable,
@@ -154,7 +178,30 @@ pub enum Expr {
         variant_var: Variable,
         ext_var: Variable,
         name: TagName,
-        arguments: Vec<(Variable, Loc<Expr>)>,
+    },
+
+    /// A wrapping of an opaque type, like `@Age 21`
+    OpaqueRef {
+        opaque_var: Variable,
+        name: Symbol,
+        argument: Box<(Variable, Loc<Expr>)>,
+
+        // The following help us link this opaque reference to the type specified by its
+        // definition, which we then use during constraint generation. For example
+        // suppose we have
+        //
+        //   Id n := [ Id U64 n ]
+        //   @Id "sasha"
+        //
+        // Then `opaque` is "Id", `argument` is "sasha", but this is not enough for us to
+        // infer the type of the expression as "Id Str" - we need to link the specialized type of
+        // the variable "n".
+        // That's what `specialized_def_type` and `type_arguments` are for; they are specialized
+        // for the expression from the opaque definition. `type_arguments` is something like
+        // [(n, fresh1)], and `specialized_def_type` becomes "[ Id U64 fresh1 ]".
+        specialized_def_type: Box<Type>,
+        type_arguments: Vec<OptAbleVar>,
+        lambda_set_variables: Vec<LambdaSet>,
     },
 
     // Test
@@ -163,7 +210,75 @@ pub enum Expr {
     // Compiles, but will crash if reached
     RuntimeError(RuntimeError),
 }
-#[derive(Clone, Debug, PartialEq)]
+
+impl Expr {
+    pub fn category(&self) -> Category {
+        match self {
+            Self::Num(..) => Category::Num,
+            Self::Int(..) => Category::Int,
+            Self::Float(..) => Category::Float,
+            Self::Str(..) => Category::Str,
+            Self::SingleQuote(..) => Category::Character,
+            Self::List { .. } => Category::List,
+            &Self::Var(sym) => Category::Lookup(sym),
+            &Self::AbilityMember(sym, _, _) => Category::Lookup(sym),
+            Self::When { .. } => Category::When,
+            Self::If { .. } => Category::If,
+            Self::LetRec(_, expr, _) => expr.value.category(),
+            Self::LetNonRec(_, expr) => expr.value.category(),
+            &Self::Call(_, _, called_via) => Category::CallResult(None, called_via),
+            &Self::RunLowLevel { op, .. } => Category::LowLevelOpResult(op),
+            Self::ForeignCall { .. } => Category::ForeignCall,
+            Self::Closure(..) => Category::Lambda,
+            Self::Record { .. } => Category::Record,
+            Self::EmptyRecord => Category::Record,
+            Self::Access { field, .. } => Category::Access(field.clone()),
+            Self::Accessor(data) => Category::Accessor(data.field.clone()),
+            Self::Update { .. } => Category::Record,
+            Self::Tag {
+                name, arguments, ..
+            } => Category::TagApply {
+                tag_name: name.clone(),
+                args_count: arguments.len(),
+            },
+            Self::ZeroArgumentTag { name, .. } => Category::TagApply {
+                tag_name: name.clone(),
+                args_count: 0,
+            },
+            &Self::OpaqueRef { name, .. } => Category::OpaqueWrap(name),
+            Self::Expect(..) => Category::Expect,
+            Self::RuntimeError(..) => Category::Unknown,
+        }
+    }
+}
+
+/// Stores exhaustiveness-checking metadata for a closure argument that may
+/// have an annotated type.
+#[derive(Clone, Copy, Debug)]
+pub struct AnnotatedMark {
+    pub annotation_var: Variable,
+    pub exhaustive: ExhaustiveMark,
+}
+
+impl AnnotatedMark {
+    pub fn new(var_store: &mut VarStore) -> Self {
+        Self {
+            annotation_var: var_store.fresh(),
+            exhaustive: ExhaustiveMark::new(var_store),
+        }
+    }
+
+    // NOTE: only ever use this if you *know* a pattern match is surely exhaustive!
+    // Otherwise you will get unpleasant unification errors.
+    pub fn known_exhaustive() -> Self {
+        Self {
+            annotation_var: Variable::EMPTY_TAG_UNION,
+            exhaustive: ExhaustiveMark::known_exhaustive(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct ClosureData {
     pub function_type: Variable,
     pub closure_type: Variable,
@@ -172,11 +287,79 @@ pub struct ClosureData {
     pub name: Symbol,
     pub captured_symbols: Vec<(Symbol, Variable)>,
     pub recursive: Recursive,
-    pub arguments: Vec<(Variable, Loc<Pattern>)>,
+    pub arguments: Vec<(Variable, AnnotatedMark, Loc<Pattern>)>,
     pub loc_body: Box<Loc<Expr>>,
 }
 
+/// A record accessor like `.foo`, which is equivalent to `\r -> r.foo`
+/// Accessors are desugared to closures; they need to have a name
+/// so the closure can have a correct lambda set.
+///
+/// We distinguish them from closures so we can have better error messages
+/// during constraint generation.
 #[derive(Clone, Debug, PartialEq)]
+pub struct AccessorData {
+    pub name: Symbol,
+    pub function_var: Variable,
+    pub record_var: Variable,
+    pub closure_var: Variable,
+    pub closure_ext_var: Variable,
+    pub ext_var: Variable,
+    pub field_var: Variable,
+    pub field: Lowercase,
+}
+
+impl AccessorData {
+    pub fn to_closure_data(self, record_symbol: Symbol) -> ClosureData {
+        let AccessorData {
+            name,
+            function_var,
+            record_var,
+            closure_var,
+            closure_ext_var,
+            ext_var,
+            field_var,
+            field,
+        } = self;
+
+        // IDEA: convert accessor from
+        //
+        // .foo
+        //
+        // into
+        //
+        // (\r -> r.foo)
+        let body = Expr::Access {
+            record_var,
+            ext_var,
+            field_var,
+            loc_expr: Box::new(Loc::at_zero(Expr::Var(record_symbol))),
+            field,
+        };
+
+        let loc_body = Loc::at_zero(body);
+
+        let arguments = vec![(
+            record_var,
+            AnnotatedMark::known_exhaustive(),
+            Loc::at_zero(Pattern::Identifier(record_symbol)),
+        )];
+
+        ClosureData {
+            function_type: function_var,
+            closure_type: closure_var,
+            closure_ext_var,
+            return_type: field_var,
+            name,
+            captured_symbols: vec![],
+            recursive: Recursive::NotRecursive,
+            arguments,
+            loc_body: Box::new(loc_body),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct Field {
     pub var: Variable,
     // The region of the full `foo: f bar`, rather than just `f bar`
@@ -184,18 +367,48 @@ pub struct Field {
     pub loc_expr: Box<Loc<Expr>>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Recursive {
     NotRecursive = 0,
     Recursive = 1,
     TailRecursive = 2,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct WhenBranch {
     pub patterns: Vec<Loc<Pattern>>,
     pub value: Loc<Expr>,
     pub guard: Option<Loc<Expr>>,
+    /// Whether this branch is redundant in the `when` it appears in
+    pub redundant: RedundantMark,
+}
+
+impl WhenBranch {
+    pub fn pattern_region(&self) -> Region {
+        Region::span_across(
+            &self
+                .patterns
+                .first()
+                .expect("when branch has no pattern?")
+                .region,
+            &self
+                .patterns
+                .last()
+                .expect("when branch has no pattern?")
+                .region,
+        )
+    }
+}
+
+impl WhenBranch {
+    pub fn region(&self) -> Region {
+        Region::across_all(
+            self.patterns
+                .iter()
+                .map(|p| &p.region)
+                .chain([self.value.region].iter()),
+        )
+    }
 }
 
 pub fn canonicalize_expr<'a>(
@@ -208,23 +421,13 @@ pub fn canonicalize_expr<'a>(
     use Expr::*;
 
     let (expr, output) = match expr {
-        ast::Expr::Num(str) => {
-            let answer = num_expr_from_result(
-                var_store,
-                finish_parsing_int(*str).map(|int| (*str, int)),
-                region,
-                env,
-            );
+        &ast::Expr::Num(str) => {
+            let answer = num_expr_from_result(var_store, finish_parsing_num(str), region, env);
 
             (answer, Output::default())
         }
-        ast::Expr::Float(str) => {
-            let answer = float_expr_from_result(
-                var_store,
-                finish_parsing_float(str).map(|f| (*str, f)),
-                region,
-                env,
-            );
+        &ast::Expr::Float(str) => {
+            let answer = float_expr_from_result(var_store, finish_parsing_float(str), region, env);
 
             (answer, Output::default())
         }
@@ -264,7 +467,7 @@ pub fn canonicalize_expr<'a>(
             if let Var(symbol) = &can_update.value {
                 match canonicalize_fields(env, var_store, scope, region, fields.items) {
                     Ok((can_fields, mut output)) => {
-                        output.references = output.references.union(update_out.references);
+                        output.references.union_mut(&update_out.references);
 
                         let answer = Update {
                             record_var: var_store.fresh(),
@@ -303,6 +506,28 @@ pub fn canonicalize_expr<'a>(
             }
         }
         ast::Expr::Str(literal) => flatten_str_literal(env, var_store, scope, literal),
+
+        ast::Expr::SingleQuote(string) => {
+            let mut it = string.chars().peekable();
+            if let Some(char) = it.next() {
+                if it.peek().is_none() {
+                    (Expr::SingleQuote(char), Output::default())
+                } else {
+                    // multiple chars is found
+                    let error = roc_problem::can::RuntimeError::MultipleCharsInSingleQuote(region);
+                    let answer = Expr::RuntimeError(error);
+
+                    (answer, Output::default())
+                }
+            } else {
+                // no characters found
+                let error = roc_problem::can::RuntimeError::EmptySingleQuote(region);
+                let answer = Expr::RuntimeError(error);
+
+                (answer, Output::default())
+            }
+        }
+
         ast::Expr::List(loc_elems) => {
             if loc_elems.is_empty() {
                 (
@@ -320,7 +545,7 @@ pub fn canonicalize_expr<'a>(
                     let (can_expr, elem_out) =
                         canonicalize_expr(env, var_store, scope, loc_elem.region, &loc_elem.value);
 
-                    references = references.union(elem_out.references);
+                    references.union_mut(&elem_out.references);
 
                     can_elems.push(can_expr);
                 }
@@ -345,95 +570,131 @@ pub fn canonicalize_expr<'a>(
             // (foo) bar baz
             let fn_region = loc_fn.region;
 
-            // Canonicalize the function expression and its arguments
-            let (fn_expr, mut output) =
-                canonicalize_expr(env, var_store, scope, fn_region, &loc_fn.value);
-
             // The function's return type
             let mut args = Vec::new();
-            let mut outputs = Vec::new();
+            let mut output = Output::default();
 
             for loc_arg in loc_args.iter() {
                 let (arg_expr, arg_out) =
                     canonicalize_expr(env, var_store, scope, loc_arg.region, &loc_arg.value);
 
                 args.push((var_store.fresh(), arg_expr));
-                outputs.push(arg_out);
+                output.references.union_mut(&arg_out.references);
             }
 
-            // Default: We're not tail-calling a symbol (by name), we're tail-calling a function value.
-            output.tail_call = None;
+            if let ast::Expr::OpaqueRef(name) = loc_fn.value {
+                // We treat opaques specially, since an opaque can wrap exactly one argument.
 
-            for arg_out in outputs {
-                output.references = output.references.union(arg_out.references);
+                debug_assert!(!args.is_empty());
+
+                if args.len() > 1 {
+                    let problem =
+                        roc_problem::can::RuntimeError::OpaqueAppliedToMultipleArgs(region);
+                    env.problem(Problem::RuntimeError(problem.clone()));
+                    (RuntimeError(problem), output)
+                } else {
+                    match scope.lookup_opaque_ref(name, loc_fn.region) {
+                        Err(runtime_error) => {
+                            env.problem(Problem::RuntimeError(runtime_error.clone()));
+                            (RuntimeError(runtime_error), output)
+                        }
+                        Ok((name, opaque_def)) => {
+                            let argument = Box::new(args.pop().unwrap());
+                            output.references.insert_type_lookup(name);
+
+                            let (type_arguments, lambda_set_variables, specialized_def_type) =
+                                freshen_opaque_def(var_store, opaque_def);
+
+                            let opaque_ref = OpaqueRef {
+                                opaque_var: var_store.fresh(),
+                                name,
+                                argument,
+                                specialized_def_type: Box::new(specialized_def_type),
+                                type_arguments,
+                                lambda_set_variables,
+                            };
+
+                            (opaque_ref, output)
+                        }
+                    }
+                }
+            } else {
+                // Canonicalize the function expression and its arguments
+                let (fn_expr, fn_expr_output) =
+                    canonicalize_expr(env, var_store, scope, fn_region, &loc_fn.value);
+
+                output.union(fn_expr_output);
+
+                // Default: We're not tail-calling a symbol (by name), we're tail-calling a function value.
+                output.tail_call = None;
+
+                let expr = match fn_expr.value {
+                    Var(symbol) => {
+                        output.references.insert_call(symbol);
+
+                        // we're tail-calling a symbol by name, check if it's the tail-callable symbol
+                        output.tail_call = match &env.tailcallable_symbol {
+                            Some(tc_sym) if *tc_sym == symbol => Some(symbol),
+                            Some(_) | None => None,
+                        };
+
+                        Call(
+                            Box::new((
+                                var_store.fresh(),
+                                fn_expr,
+                                var_store.fresh(),
+                                var_store.fresh(),
+                            )),
+                            args,
+                            *application_style,
+                        )
+                    }
+                    RuntimeError(_) => {
+                        // We can't call a runtime error; bail out by propagating it!
+                        return (fn_expr, output);
+                    }
+                    Tag {
+                        variant_var,
+                        ext_var,
+                        name,
+                        ..
+                    } => Tag {
+                        variant_var,
+                        ext_var,
+                        name,
+                        arguments: args,
+                    },
+                    ZeroArgumentTag {
+                        variant_var,
+                        ext_var,
+                        name,
+                        ..
+                    } => Tag {
+                        variant_var,
+                        ext_var,
+                        name,
+                        arguments: args,
+                    },
+                    _ => {
+                        // This could be something like ((if True then fn1 else fn2) arg1 arg2).
+                        Call(
+                            Box::new((
+                                var_store.fresh(),
+                                fn_expr,
+                                var_store.fresh(),
+                                var_store.fresh(),
+                            )),
+                            args,
+                            *application_style,
+                        )
+                    }
+                };
+
+                (expr, output)
             }
-
-            let expr = match fn_expr.value {
-                Var(symbol) => {
-                    output.references.calls.insert(symbol);
-
-                    // we're tail-calling a symbol by name, check if it's the tail-callable symbol
-                    output.tail_call = match &env.tailcallable_symbol {
-                        Some(tc_sym) if *tc_sym == symbol => Some(symbol),
-                        Some(_) | None => None,
-                    };
-
-                    Call(
-                        Box::new((
-                            var_store.fresh(),
-                            fn_expr,
-                            var_store.fresh(),
-                            var_store.fresh(),
-                        )),
-                        args,
-                        *application_style,
-                    )
-                }
-                RuntimeError(_) => {
-                    // We can't call a runtime error; bail out by propagating it!
-                    return (fn_expr, output);
-                }
-                Tag {
-                    variant_var,
-                    ext_var,
-                    name,
-                    ..
-                } => Tag {
-                    variant_var,
-                    ext_var,
-                    name,
-                    arguments: args,
-                },
-                ZeroArgumentTag {
-                    variant_var,
-                    ext_var,
-                    name,
-                    ..
-                } => Tag {
-                    variant_var,
-                    ext_var,
-                    name,
-                    arguments: args,
-                },
-                _ => {
-                    // This could be something like ((if True then fn1 else fn2) arg1 arg2).
-                    Call(
-                        Box::new((
-                            var_store.fresh(),
-                            fn_expr,
-                            var_store.fresh(),
-                            var_store.fresh(),
-                        )),
-                        args,
-                        *application_style,
-                    )
-                }
-            };
-
-            (expr, output)
         }
         ast::Expr::Var { module_name, ident } => {
-            canonicalize_lookup(env, scope, module_name, ident, region)
+            canonicalize_var_lookup(env, var_store, scope, module_name, ident, region)
         }
         ast::Expr::Underscore(name) => {
             // we parse underscores, but they are not valid expression syntax
@@ -448,139 +709,19 @@ pub fn canonicalize_expr<'a>(
             (RuntimeError(problem), Output::default())
         }
         ast::Expr::Defs(loc_defs, loc_ret) => {
-            can_defs_with_return(
-                env,
-                var_store,
-                // The body expression gets a new scope for canonicalization,
-                // so clone it.
-                scope.clone(),
-                loc_defs,
-                loc_ret,
-            )
+            // The body expression gets a new scope for canonicalization,
+            scope.inner_scope(|inner_scope| {
+                can_defs_with_return(env, var_store, inner_scope, loc_defs, loc_ret)
+            })
         }
         ast::Expr::Backpassing(_, _, _) => {
             unreachable!("Backpassing should have been desugared by now")
         }
         ast::Expr::Closure(loc_arg_patterns, loc_body_expr) => {
-            // The globally unique symbol that will refer to this closure once it gets converted
-            // into a top-level procedure for code gen.
-            //
-            // In the Foo module, this will look something like Foo.$1 or Foo.$2.
-            let symbol = env
-                .closure_name_symbol
-                .unwrap_or_else(|| env.gen_unique_symbol());
-            env.closure_name_symbol = None;
+            let (closure_data, output) =
+                canonicalize_closure(env, var_store, scope, loc_arg_patterns, loc_body_expr, None);
 
-            // The body expression gets a new scope for canonicalization.
-            // Shadow `scope` to make sure we don't accidentally use the original one for the
-            // rest of this block, but keep the original around for later diffing.
-            let original_scope = scope;
-            let mut scope = original_scope.clone();
-            let mut can_args = Vec::with_capacity(loc_arg_patterns.len());
-            let mut output = Output::default();
-
-            let mut bound_by_argument_patterns = MutSet::default();
-
-            for loc_pattern in loc_arg_patterns.iter() {
-                let (new_output, can_arg) = canonicalize_pattern(
-                    env,
-                    var_store,
-                    &mut scope,
-                    FunctionArg,
-                    &loc_pattern.value,
-                    loc_pattern.region,
-                );
-
-                bound_by_argument_patterns
-                    .extend(new_output.references.bound_symbols.iter().copied());
-
-                output.union(new_output);
-
-                can_args.push((var_store.fresh(), can_arg));
-            }
-
-            let (loc_body_expr, new_output) = canonicalize_expr(
-                env,
-                var_store,
-                &mut scope,
-                loc_body_expr.region,
-                &loc_body_expr.value,
-            );
-
-            let mut captured_symbols: MutSet<Symbol> =
-                new_output.references.lookups.iter().copied().collect();
-
-            // filter out the closure's name itself
-            captured_symbols.remove(&symbol);
-
-            // symbols bound either in this pattern or deeper down are not captured!
-            captured_symbols.retain(|s| !new_output.references.bound_symbols.contains(s));
-            captured_symbols.retain(|s| !bound_by_argument_patterns.contains(s));
-
-            // filter out top-level symbols
-            // those will be globally available, and don't need to be captured
-            captured_symbols.retain(|s| !env.top_level_symbols.contains(s));
-
-            // filter out imported symbols
-            // those will be globally available, and don't need to be captured
-            captured_symbols.retain(|s| s.module_id() == env.home);
-
-            // TODO any Closure that has an empty `captured_symbols` list could be excluded!
-
-            output.union(new_output);
-
-            // filter out aliases
-            captured_symbols.retain(|s| !output.references.referenced_aliases.contains(s));
-
-            // filter out functions that don't close over anything
-            captured_symbols.retain(|s| !output.non_closures.contains(s));
-
-            // Now that we've collected all the references, check to see if any of the args we defined
-            // went unreferenced. If any did, report them as unused arguments.
-            for (sub_symbol, region) in scope.symbols() {
-                if !original_scope.contains_symbol(*sub_symbol) {
-                    if !output.references.has_lookup(*sub_symbol) {
-                        // The body never referenced this argument we declared. It's an unused argument!
-                        env.problem(Problem::UnusedArgument(symbol, *sub_symbol, *region));
-                    }
-
-                    // We shouldn't ultimately count arguments as referenced locals. Otherwise,
-                    // we end up with weird conclusions like the expression (\x -> x + 1)
-                    // references the (nonexistent) local variable x!
-                    output.references.lookups.remove(sub_symbol);
-                }
-            }
-
-            env.register_closure(symbol, output.references.clone());
-
-            let mut captured_symbols: Vec<_> = captured_symbols
-                .into_iter()
-                .map(|s| (s, var_store.fresh()))
-                .collect();
-
-            // sort symbols, so we know the order in which they're stored in the closure record
-            captured_symbols.sort();
-
-            // store that this function doesn't capture anything. It will be promoted to a
-            // top-level function, and does not need to be captured by other surrounding functions.
-            if captured_symbols.is_empty() {
-                output.non_closures.insert(symbol);
-            }
-
-            (
-                Closure(ClosureData {
-                    function_type: var_store.fresh(),
-                    closure_type: var_store.fresh(),
-                    closure_ext_var: var_store.fresh(),
-                    return_type: var_store.fresh(),
-                    name: symbol,
-                    captured_symbols,
-                    recursive: Recursive::NotRecursive,
-                    arguments: can_args,
-                    loc_body: Box::new(loc_body_expr),
-                }),
-                output,
-            )
+            (Closure(closure_data), output)
         }
         ast::Expr::When(loc_cond, branches) => {
             // Infer the condition expression's type.
@@ -594,10 +735,18 @@ pub fn canonicalize_expr<'a>(
             let mut can_branches = Vec::with_capacity(branches.len());
 
             for branch in branches.iter() {
-                let (can_when_branch, branch_references) =
-                    canonicalize_when_branch(env, var_store, scope, region, *branch, &mut output);
+                let (can_when_branch, branch_references) = scope.inner_scope(|inner_scope| {
+                    canonicalize_when_branch(
+                        env,
+                        var_store,
+                        inner_scope,
+                        region,
+                        *branch,
+                        &mut output,
+                    )
+                });
 
-                output.references = output.references.union(branch_references);
+                output.references.union_mut(&branch_references);
 
                 can_branches.push(can_when_branch);
             }
@@ -616,6 +765,8 @@ pub fn canonicalize_expr<'a>(
                 region,
                 loc_cond: Box::new(can_cond),
                 branches: can_branches,
+                branches_cond_var: var_store.fresh(),
+                exhaustive: ExhaustiveMark::new(var_store),
             };
 
             (expr, output)
@@ -635,27 +786,27 @@ pub fn canonicalize_expr<'a>(
             )
         }
         ast::Expr::AccessorFunction(field) => (
-            Accessor {
-                name: env.gen_unique_symbol(),
+            Accessor(AccessorData {
+                name: scope.gen_unique_symbol(),
                 function_var: var_store.fresh(),
                 record_var: var_store.fresh(),
                 ext_var: var_store.fresh(),
+                closure_var: var_store.fresh(),
                 closure_ext_var: var_store.fresh(),
                 field_var: var_store.fresh(),
                 field: (*field).into(),
-            },
+            }),
             Output::default(),
         ),
-        ast::Expr::GlobalTag(tag) => {
+        ast::Expr::Tag(tag) => {
             let variant_var = var_store.fresh();
             let ext_var = var_store.fresh();
 
-            let symbol = env.gen_unique_symbol();
+            let symbol = scope.gen_unique_symbol();
 
             (
                 ZeroArgumentTag {
-                    name: TagName::Global((*tag).into()),
-                    arguments: vec![],
+                    name: TagName::Tag((*tag).into()),
                     variant_var,
                     closure_name: symbol,
                     ext_var,
@@ -663,23 +814,15 @@ pub fn canonicalize_expr<'a>(
                 Output::default(),
             )
         }
-        ast::Expr::PrivateTag(tag) => {
-            let variant_var = var_store.fresh();
-            let ext_var = var_store.fresh();
-            let tag_ident = env.ident_ids.get_or_insert(&(*tag).into());
-            let symbol = Symbol::new(env.home, tag_ident);
-            let lambda_set_symbol = env.gen_unique_symbol();
-
-            (
-                ZeroArgumentTag {
-                    name: TagName::Private(symbol),
-                    arguments: vec![],
-                    variant_var,
-                    ext_var,
-                    closure_name: lambda_set_symbol,
-                },
-                Output::default(),
-            )
+        ast::Expr::OpaqueRef(opaque_ref) => {
+            // If we're here, the opaque reference is definitely not wrapping an argument - wrapped
+            // arguments are handled in the Apply branch.
+            let problem = roc_problem::can::RuntimeError::OpaqueNotApplied(Loc::at(
+                region,
+                (*opaque_ref).into(),
+            ));
+            env.problem(Problem::RuntimeError(problem.clone()));
+            (RuntimeError(problem), Output::default())
         }
         ast::Expr::Expect(condition, continuation) => {
             let mut output = Output::default();
@@ -721,8 +864,8 @@ pub fn canonicalize_expr<'a>(
 
                 branches.push((loc_cond, loc_then));
 
-                output.references = output.references.union(cond_output.references);
-                output.references = output.references.union(then_output.references);
+                output.references.union_mut(&cond_output.references);
+                output.references.union_mut(&then_output.references);
             }
 
             let (loc_else, else_output) = canonicalize_expr(
@@ -733,7 +876,7 @@ pub fn canonicalize_expr<'a>(
                 &final_else_branch.value,
             );
 
-            output.references = output.references.union(else_output.references);
+            output.references.union_mut(&else_output.references);
 
             (
                 If {
@@ -790,21 +933,21 @@ pub fn canonicalize_expr<'a>(
 
             (RuntimeError(problem), Output::default())
         }
-        ast::Expr::NonBase10Int {
+        &ast::Expr::NonBase10Int {
             string,
             base,
             is_negative,
         } => {
             // the minus sign is added before parsing, to get correct overflow/underflow behavior
-            let answer = match finish_parsing_base(string, *base, *is_negative) {
-                Ok(int) => {
+            let answer = match finish_parsing_base(string, base, is_negative) {
+                Ok((int, bound)) => {
                     // Done in this kinda round about way with intermediate variables
                     // to keep borrowed values around and make this compile
                     let int_string = int.to_string();
                     let int_str = int_string.as_str();
-                    int_expr_from_result(var_store, Ok((int_str, int as i128)), region, *base, env)
+                    int_expr_from_result(var_store, Ok((int_str, int, bound)), region, base, env)
                 }
-                Err(e) => int_expr_from_result(var_store, Err(e), region, *base, env),
+                Err(e) => int_expr_from_result(var_store, Err(e), region, base, env),
             };
 
             (answer, Output::default())
@@ -843,10 +986,6 @@ pub fn canonicalize_expr<'a>(
         }
     };
 
-    if cfg!(debug_assertions) {
-        env.home.register_debug_idents(&env.ident_ids);
-    }
-
     // At the end, diff used_idents and defined_idents to see which were unused.
     // Add warnings for those!
 
@@ -863,6 +1002,133 @@ pub fn canonicalize_expr<'a>(
     )
 }
 
+pub fn canonicalize_closure<'a>(
+    env: &mut Env<'a>,
+    var_store: &mut VarStore,
+    scope: &mut Scope,
+    loc_arg_patterns: &'a [Loc<ast::Pattern<'a>>],
+    loc_body_expr: &'a Loc<ast::Expr<'a>>,
+    opt_def_name: Option<Symbol>,
+) -> (ClosureData, Output) {
+    scope.inner_scope(|inner_scope| {
+        canonicalize_closure_body(
+            env,
+            var_store,
+            inner_scope,
+            loc_arg_patterns,
+            loc_body_expr,
+            opt_def_name,
+        )
+    })
+}
+
+fn canonicalize_closure_body<'a>(
+    env: &mut Env<'a>,
+    var_store: &mut VarStore,
+    scope: &mut Scope,
+    loc_arg_patterns: &'a [Loc<ast::Pattern<'a>>],
+    loc_body_expr: &'a Loc<ast::Expr<'a>>,
+    opt_def_name: Option<Symbol>,
+) -> (ClosureData, Output) {
+    // The globally unique symbol that will refer to this closure once it gets converted
+    // into a top-level procedure for code gen.
+    let symbol = opt_def_name.unwrap_or_else(|| scope.gen_unique_symbol());
+
+    let mut can_args = Vec::with_capacity(loc_arg_patterns.len());
+    let mut output = Output::default();
+
+    for loc_pattern in loc_arg_patterns.iter() {
+        let can_argument_pattern = canonicalize_pattern(
+            env,
+            var_store,
+            scope,
+            &mut output,
+            FunctionArg,
+            &loc_pattern.value,
+            loc_pattern.region,
+        );
+
+        can_args.push((
+            var_store.fresh(),
+            AnnotatedMark::new(var_store),
+            can_argument_pattern,
+        ));
+    }
+
+    let bound_by_argument_patterns: Vec<_> =
+        BindingsFromPattern::new_many(can_args.iter().map(|x| &x.2)).collect();
+
+    let (loc_body_expr, new_output) = canonicalize_expr(
+        env,
+        var_store,
+        scope,
+        loc_body_expr.region,
+        &loc_body_expr.value,
+    );
+
+    let mut captured_symbols: Vec<_> = new_output
+        .references
+        .value_lookups()
+        .copied()
+        // filter out the closure's name itself
+        .filter(|s| *s != symbol)
+        // symbols bound either in this pattern or deeper down are not captured!
+        .filter(|s| !new_output.references.bound_symbols().any(|x| x == s))
+        .filter(|s| bound_by_argument_patterns.iter().all(|(k, _)| s != k))
+        // filter out top-level symbols those will be globally available, and don't need to be captured
+        .filter(|s| !env.top_level_symbols.contains(s))
+        // filter out imported symbols those will be globally available, and don't need to be captured
+        .filter(|s| s.module_id() == env.home)
+        // filter out functions that don't close over anything
+        .filter(|s| !new_output.non_closures.contains(s))
+        .filter(|s| !output.non_closures.contains(s))
+        .map(|s| (s, var_store.fresh()))
+        .collect();
+
+    output.union(new_output);
+
+    // Now that we've collected all the references, check to see if any of the args we defined
+    // went unreferenced. If any did, report them as unused arguments.
+    for (sub_symbol, region) in bound_by_argument_patterns {
+        if !output.references.has_value_lookup(sub_symbol) {
+            // The body never referenced this argument we declared. It's an unused argument!
+            env.problem(Problem::UnusedArgument(symbol, sub_symbol, region));
+        } else {
+            // We shouldn't ultimately count arguments as referenced locals. Otherwise,
+            // we end up with weird conclusions like the expression (\x -> x + 1)
+            // references the (nonexistent) local variable x!
+            output.references.remove_value_lookup(&sub_symbol);
+        }
+    }
+
+    // store the references of this function in the Env. This information is used
+    // when we canonicalize a surrounding def (if it exists)
+    env.closures.insert(symbol, output.references.clone());
+
+    // sort symbols, so we know the order in which they're stored in the closure record
+    captured_symbols.sort();
+
+    // store that this function doesn't capture anything. It will be promoted to a
+    // top-level function, and does not need to be captured by other surrounding functions.
+    if captured_symbols.is_empty() {
+        output.non_closures.insert(symbol);
+    }
+
+    let closure_data = ClosureData {
+        function_type: var_store.fresh(),
+        closure_type: var_store.fresh(),
+        closure_ext_var: var_store.fresh(),
+        return_type: var_store.fresh(),
+        name: symbol,
+        captured_symbols,
+        recursive: Recursive::NotRecursive,
+        arguments: can_args,
+        loc_body: Box::new(loc_body_expr),
+    };
+
+    (closure_data, output)
+}
+
 #[inline(always)]
 fn canonicalize_when_branch<'a>(
     env: &mut Env<'a>,
@@ -874,21 +1140,17 @@ fn canonicalize_when_branch<'a>(
 ) -> (WhenBranch, References) {
     let mut patterns = Vec::with_capacity(branch.patterns.len());
 
-    let original_scope = scope;
-    let mut scope = original_scope.clone();
-
     // TODO report symbols not bound in all patterns
     for loc_pattern in branch.patterns.iter() {
-        let (new_output, can_pattern) = canonicalize_pattern(
+        let can_pattern = canonicalize_pattern(
             env,
             var_store,
-            &mut scope,
+            scope,
+            output,
             WhenBranch,
             &loc_pattern.value,
             loc_pattern.region,
         );
-
-        output.union(new_output);
 
         patterns.push(can_pattern);
     }
@@ -896,7 +1158,7 @@ fn canonicalize_when_branch<'a>(
     let (value, mut branch_output) = canonicalize_expr(
         env,
         var_store,
-        &mut scope,
+        scope,
         branch.value.region,
         &branch.value.value,
     );
@@ -905,159 +1167,33 @@ fn canonicalize_when_branch<'a>(
         None => None,
         Some(loc_expr) => {
             let (can_guard, guard_branch_output) =
-                canonicalize_expr(env, var_store, &mut scope, loc_expr.region, &loc_expr.value);
+                canonicalize_expr(env, var_store, scope, loc_expr.region, &loc_expr.value);
 
             branch_output.union(guard_branch_output);
             Some(can_guard)
         }
     };
 
-    // Now that we've collected all the references for this branch, check to see if
-    // any of the new idents it defined were unused. If any were, report it.
-    for (symbol, region) in scope.symbols() {
-        let symbol = *symbol;
-
-        if !output.references.has_lookup(symbol)
-            && !branch_output.references.has_lookup(symbol)
-            && !original_scope.contains_symbol(symbol)
-        {
-            env.problem(Problem::UnusedDef(symbol, *region));
-        }
-    }
-
     let references = branch_output.references.clone();
     output.union(branch_output);
+
+    // Now that we've collected all the references for this branch, check to see if
+    // any of the new idents it defined were unused. If any were, report it.
+    for (symbol, region) in BindingsFromPattern::new_many(patterns.iter()) {
+        if !output.references.has_value_lookup(symbol) {
+            env.problem(Problem::UnusedDef(symbol, region));
+        }
+    }
 
     (
         WhenBranch {
             patterns,
             value,
             guard,
+            redundant: RedundantMark::new(var_store),
         },
         references,
     )
-}
-
-pub fn local_successors<'a>(
-    references: &'a References,
-    closures: &'a MutMap<Symbol, References>,
-) -> ImSet<Symbol> {
-    let mut answer = references.lookups.clone();
-
-    for call_symbol in references.calls.iter() {
-        answer = answer.union(call_successors(*call_symbol, closures));
-    }
-
-    answer
-}
-
-fn call_successors(call_symbol: Symbol, closures: &MutMap<Symbol, References>) -> ImSet<Symbol> {
-    let mut answer = ImSet::default();
-    let mut seen = MutSet::default();
-    let mut queue = vec![call_symbol];
-
-    while let Some(symbol) = queue.pop() {
-        if seen.contains(&symbol) {
-            continue;
-        }
-
-        if let Some(references) = closures.get(&symbol) {
-            answer.extend(references.lookups.iter().copied());
-            queue.extend(references.calls.iter().copied());
-
-            seen.insert(symbol);
-        }
-    }
-
-    answer
-}
-
-pub fn references_from_local<'a, T>(
-    defined_symbol: Symbol,
-    visited: &'a mut MutSet<Symbol>,
-    refs_by_def: &'a MutMap<Symbol, (T, References)>,
-    closures: &'a MutMap<Symbol, References>,
-) -> References
-where
-    T: Debug,
-{
-    let mut answer: References = References::new();
-
-    match refs_by_def.get(&defined_symbol) {
-        Some((_, refs)) => {
-            visited.insert(defined_symbol);
-
-            for local in refs.lookups.iter() {
-                if !visited.contains(local) {
-                    let other_refs: References =
-                        references_from_local(*local, visited, refs_by_def, closures);
-
-                    answer = answer.union(other_refs);
-                }
-
-                answer.lookups.insert(*local);
-            }
-
-            for call in refs.calls.iter() {
-                if !visited.contains(call) {
-                    let other_refs = references_from_call(*call, visited, refs_by_def, closures);
-
-                    answer = answer.union(other_refs);
-                }
-
-                answer.calls.insert(*call);
-            }
-
-            answer
-        }
-        None => answer,
-    }
-}
-
-pub fn references_from_call<'a, T>(
-    call_symbol: Symbol,
-    visited: &'a mut MutSet<Symbol>,
-    refs_by_def: &'a MutMap<Symbol, (T, References)>,
-    closures: &'a MutMap<Symbol, References>,
-) -> References
-where
-    T: Debug,
-{
-    match closures.get(&call_symbol) {
-        Some(references) => {
-            let mut answer = references.clone();
-
-            visited.insert(call_symbol);
-
-            for closed_over_local in references.lookups.iter() {
-                if !visited.contains(closed_over_local) {
-                    let other_refs =
-                        references_from_local(*closed_over_local, visited, refs_by_def, closures);
-
-                    answer = answer.union(other_refs);
-                }
-
-                answer.lookups.insert(*closed_over_local);
-            }
-
-            for call in references.calls.iter() {
-                if !visited.contains(call) {
-                    let other_refs = references_from_call(*call, visited, refs_by_def, closures);
-
-                    answer = answer.union(other_refs);
-                }
-
-                answer.calls.insert(*call);
-            }
-
-            answer
-        }
-        None => {
-            // If the call symbol was not in the closure map, that means we're calling a non-function and
-            // will get a type mismatch later. For now, assume no references as a result of the "call."
-            References::new()
-        }
-    }
 }
 
 enum CanonicalizeRecordProblem {
@@ -1097,7 +1233,7 @@ fn canonicalize_fields<'a>(
                     });
                 }
 
-                output.references = output.references.union(field_out.references);
+                output.references.union_mut(&field_out.references);
             }
             Err(CanonicalizeFieldProblem::InvalidOptionalValue {
                 field_name,
@@ -1170,8 +1306,9 @@ fn canonicalize_field<'a>(
     }
 }
 
-fn canonicalize_lookup(
+fn canonicalize_var_lookup(
     env: &mut Env<'_>,
+    var_store: &mut VarStore,
     scope: &mut Scope,
     module_name: &str,
     ident: &str,
@@ -1185,9 +1322,17 @@ fn canonicalize_lookup(
         // Look it up in scope!
         match scope.lookup(&(*ident).into(), region) {
             Ok(symbol) => {
-                output.references.lookups.insert(symbol);
+                output.references.insert_value_lookup(symbol);
 
-                Var(symbol)
+                if scope.abilities_store.is_ability_member_name(symbol) {
+                    AbilityMember(
+                        symbol,
+                        scope.abilities_store.fresh_specialization_id(),
+                        var_store.fresh(),
+                    )
+                } else {
+                    Var(symbol)
+                }
             }
             Err(problem) => {
                 env.problem(Problem::RuntimeError(problem.clone()));
@@ -1198,11 +1343,19 @@ fn canonicalize_lookup(
     } else {
         // Since module_name was nonempty, this is a qualified var.
         // Look it up in the env!
-        match env.qualified_lookup(module_name, ident, region) {
+        match env.qualified_lookup(scope, module_name, ident, region) {
             Ok(symbol) => {
-                output.references.lookups.insert(symbol);
+                output.references.insert_value_lookup(symbol);
 
-                Var(symbol)
+                if scope.abilities_store.is_ability_member_name(symbol) {
+                    AbilityMember(
+                        symbol,
+                        scope.abilities_store.fresh_specialization_id(),
+                        var_store.fresh(),
+                    )
+                } else {
+                    Var(symbol)
+                }
             }
             Err(problem) => {
                 // Either the module wasn't imported, or
@@ -1226,15 +1379,17 @@ pub fn inline_calls(var_store: &mut VarStore, scope: &mut Scope, expr: Expr) -> 
     match expr {
         // Num stores the `a` variable in `Num a`. Not the same as the variable
         // stored in Int and Float below, which is strictly for better error messages
-        other @ Num(_, _, _)
-        | other @ Int(_, _, _, _)
-        | other @ Float(_, _, _, _)
+        other @ Num(..)
+        | other @ Int(..)
+        | other @ Float(..)
         | other @ Str { .. }
+        | other @ SingleQuote(_)
         | other @ RuntimeError(_)
         | other @ EmptyRecord
         | other @ Accessor { .. }
         | other @ Update { .. }
         | other @ Var(_)
+        | other @ AbilityMember(..)
         | other @ RunLowLevel { .. }
         | other @ ForeignCall { .. } => other,
 
@@ -1265,6 +1420,8 @@ pub fn inline_calls(var_store: &mut VarStore, scope: &mut Scope, expr: Expr) -> 
             region,
             loc_cond,
             branches,
+            branches_cond_var,
+            exhaustive,
         } => {
             let loc_cond = Box::new(Loc {
                 region: loc_cond.region,
@@ -1289,6 +1446,7 @@ pub fn inline_calls(var_store: &mut VarStore, scope: &mut Scope, expr: Expr) -> 
                     patterns: branch.patterns,
                     value,
                     guard,
+                    redundant: RedundantMark::new(var_store),
                 };
 
                 new_branches.push(new_branch);
@@ -1300,6 +1458,8 @@ pub fn inline_calls(var_store: &mut VarStore, scope: &mut Scope, expr: Expr) -> 
                 region,
                 loc_cond,
                 branches: new_branches,
+                branches_cond_var,
+                exhaustive,
             }
         }
         If {
@@ -1351,7 +1511,7 @@ pub fn inline_calls(var_store: &mut VarStore, scope: &mut Scope, expr: Expr) -> 
             Expect(Box::new(loc_condition), Box::new(loc_expr))
         }
 
-        LetRec(defs, loc_expr, var) => {
+        LetRec(defs, loc_expr, mark) => {
             let mut new_defs = Vec::with_capacity(defs.len());
 
             for def in defs {
@@ -1372,10 +1532,10 @@ pub fn inline_calls(var_store: &mut VarStore, scope: &mut Scope, expr: Expr) -> 
                 value: inline_calls(var_store, scope, loc_expr.value),
             };
 
-            LetRec(new_defs, Box::new(loc_expr), var)
+            LetRec(new_defs, Box::new(loc_expr), mark)
         }
 
-        LetNonRec(def, loc_expr, var) => {
+        LetNonRec(def, loc_expr) => {
             let def = Def {
                 loc_pattern: def.loc_pattern,
                 loc_expr: Loc {
@@ -1392,7 +1552,7 @@ pub fn inline_calls(var_store: &mut VarStore, scope: &mut Scope, expr: Expr) -> 
                 value: inline_calls(var_store, scope, loc_expr.value),
             };
 
-            LetNonRec(Box::new(def), Box::new(loc_expr), var)
+            LetNonRec(Box::new(def), Box::new(loc_expr))
         }
 
         Closure(ClosureData {
@@ -1458,20 +1618,42 @@ pub fn inline_calls(var_store: &mut VarStore, scope: &mut Scope, expr: Expr) -> 
             );
         }
 
+        OpaqueRef {
+            opaque_var,
+            name,
+            argument,
+            specialized_def_type,
+            type_arguments,
+            lambda_set_variables,
+        } => {
+            let (var, loc_expr) = *argument;
+            let argument = Box::new((
+                var,
+                loc_expr.map_owned(|expr| inline_calls(var_store, scope, expr)),
+            ));
+
+            OpaqueRef {
+                opaque_var,
+                name,
+                argument,
+                specialized_def_type,
+                type_arguments,
+                lambda_set_variables,
+            }
+        }
+
         ZeroArgumentTag {
             closure_name,
             variant_var,
             ext_var,
             name,
-            arguments,
         } => {
             todo!(
-                "Inlining for ZeroArgumentTag with closure_name {:?}, variant_var {:?}, ext_var {:?}, name {:?}, arguments {:?}",
+                "Inlining for ZeroArgumentTag with closure_name {:?}, variant_var {:?}, ext_var {:?}, name {:?}",
                 closure_name,
                 variant_var,
                 ext_var,
                 name,
-                arguments
             );
         }
 
@@ -1507,7 +1689,7 @@ pub fn inline_calls(var_store: &mut VarStore, scope: &mut Scope, expr: Expr) -> 
                         // Wrap the body in one LetNonRec for each argument,
                         // such that at the end we have all the arguments in
                         // scope with the values the caller provided.
-                        for ((_param_var, loc_pattern), (expr_var, loc_expr)) in
+                        for ((_param_var, _exhaustive_mark, loc_pattern), (expr_var, loc_expr)) in
                             params.iter().cloned().zip(args.into_iter()).rev()
                         {
                             // TODO get the correct vars into here.
@@ -1524,11 +1706,7 @@ pub fn inline_calls(var_store: &mut VarStore, scope: &mut Scope, expr: Expr) -> 
 
                             loc_answer = Loc {
                                 region: Region::zero(),
-                                value: LetNonRec(
-                                    Box::new(def),
-                                    Box::new(loc_answer),
-                                    var_store.fresh(),
-                                ),
+                                value: LetNonRec(Box::new(def), Box::new(loc_answer)),
                             };
                         }
 
@@ -1633,7 +1811,7 @@ fn flatten_str_lines<'a>(
                 Interpolated(loc_expr) => {
                     if is_valid_interpolation(loc_expr.value) {
                         // Interpolations desugar to Str.concat calls
-                        output.references.calls.insert(Symbol::STR_CONCAT);
+                        output.references.insert_call(Symbol::STR_CONCAT);
 
                         if !buf.is_empty() {
                             segments.push(StrSegment::Plaintext(buf.into()));

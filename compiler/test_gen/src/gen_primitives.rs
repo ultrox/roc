@@ -1,12 +1,14 @@
 #[cfg(feature = "gen-llvm")]
 use crate::helpers::llvm::assert_evals_to;
 #[cfg(feature = "gen-llvm")]
-use crate::helpers::llvm::assert_llvm_evals_to;
+use crate::helpers::llvm::assert_expect_failed;
 #[cfg(feature = "gen-llvm")]
 use crate::helpers::llvm::assert_non_opt_evals_to;
 
 #[cfg(feature = "gen-dev")]
 use crate::helpers::dev::assert_evals_to;
+// #[cfg(feature = "gen-dev")]
+// use crate::helpers::dev::assert_expect_failed;
 // #[cfg(feature = "gen-dev")]
 // use crate::helpers::dev::assert_evals_to as assert_llvm_evals_to;
 // #[cfg(feature = "gen-dev")]
@@ -14,6 +16,10 @@ use crate::helpers::dev::assert_evals_to;
 
 #[cfg(feature = "gen-wasm")]
 use crate::helpers::wasm::assert_evals_to;
+#[cfg(feature = "gen-wasm")]
+use crate::helpers::wasm::assert_evals_to as assert_non_opt_evals_to;
+// #[cfg(feature = "gen-wasm")]
+// use crate::helpers::dev::assert_expect_failed;
 // #[cfg(feature = "gen-wasm")]
 // use crate::helpers::wasm::assert_evals_to as assert_llvm_evals_to;
 // #[cfg(feature = "gen-wasm")]
@@ -211,7 +217,7 @@ fn gen_when_one_branch() {
     assert_evals_to!(
         indoc!(
             r#"
-                when 3.14 is
+                when 1.23 is
                     _ -> 23
             "#
         ),
@@ -322,16 +328,16 @@ fn return_unnamed_fn() {
         indoc!(
             r#"
             wrapper = \{} ->
-                alwaysFloatIdentity : Int * -> (Float a -> Float a)
+                alwaysFloatIdentity : Int * -> (Frac a -> Frac a)
                 alwaysFloatIdentity = \_ ->
                     (\a -> a)
 
-                (alwaysFloatIdentity 2) 3.14
+                (alwaysFloatIdentity 2) 1.23
 
             wrapper {}
             "#
         ),
-        3.14,
+        1.23,
         f64
     );
 }
@@ -374,12 +380,12 @@ fn gen_basic_def() {
     assert_evals_to!(
         indoc!(
             r#"
-                pi = 3.14
+                float = 1.23
 
-                pi
+                float
             "#
         ),
-        3.14,
+        1.23,
         f64
     );
 }
@@ -392,9 +398,9 @@ fn gen_multiple_defs() {
             r#"
                 answer = 42
 
-                pi = 3.14
+                float = 1.23
 
-                if pi > 3 then answer else answer
+                if float > 3 then answer else answer
             "#
         ),
         42,
@@ -406,12 +412,12 @@ fn gen_multiple_defs() {
             r#"
                 answer = 42
 
-                pi = 3.14
+                float = 1.23
 
-                if answer > 3 then pi else pi
+                if answer > 3 then float else float
             "#
         ),
-        3.14,
+        1.23,
         f64
     );
 }
@@ -576,14 +582,35 @@ fn top_level_constant() {
             r#"
             app "test" provides [ main ] to "./platform"
 
-            pi = 3.1415
+            float = 1.2315
 
             main =
-                pi + pi
+                float + float
                 "#
         ),
-        3.1415 + 3.1415,
+        1.2315 + 1.2315,
         f64
+    );
+}
+
+#[test]
+#[ignore]
+#[cfg(any(feature = "gen-llvm", feature = "gen-dev", feature = "gen-wasm"))]
+fn top_level_destructure() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+            app "test" provides [ main ] to "./platform"
+
+            {a, b} = { a: 1, b: 2 }
+
+            main =
+
+                a + b
+                "#
+        ),
+        3,
+        i64
     );
 }
 
@@ -786,7 +813,7 @@ fn linked_list_sum_int() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(any(feature = "gen-llvm", feature = "gen-wasm"))]
 fn linked_list_map() {
     assert_non_opt_evals_to!(
         indoc!(
@@ -1068,7 +1095,7 @@ fn closure_in_list() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(any(feature = "gen-llvm", feature = "gen-wasm"))]
 fn specialize_closure() {
     use roc_std::RocList;
 
@@ -1107,7 +1134,7 @@ fn io_poc_effect() {
             r#"
             app "test" provides [ main ] to "./platform"
 
-            Effect a : [ @Effect ({} -> a) ]
+            Effect a := {} -> a
 
             succeed : a -> Effect a
             succeed = \x -> @Effect \{} -> x
@@ -1117,7 +1144,7 @@ fn io_poc_effect() {
 
             foo : Effect F64
             foo =
-                succeed 3.14
+                succeed 1.23
 
             main : F64
             main =
@@ -1125,7 +1152,7 @@ fn io_poc_effect() {
 
             "#
         ),
-        3.14,
+        1.23,
         f64
     );
 }
@@ -1143,7 +1170,7 @@ fn io_poc_desugared() {
 
             foo : Str -> F64
             foo =
-                succeed 3.14
+                succeed 1.23
 
             # runEffect : ({} ->  a) -> a
             runEffect = \thunk -> thunk ""
@@ -1153,7 +1180,7 @@ fn io_poc_desugared() {
                 runEffect foo
             "#
         ),
-        3.14,
+        1.23,
         f64
     );
 }
@@ -1166,7 +1193,7 @@ fn return_wrapped_function_pointer() {
             r#"
             app "test" provides [ main ] to "./platform"
 
-            Effect a : [ @Effect ({} -> a) ]
+            Effect a := {} -> a
 
             foo : Effect {}
             foo = @Effect \{} -> {}
@@ -1211,7 +1238,7 @@ fn return_wrapped_closure() {
             r#"
             app "test" provides [ main ] to "./platform"
 
-            Effect a : [ @Effect ({} -> a) ]
+            Effect a := {} -> a
 
             foo : Effect {}
             foo =
@@ -1462,7 +1489,7 @@ fn rbtree_insert() {
                 show (insert 0 {} Empty)
             "#
         ),
-        RocStr::from_slice("Node".as_bytes()),
+        RocStr::from("Node"),
         RocStr
     );
 }
@@ -1529,7 +1556,7 @@ fn rbtree_layout_issue() {
             main = show (balance Red zero zero Empty)
             "#
         ),
-        RocStr::from_slice("Empty".as_bytes()),
+        RocStr::from("Empty"),
         RocStr
     );
 }
@@ -1583,7 +1610,7 @@ fn rbtree_balance_mono_problem() {
             main = show (balance Red 0 0 Empty Empty)
             "#
         ),
-        RocStr::from_slice("Empty".as_bytes()),
+        RocStr::from("Empty"),
         RocStr
     );
 }
@@ -1790,15 +1817,15 @@ fn unified_empty_closure_bool() {
 
             foo = \{} ->
                 when A is
-                    A -> (\_ -> 3.14)
-                    B -> (\_ -> 3.14)
+                    A -> (\_ -> 1.23)
+                    B -> (\_ -> 1.23)
 
-            main : Float *
+            main : Frac *
             main =
                 (foo {}) 0
             "#
         ),
-        3.14,
+        1.23,
         f64
     );
 }
@@ -1815,16 +1842,16 @@ fn unified_empty_closure_byte() {
 
             foo = \{} ->
                 when A is
-                    A -> (\_ -> 3.14)
-                    B -> (\_ -> 3.14)
-                    C -> (\_ -> 3.14)
+                    A -> (\_ -> 1.23)
+                    B -> (\_ -> 1.23)
+                    C -> (\_ -> 1.23)
 
-            main : Float *
+            main : Frac *
             main =
                 (foo {}) 0
             "#
         ),
-        3.14,
+        1.23,
         f64
     );
 }
@@ -1837,7 +1864,7 @@ fn task_always_twice() {
             r#"
             app "test" provides [ main ] to "./platform"
 
-            Effect a : [ @Effect ({} -> a) ]
+            Effect a := {} -> a
 
             effectAlways : a -> Effect a
             effectAlways = \x ->
@@ -1863,7 +1890,7 @@ fn task_always_twice() {
                         Ok x -> transform x
                         Err e -> fail e
 
-            main : Task {} (Float *)
+            main : Task {} (Frac *)
             main = after (always "foo") (\_ -> always {})
 
             "#
@@ -1882,7 +1909,7 @@ fn wildcard_rigid() {
             r#"
             app "test" provides [ main ] to "./platform"
 
-            Effect a : [ @Effect ({} -> a) ]
+            Effect a := {} -> a
 
             Task a err : Effect (Result a err)
 
@@ -1894,7 +1921,36 @@ fn wildcard_rigid() {
                 @Effect inner
 
 
-            main : Task {} (Float *)
+            main : Task {} (Frac *)
+            main = always {}
+            "#
+        ),
+        0,
+        i64,
+        |_| 0
+    );
+}
+
+#[test]
+#[cfg(any(feature = "gen-llvm"))]
+fn alias_of_alias_with_type_arguments() {
+    assert_non_opt_evals_to!(
+        indoc!(
+            r#"
+            app "test" provides [ main ] to "./platform"
+
+            Effect a := a
+
+            Task a err : Effect (Result a err)
+
+            always : a -> Task a *
+            always = \x ->
+                inner = (Ok x)
+
+                @Effect inner
+
+
+            main : Task {} (Frac *)
             main = always {}
             "#
         ),
@@ -1913,7 +1969,7 @@ fn todo_bad_error_message() {
             r#"
             app "test" provides [ main ] to "./platform"
 
-            Effect a : [ @Effect ({} -> a) ]
+            Effect a := {} -> a
 
             effectAlways : a -> Effect a
             effectAlways = \x ->
@@ -1926,7 +1982,7 @@ fn todo_bad_error_message() {
 
             Task a err : Effect (Result a err)
 
-            always : a -> Task a (Float *)
+            always : a -> Task a (Frac *)
             always = \x -> effectAlways (Ok x)
 
             # the problem is that this restricts to `Task {} *`
@@ -1941,7 +1997,7 @@ fn todo_bad_error_message() {
                         # but here it must be `forall b. Task b {}`
                         Err e -> fail e
 
-            main : Task {} (Float *)
+            main : Task {} (Frac *)
             main =
                 after (always "foo") (\_ -> always {})
             "#
@@ -2376,7 +2432,7 @@ fn build_then_apply_closure() {
                 (\_ -> x) {}
             "#
         ),
-        RocStr::from_slice(b"long string that is malloced"),
+        RocStr::from("long string that is malloced"),
         RocStr
     );
 }
@@ -2447,7 +2503,7 @@ fn backpassing_result() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm", feature = "gen-wasm"))]
+#[cfg(any(feature = "gen-llvm"))]
 #[should_panic(expected = "Shadowing { original_region: @57-58, shadow: @74-75 Ident")]
 fn function_malformed_pattern() {
     assert_evals_to!(
@@ -2464,10 +2520,10 @@ fn function_malformed_pattern() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(any(feature = "gen-llvm", feature = "gen-wasm"))]
 #[should_panic(expected = "Hit an erroneous type when creating a layout for")]
 fn call_invalid_layout() {
-    assert_llvm_evals_to!(
+    assert_evals_to!(
         indoc!(
             r#"
                 f : I64 -> I64
@@ -2485,9 +2541,9 @@ fn call_invalid_layout() {
 
 #[test]
 #[cfg(any(feature = "gen-llvm"))]
-#[should_panic(expected = "An expectation failed!")]
+#[should_panic(expected = "Failed with 1 failures. Failures: ")]
 fn expect_fail() {
-    assert_evals_to!(
+    assert_expect_failed!(
         indoc!(
             r#"
             expect 1 == 2
@@ -2550,7 +2606,7 @@ fn module_thunk_is_function() {
                 helper = Str.concat
             "#
         ),
-        RocStr::from_slice(b"foobar"),
+        RocStr::from("foobar"),
         RocStr
     );
 }
@@ -2574,7 +2630,7 @@ fn hit_unresolved_type_variable() {
                     \input -> input
             "#
         ),
-        RocStr::from_slice(b"B"),
+        RocStr::from("B"),
         RocStr
     );
 }
@@ -2625,7 +2681,7 @@ fn pattern_match_unit_tag() {
 // see for why this is disabled on wasm32 https://github.com/rtfeldman/roc/issues/1687
 #[cfg(not(feature = "wasm-cli-run"))]
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(any(feature = "gen-llvm", feature = "gen-wasm"))]
 fn mirror_llvm_alignment_padding() {
     // see https://github.com/rtfeldman/roc/issues/1569
     assert_evals_to!(
@@ -2642,13 +2698,13 @@ fn mirror_llvm_alignment_padding() {
 
             "#
         ),
-        RocStr::from_slice(b"pass\npass"),
+        RocStr::from("pass\npass"),
         RocStr
     );
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(any(feature = "gen-llvm", feature = "gen-wasm"))]
 fn lambda_set_bool() {
     assert_evals_to!(
         indoc!(
@@ -2673,7 +2729,7 @@ fn lambda_set_bool() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(any(feature = "gen-llvm", feature = "gen-wasm"))]
 fn lambda_set_byte() {
     assert_evals_to!(
         indoc!(
@@ -2727,7 +2783,7 @@ fn lambda_set_struct_byte() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm"))]
+#[cfg(any(feature = "gen-llvm", feature = "gen-wasm"))]
 fn lambda_set_enum_byte_byte() {
     assert_evals_to!(
         indoc!(
@@ -2905,7 +2961,7 @@ fn mix_function_and_closure() {
                     (if 1 == 1 then foo else (bar "nope nope nope")) "hello world"
             "#
         ),
-        RocStr::from_slice(b"hello world"),
+        RocStr::from("hello world"),
         RocStr
     );
 }
@@ -2930,13 +2986,14 @@ fn mix_function_and_closure_level_of_indirection() {
                     f "hello world"
             "#
         ),
-        RocStr::from_slice(b"hello world"),
+        RocStr::from("hello world"),
         RocStr
     );
 }
 
 #[test]
 #[cfg(any(feature = "gen-llvm"))]
+#[cfg_attr(debug_assertions, ignore)] // this test stack-overflows the compiler in debug mode
 fn do_pass_bool_byte_closure_layout() {
     // see https://github.com/rtfeldman/roc/pull/1706
     // the distinction is actually important, dropping that info means some functions just get
@@ -3006,7 +3063,7 @@ fn do_pass_bool_byte_closure_layout() {
             main = [test1, test2, test3, test4] |> Str.joinWith ", "
        "#
         ),
-        RocStr::from_slice(b"PASS, PASS, PASS, PASS"),
+        RocStr::from("PASS, PASS, PASS, PASS"),
         RocStr
     );
 }
@@ -3031,7 +3088,7 @@ fn nested_rigid_list() {
                         _ -> "hello world"
             "#
         ),
-        RocStr::from_slice(b"hello world"),
+        RocStr::from("hello world"),
         RocStr
     );
 }
@@ -3044,7 +3101,7 @@ fn nested_rigid_alias() {
             r#"
                 app "test" provides [ main ] to "./platform"
 
-                Identity a : [ @Identity a ]
+                Identity a := a
 
                 foo : Identity a -> Identity a
                 foo = \list ->
@@ -3058,7 +3115,7 @@ fn nested_rigid_alias() {
                         _ -> "hello world"
             "#
         ),
-        RocStr::from_slice(b"hello world"),
+        RocStr::from("hello world"),
         RocStr
     );
 }
@@ -3071,19 +3128,19 @@ fn nested_rigid_tag_union() {
             r#"
                 app "test" provides [ main ] to "./platform"
 
-                foo : [ @Identity a ] -> [ @Identity a ]
+                foo : [ Identity a ] -> [ Identity a ]
                 foo = \list ->
-                    p2 : [ @Identity a ]
+                    p2 : [ Identity a ]
                     p2 = list
 
                     p2
 
                 main =
-                    when foo (@Identity "foo") is
+                    when foo (Identity "foo") is
                         _ -> "hello world"
             "#
         ),
-        RocStr::from_slice(b"hello world"),
+        RocStr::from("hello world"),
         RocStr
     );
 }
@@ -3111,7 +3168,7 @@ fn call_that_needs_closure_parameter() {
             runTest manyAuxTest
             "#
         ),
-        RocStr::from_slice(b"FAIL"),
+        RocStr::from("FAIL"),
         RocStr
     );
 }
@@ -3132,7 +3189,307 @@ fn alias_defined_out_of_order() {
 
             "#
         ),
-        RocStr::from_slice(b"foo"),
+        RocStr::from("foo"),
         RocStr
     );
+}
+
+#[test]
+#[cfg(any(feature = "gen-llvm"))]
+fn recursively_build_effect() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+            app "test" provides [ main ] to "./platform"
+
+            greeting =
+                hi = "Hello"
+                name = "World"
+
+                "\(hi), \(name)!"
+
+            main =
+                when nestHelp 4 is
+                    _ -> greeting
+
+            nestHelp : I64 -> XEffect {}
+            nestHelp = \m ->
+                when m is
+                    0 ->
+                        always {}
+
+                    _ ->
+                        always {} |> after \_ -> nestHelp (m - 1)
+
+
+            XEffect a := {} -> a
+
+            always : a -> XEffect a
+            always = \x -> @XEffect (\{} -> x)
+
+            after : XEffect a, (a -> XEffect b) -> XEffect b
+            after = \(@XEffect e), toB ->
+                @XEffect \{} ->
+                    when toB (e {}) is
+                        @XEffect e2 ->
+                            e2 {}
+            "#
+        ),
+        RocStr::from("Hello, World!"),
+        RocStr
+    );
+}
+
+#[test]
+#[ignore = "TODO; currently generates bad code because `a` isn't specialized inside the closure."]
+#[cfg(any(feature = "gen-llvm"))]
+fn polymophic_expression_captured_inside_closure() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+            app "test" provides [ main ] to "./platform"
+
+            asU8 : U8 -> U8
+            asU8 = \_ -> 30
+
+            main =
+                a = 15
+                f = \{} ->
+                    asU8 a
+
+                f {}
+            "#
+        ),
+        30,
+        u8
+    );
+}
+
+#[test]
+#[cfg(any(feature = "gen-llvm"))]
+fn issue_2322() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+            double = \x -> x * 2
+            doubleBind = \x -> (\_ -> double x)
+            doubleThree = doubleBind 3
+            doubleThree {}
+            "#
+        ),
+        6,
+        i64
+    )
+}
+
+#[test]
+#[cfg(any(feature = "gen-llvm"))]
+fn box_and_unbox_string() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+            Str.concat "Leverage " "agile frameworks to provide a robust synopsis for high level overviews"
+                |> Box.box
+                |> Box.unbox
+            "#
+        ),
+        RocStr::from(
+            "Leverage agile frameworks to provide a robust synopsis for high level overviews"
+        ),
+        RocStr
+    )
+}
+
+#[test]
+#[cfg(any(feature = "gen-llvm"))]
+fn box_and_unbox_num() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+            Box.unbox (Box.box (123u8))
+            "#
+        ),
+        123,
+        u8
+    )
+}
+
+#[test]
+#[cfg(any(feature = "gen-llvm"))]
+fn box_and_unbox_record() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+            Box.unbox (Box.box { a: 15u8, b: 27u8 })
+            "#
+        ),
+        (15, 27),
+        (u8, u8)
+    )
+}
+
+#[test]
+#[cfg(any(feature = "gen-llvm"))]
+fn box_and_unbox_tag_union() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+            v : [ A U8, B U8 ] # usually stack allocated
+            v = B 27u8
+
+            Box.unbox (Box.box v)
+            "#
+        ),
+        (27, 1),
+        (u8, u8)
+    )
+}
+
+#[test]
+#[cfg(any(feature = "gen-llvm"))]
+fn closure_called_in_its_defining_scope() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+            app "test" provides [ main ] to "./platform"
+
+            main : Str
+            main =
+                g : Str
+                g = "hello world"
+
+                getG : {} -> Str
+                getG = \{} -> g
+
+                getG {}
+            "#
+        ),
+        RocStr::from("hello world"),
+        RocStr
+    )
+}
+
+#[test]
+#[ignore]
+#[cfg(any(feature = "gen-llvm"))]
+fn issue_2894() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+            app "test" provides [ main ] to "./platform"
+
+            main : U32
+            main =
+                g : { x : U32 }
+                g = { x: 1u32 }
+
+                getG : {} -> { x : U32 }
+                getG = \{} -> g
+
+                h : {} -> U32
+                h = \{} -> (getG {}).x
+
+                h {}
+            "#
+        ),
+        1u32,
+        u32
+    )
+}
+
+#[test]
+#[cfg(any(feature = "gen-llvm"))]
+fn polymorphic_def_used_in_closure() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+            a : I64 -> _
+            a = \g ->
+                f = { r: g, h: 32 }
+
+                h1 : U64
+                h1 = (\{} -> f.h) {}
+                h1
+            a 1
+            "#
+        ),
+        32,
+        u64
+    )
+}
+
+#[test]
+#[cfg(any(feature = "gen-llvm"))]
+fn polymorphic_lambda_set_usage() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+            id1 = \x -> x
+            id2 = \y -> y
+            id = if True then id1 else id2
+
+            id 9u8
+            "#
+        ),
+        9,
+        u8
+    )
+}
+
+#[test]
+#[cfg(any(feature = "gen-llvm"))]
+fn polymorphic_lambda_set_multiple_specializations() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+            id1 = \x -> x
+            id2 = \y -> y
+            id = if True then id1 else id2
+
+            (id 9u8) + Num.toU8 (id 16u16)
+            "#
+        ),
+        25,
+        u8
+    )
+}
+
+#[test]
+#[cfg(any(feature = "gen-llvm"))]
+fn list_map2_conslist() {
+    // this had an RC problem, https://github.com/rtfeldman/roc/issues/2968
+    assert_evals_to!(
+        indoc!(
+            r#"
+            ConsList a : [ Nil, Cons a (ConsList a) ]
+
+            x : List (ConsList Str)
+            x = List.map2 [ ] [ Nil ] Cons
+
+            when List.first x is
+                _ -> ""
+            "#
+        ),
+        RocStr::default(),
+        RocStr
+    )
+}
+
+#[test]
+#[cfg(any(feature = "gen-llvm"))]
+fn polymorphic_lambda_captures_polymorphic_value() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+            x = 2
+
+            f1 = \_ -> x
+
+            f = if True then f1 else f1
+            f {}
+            "#
+        ),
+        2,
+        u64
+    )
 }

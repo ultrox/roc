@@ -65,7 +65,7 @@ fn dict_nonempty_contains() {
         indoc!(
             r#"
             empty : Dict I64 F64
-            empty = Dict.insert Dict.empty 42 3.14
+            empty = Dict.insert Dict.empty 42 1.23
 
             Dict.contains empty 42
             "#
@@ -101,7 +101,7 @@ fn dict_nonempty_remove() {
         indoc!(
             r#"
             empty : Dict I64 F64
-            empty = Dict.insert Dict.empty 42 3.14
+            empty = Dict.insert Dict.empty 42 1.23
 
             empty
                 |> Dict.remove 42
@@ -120,7 +120,7 @@ fn dict_nonempty_get() {
         indoc!(
             r#"
             empty : Dict I64 F64
-            empty = Dict.insert Dict.empty 42 3.14
+            empty = Dict.insert Dict.empty 42 1.23
 
             withDefault = \x, def ->
                 when  x is
@@ -128,12 +128,12 @@ fn dict_nonempty_get() {
                     Err _ -> def
 
             empty
-                |> Dict.insert 42 3.14
+                |> Dict.insert 42 1.23
                 |> Dict.get 42
                 |> withDefault 0
             "#
         ),
-        3.14,
+        1.23,
         f64
     );
 
@@ -146,7 +146,7 @@ fn dict_nonempty_get() {
                     Err _ -> def
 
             Dict.empty
-                |> Dict.insert 42 3.14
+                |> Dict.insert 42 1.23
                 |> Dict.get 43
                 |> withDefault 0
             "#
@@ -202,7 +202,7 @@ fn values() {
 
 #[test]
 #[cfg(any(feature = "gen-llvm"))]
-fn from_list_with_fold() {
+fn from_list_with_fold_simple() {
     assert_evals_to!(
         indoc!(
             r#"
@@ -217,7 +217,11 @@ fn from_list_with_fold() {
         RocList::from_slice(&[2, 3, 1]),
         RocList<i64>
     );
+}
 
+#[test]
+#[cfg(any(feature = "gen-llvm"))]
+fn from_list_with_fold_reallocates() {
     assert_evals_to!(
         indoc!(
             r#"
@@ -235,11 +239,13 @@ fn from_list_with_fold() {
                     |> List.walk Dict.empty (\accum, value -> Dict.insert accum value value)
 
             Dict.values myDict
-                |> List.len
             "#
         ),
-        25,
-        i64
+        RocList::from_slice(&[
+            4, 5, 20, 0, 7, 3, 1, 21, 10, 6, 13, 9, 14, 19, 2, 15, 12, 17, 16, 18, 22, 8, 11, 24,
+            23
+        ]),
+        RocList<i64>
     );
 }
 
@@ -277,7 +283,6 @@ fn big_str_keys() {
                     |> Dict.insert "Leverage agile frameworks to provide a robust" 100
                     |> Dict.insert "synopsis for high level overviews. Iterative approaches" 200
                     |> Dict.insert "to corporate strategy foster collaborative thinking to" 300
-
 
             Dict.keys myDict
             "#

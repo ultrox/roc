@@ -1,5 +1,6 @@
 use crate::ast::CommentOrNewline;
 use crate::ast::Spaceable;
+use crate::parser::SpaceProblem;
 use crate::parser::{self, and, backtrackable, BadInputError, Parser, Progress::*};
 use crate::state::State;
 use bumpalo::collections::vec::Vec;
@@ -10,7 +11,6 @@ use roc_region::all::Position;
 pub fn space0_around_ee<'a, P, S, E>(
     parser: P,
     min_indent: u32,
-    space_problem: fn(BadInputError, Position) -> E,
     indent_before_problem: fn(Position) -> E,
     indent_after_problem: fn(Position) -> E,
 ) -> impl Parser<'a, Loc<S>, E>
@@ -19,15 +19,12 @@ where
     S: 'a,
     P: Parser<'a, Loc<S>, E>,
     P: 'a,
-    E: 'a,
+    E: 'a + SpaceProblem,
 {
     parser::map_with_arena(
         and(
-            space0_e(min_indent, space_problem, indent_before_problem),
-            and(
-                parser,
-                space0_e(min_indent, space_problem, indent_after_problem),
-            ),
+            space0_e(min_indent, indent_before_problem),
+            and(parser, space0_e(min_indent, indent_after_problem)),
         ),
         spaces_around_help,
     )
@@ -36,7 +33,6 @@ where
 pub fn space0_before_optional_after<'a, P, S, E>(
     parser: P,
     min_indent: u32,
-    space_problem: fn(BadInputError, Position) -> E,
     indent_before_problem: fn(Position) -> E,
     indent_after_problem: fn(Position) -> E,
 ) -> impl Parser<'a, Loc<S>, E>
@@ -45,15 +41,15 @@ where
     S: 'a,
     P: Parser<'a, Loc<S>, E>,
     P: 'a,
-    E: 'a,
+    E: 'a + SpaceProblem,
 {
     parser::map_with_arena(
         and(
-            space0_e(min_indent, space_problem, indent_before_problem),
+            space0_e(min_indent, indent_before_problem),
             and(
                 parser,
                 one_of![
-                    backtrackable(space0_e(min_indent, space_problem, indent_after_problem)),
+                    backtrackable(space0_e(min_indent, indent_after_problem)),
                     succeed!(&[] as &[_]),
                 ],
             ),
@@ -101,7 +97,6 @@ where
 pub fn space0_before_e<'a, P, S, E>(
     parser: P,
     min_indent: u32,
-    space_problem: fn(BadInputError, Position) -> E,
     indent_problem: fn(Position) -> E,
 ) -> impl Parser<'a, Loc<S>, E>
 where
@@ -109,10 +104,10 @@ where
     S: 'a,
     P: Parser<'a, Loc<S>, E>,
     P: 'a,
-    E: 'a,
+    E: 'a + SpaceProblem,
 {
     parser::map_with_arena(
-        and!(space0_e(min_indent, space_problem, indent_problem), parser),
+        and!(space0_e(min_indent, indent_problem), parser),
         |arena: &'a Bump, (space_list, loc_expr): (&'a [CommentOrNewline<'a>], Loc<S>)| {
             if space_list.is_empty() {
                 loc_expr
@@ -128,7 +123,6 @@ where
 pub fn space0_after_e<'a, P, S, E>(
     parser: P,
     min_indent: u32,
-    space_problem: fn(BadInputError, Position) -> E,
     indent_problem: fn(Position) -> E,
 ) -> impl Parser<'a, Loc<S>, E>
 where
@@ -136,10 +130,10 @@ where
     S: 'a,
     P: Parser<'a, Loc<S>, E>,
     P: 'a,
-    E: 'a,
+    E: 'a + SpaceProblem,
 {
     parser::map_with_arena(
-        and!(parser, space0_e(min_indent, space_problem, indent_problem)),
+        and!(parser, space0_e(min_indent, indent_problem)),
         |arena: &'a Bump, (loc_expr, space_list): (Loc<S>, &'a [CommentOrNewline<'a>])| {
             if space_list.is_empty() {
                 loc_expr
@@ -170,74 +164,122 @@ where
 
 pub fn space0_e<'a, E>(
     min_indent: u32,
-    space_problem: fn(BadInputError, Position) -> E,
     indent_problem: fn(Position) -> E,
 ) -> impl Parser<'a, &'a [CommentOrNewline<'a>], E>
 where
-    E: 'a,
+    E: 'a + SpaceProblem,
 {
-    spaces_help_help(min_indent, space_problem, indent_problem)
+    spaces_help_help(min_indent, indent_problem)
 }
 
 #[inline(always)]
 fn spaces_help_help<'a, E>(
     min_indent: u32,
-    space_problem: fn(BadInputError, Position) -> E,
     indent_problem: fn(Position) -> E,
 ) -> impl Parser<'a, &'a [CommentOrNewline<'a>], E>
 where
-    E: 'a,
+    E: 'a + SpaceProblem,
 {
-    use SpaceState::*;
+    move |arena, state: State<'a>| match fast_eat_spaces(&state) {
+        FastSpaceState::HasTab(position) => Err((
+            MadeProgress,
+            E::space_problem(BadInputError::HasTab, position),
+            state,
+        )),
+        FastSpaceState::Good {
+            newlines,
+            consumed,
+            column,
+        } => {
+            if consumed == 0 {
+                Ok((NoProgress, &[] as &[_], state))
+            } else if column < min_indent {
+                Err((MadeProgress, indent_problem(state.pos()), state))
+            } else {
+                let comments_and_newlines = Vec::with_capacity_in(newlines, arena);
+                let mut spaces = eat_spaces(state, false, comments_and_newlines);
 
-    move |arena, state: State<'a>| {
-        let comments_and_newlines = Vec::new_in(arena);
-        match eat_spaces(state.clone(), false, comments_and_newlines) {
-            HasTab(state) => Err((
-                MadeProgress,
-                space_problem(BadInputError::HasTab, state.pos()),
-                state,
-            )),
-            Good {
-                state: mut new_state,
-                multiline,
-                comments_and_newlines,
-            } => {
-                if new_state.bytes() == state.bytes() {
-                    Ok((NoProgress, &[] as &[_], state))
-                } else if multiline {
-                    // we parsed at least one newline
-
-                    new_state.indent_column = new_state.column();
-
-                    if new_state.column() >= min_indent {
-                        Ok((
-                            MadeProgress,
-                            comments_and_newlines.into_bump_slice(),
-                            new_state,
-                        ))
-                    } else {
-                        Err((MadeProgress, indent_problem(state.pos()), state))
-                    }
-                } else {
-                    Ok((
-                        MadeProgress,
-                        comments_and_newlines.into_bump_slice(),
-                        new_state,
-                    ))
+                if spaces.multiline {
+                    spaces.state.indent_column = spaces.state.column();
                 }
+
+                Ok((
+                    MadeProgress,
+                    spaces.comments_and_newlines.into_bump_slice(),
+                    spaces.state,
+                ))
             }
         }
     }
 }
 
-enum SpaceState<'a> {
+enum FastSpaceState {
     Good {
-        state: State<'a>,
-        multiline: bool,
-        comments_and_newlines: Vec<'a, CommentOrNewline<'a>>,
+        newlines: usize,
+        consumed: usize,
+        column: u32,
     },
-    HasTab(State<'a>),
+    HasTab(Position),
+}
+
+fn fast_eat_spaces(state: &State) -> FastSpaceState {
+    use FastSpaceState::*;
+
+    let mut newlines = 0;
+    let mut index = 0;
+    let mut line_start = state.line_start.offset as usize;
+    let base_offset = state.pos().offset as usize;
+
+    let bytes = state.bytes();
+    let length = bytes.len();
+
+    'outer: while index < length {
+        match bytes[index] {
+            b' ' => {
+                index += 1;
+            }
+            b'\n' => {
+                newlines += 1;
+                index += 1;
+                line_start = base_offset + index;
+            }
+            b'\r' => {
+                index += 1;
+                line_start = base_offset + index;
+            }
+            b'\t' => {
+                return HasTab(Position::new((base_offset + index) as u32));
+            }
+            b'#' => {
+                index += 1;
+
+                while index < length {
+                    match bytes[index] {
+                        b'\n' | b'\t' | b'\r' => {
+                            continue 'outer;
+                        }
+
+                        _ => {
+                            index += 1;
+                        }
+                    }
+                }
+            }
+            _ => break,
+        }
+    }
+
+    Good {
+        newlines,
+        consumed: index,
+        column: ((base_offset + index) - line_start) as u32,
+    }
+}
+
+struct SpaceState<'a> {
+    state: State<'a>,
+    multiline: bool,
+    comments_and_newlines: Vec<'a, CommentOrNewline<'a>>,
 }
 
 fn eat_spaces<'a>(
@@ -245,8 +287,6 @@ fn eat_spaces<'a>(
     mut multiline: bool,
     mut comments_and_newlines: Vec<'a, CommentOrNewline<'a>>,
 ) -> SpaceState<'a> {
-    use SpaceState::*;
-
     for c in state.bytes() {
         match c {
             b' ' => {
@@ -260,9 +300,8 @@ fn eat_spaces<'a>(
             b'\r' => {
                 state = state.advance_newline();
             }
-            b'\t' => {
-                return HasTab(state);
-            }
+            b'\t' => unreachable!(),
+
             b'#' => {
                 state = state.advance(1);
                 return eat_line_comment(state, multiline, comments_and_newlines);
@@ -271,7 +310,7 @@ fn eat_spaces<'a>(
         }
     }
 
-    Good {
+    SpaceState {
         state,
         multiline,
         comments_and_newlines,
@@ -283,81 +322,150 @@ fn eat_line_comment<'a>(
     mut multiline: bool,
     mut comments_and_newlines: Vec<'a, CommentOrNewline<'a>>,
 ) -> SpaceState<'a> {
-    use SpaceState::*;
+    let mut index = 0;
+    let bytes = state.bytes();
+    let length = bytes.len();
 
-    let is_doc_comment = if let Some(b'#') = state.bytes().get(0) {
-        match state.bytes().get(1) {
-            Some(b' ') => {
-                state = state.advance(2);
+    'outer: loop {
+        let is_doc_comment = if let Some(b'#') = bytes.get(index) {
+            match bytes.get(index + 1) {
+                Some(b' ') => {
+                    state = state.advance(2);
+                    index += 2;
 
-                true
-            }
-            Some(b'\n') => {
-                // consume the second # and the \n
-                state = state.advance(1);
-                state = state.advance_newline();
-
-                comments_and_newlines.push(CommentOrNewline::DocComment(""));
-                multiline = true;
-                return eat_spaces(state, multiline, comments_and_newlines);
-            }
-            None => {
-                // consume the second #
-                state = state.advance(1);
-
-                return Good {
-                    state,
-                    multiline,
-                    comments_and_newlines,
-                };
-            }
-
-            _ => false,
-        }
-    } else {
-        false
-    };
-
-    let initial = state.bytes();
-
-    for c in state.bytes() {
-        match c {
-            b'\t' => return HasTab(state),
-            b'\n' => {
-                let delta = initial.len() - state.bytes().len();
-                let comment = unsafe { std::str::from_utf8_unchecked(&initial[..delta]) };
-
-                if is_doc_comment {
-                    comments_and_newlines.push(CommentOrNewline::DocComment(comment));
-                } else {
-                    comments_and_newlines.push(CommentOrNewline::LineComment(comment));
+                    true
                 }
-                state = state.advance_newline();
-                multiline = true;
-                return eat_spaces(state, multiline, comments_and_newlines);
+                Some(b'\n') => {
+                    // consume the second # and the \n
+                    state = state.advance(1);
+                    state = state.advance_newline();
+                    index += 2;
+
+                    comments_and_newlines.push(CommentOrNewline::DocComment(""));
+                    multiline = true;
+
+                    for c in state.bytes() {
+                        match c {
+                            b' ' => {
+                                state = state.advance(1);
+                            }
+                            b'\n' => {
+                                state = state.advance_newline();
+                                index += 1;
+                                multiline = true;
+                                comments_and_newlines.push(CommentOrNewline::Newline);
+                            }
+                            b'\r' => {
+                                state = state.advance_newline();
+                            }
+                            b'\t' => unreachable!(),
+                            b'#' => {
+                                state = state.advance(1);
+                                index += 1;
+                                continue 'outer;
+                            }
+                            _ => break,
+                        }
+
+                        index += 1;
+                    }
+
+                    return SpaceState {
+                        state,
+                        multiline,
+                        comments_and_newlines,
+                    };
+                }
+                None => {
+                    // consume the second #
+                    state = state.advance(1);
+
+                    return SpaceState {
+                        state,
+                        multiline,
+                        comments_and_newlines,
+                    };
+                }
+
+                _ => false,
             }
-            b'\r' => {
-                state = state.advance_newline();
+        } else {
+            false
+        };
+
+        let loop_start = index;
+
+        while index < length {
+            match bytes[index] {
+                b'\t' => unreachable!(),
+                b'\n' => {
+                    let comment =
+                        unsafe { std::str::from_utf8_unchecked(&bytes[loop_start..index]) };
+
+                    if is_doc_comment {
+                        comments_and_newlines.push(CommentOrNewline::DocComment(comment));
+                    } else {
+                        comments_and_newlines.push(CommentOrNewline::LineComment(comment));
+                    }
+                    state = state.advance_newline();
+                    multiline = true;
+
+                    index += 1;
+                    while index < length {
+                        match bytes[index] {
+                            b' ' => {
+                                state = state.advance(1);
+                            }
+                            b'\n' => {
+                                state = state.advance_newline();
+                                multiline = true;
+                                comments_and_newlines.push(CommentOrNewline::Newline);
+                            }
+                            b'\r' => {
+                                state = state.advance_newline();
+                            }
+                            b'\t' => unreachable!(),
+                            b'#' => {
+                                state = state.advance(1);
+                                index += 1;
+                                continue 'outer;
+                            }
+                            _ => break,
+                        }
+
+                        index += 1;
+                    }
+
+                    return SpaceState {
+                        state,
+                        multiline,
+                        comments_and_newlines,
+                    };
+                }
+                b'\r' => {
+                    state = state.advance_newline();
+                }
+                _ => {
+                    state = state.advance(1);
+                }
             }
-            _ => {
-                state = state.advance(1);
-            }
+
+            index += 1;
         }
-    }
 
-    // We made it to the end of the bytes. This means there's a comment without a trailing newline.
-    let delta = initial.len() - state.bytes().len();
-    let comment = unsafe { std::str::from_utf8_unchecked(&initial[..delta]) };
+        // We made it to the end of the bytes. This means there's a comment without a trailing newline.
+        let comment = unsafe { std::str::from_utf8_unchecked(&bytes[loop_start..index]) };
 
-    if is_doc_comment {
-        comments_and_newlines.push(CommentOrNewline::DocComment(comment));
-    } else {
-        comments_and_newlines.push(CommentOrNewline::LineComment(comment));
-    }
+        if is_doc_comment {
+            comments_and_newlines.push(CommentOrNewline::DocComment(comment));
+        } else {
+            comments_and_newlines.push(CommentOrNewline::LineComment(comment));
+        }
 
-    Good {
-        state,
-        multiline,
-        comments_and_newlines,
+        return SpaceState {
+            state,
+            multiline,
+            comments_and_newlines,
+        };
     }
 }

@@ -26,21 +26,19 @@ pub const RocDec = extern struct {
         return .{ .num = num * one_point_zero_i128 };
     }
 
-    // TODO: There's got to be a better way to do this other than converting to Str
     pub fn fromF64(num: f64) ?RocDec {
-        var digit_bytes: [19]u8 = undefined; // 19 = max f64 digits + '.' + '-'
+        var result: f64 = num * comptime @intToFloat(f64, one_point_zero_i128);
 
-        var fbs = std.io.fixedBufferStream(digit_bytes[0..]);
-        std.fmt.formatFloatDecimal(num, .{}, fbs.writer()) catch
-            return null;
-
-        var dec = RocDec.fromStr(RocStr.init(&digit_bytes, fbs.pos));
-
-        if (dec) |d| {
-            return d;
-        } else {
+        if (result > comptime @intToFloat(f64, math.maxInt(i128))) {
             return null;
         }
+
+        if (result < comptime @intToFloat(f64, math.minInt(i128))) {
+            return null;
+        }
+
+        var ret: RocDec = .{ .num = @floatToInt(i128, result) };
+        return ret;
     }
 
     pub fn fromStr(roc_str: RocStr) ?RocDec {
@@ -141,7 +139,7 @@ pub const RocDec = extern struct {
 
         // Format the backing i128 into an array of digit (ascii) characters (u8s)
         var digit_bytes_storage: [max_digits + 1]u8 = undefined;
-        var num_digits = std.fmt.formatIntBuf(digit_bytes_storage[0..], num, 10, false, .{});
+        var num_digits = std.fmt.formatIntBuf(digit_bytes_storage[0..], num, 10, .lower, .{});
         var digit_bytes: [*]u8 = digit_bytes_storage[0..];
 
         // space where we assemble all the characters that make up the final string
@@ -312,9 +310,7 @@ pub const RocDec = extern struct {
 
         // (n / 0) is an error
         if (denominator_i128 == 0) {
-            // The compiler frontend does the `denominator == 0` check for us,
-            // therefore this case is unreachable from roc user code
-            unreachable;
+            @panic("TODO runtime exception for dividing by 0!");
         }
 
         // If they're both negative, or if neither is negative, the final answer
@@ -729,6 +725,11 @@ test "fromF64" {
     try expectEqual(RocDec{ .num = 25500000000000000000 }, dec.?);
 }
 
+test "fromF64 overflow" {
+    var dec = RocDec.fromF64(1e308);
+    try expectEqual(dec, null);
+}
+
 test "fromStr: empty" {
     var roc_str = RocStr.init("", 0);
     var dec = RocDec.fromStr(roc_str);
@@ -898,11 +899,11 @@ test "toStr: -0.00045" {
     try expectEqualSlices(u8, res_slice, res_roc_str.?.asSlice());
 }
 
-test "toStr: -111.123456789" {
-    var dec: RocDec = .{ .num = -111123456789000000000 };
+test "toStr: -111.123456" {
+    var dec: RocDec = .{ .num = -111123456000000000000 };
     var res_roc_str = dec.toStr();
 
-    const res_slice: []const u8 = "-111.123456789"[0..];
+    const res_slice: []const u8 = "-111.123456"[0..];
     try expectEqualSlices(u8, res_slice, res_roc_str.?.asSlice());
 }
 

@@ -1,4 +1,4 @@
-FROM rust:1.57.0-slim-bullseye
+FROM rust:1.60.0-slim-bullseye # make sure to update rust-toolchain.toml too so that everything uses the same rust version
 WORKDIR /earthbuild
 
 prep-debian:
@@ -10,22 +10,27 @@ install-other-libs:
     RUN apt -y install libxcb-shape0-dev libxcb-xfixes0-dev # for editor clipboard
     RUN apt -y install libasound2-dev # for editor sounds
     RUN apt -y install libunwind-dev pkg-config libx11-dev zlib1g-dev
+    RUN apt -y install unzip # for www/build.sh
 
 install-zig-llvm-valgrind-clippy-rustfmt:
     FROM +install-other-libs
+    # editor
+    RUN apt -y install libxkbcommon-dev
     # zig
-    RUN wget -c https://ziglang.org/download/0.8.0/zig-linux-x86_64-0.8.0.tar.xz --no-check-certificate
-    RUN tar -xf zig-linux-x86_64-0.8.0.tar.xz
-    RUN ln -s /earthbuild/zig-linux-x86_64-0.8.0/zig /usr/bin/zig
+    RUN wget -c https://ziglang.org/download/0.9.1/zig-linux-x86_64-0.9.1.tar.xz --no-check-certificate
+    RUN tar -xf zig-linux-x86_64-0.9.1.tar.xz
+    RUN ln -s /earthbuild/zig-linux-x86_64-0.9.1/zig /bin/zig
+    # zig builtins wasm tests
+    RUN apt -y install build-essential
+    RUN cargo install wasmer-cli --features "singlepass"
     # llvm
     RUN apt -y install lsb-release software-properties-common gnupg
     RUN wget https://apt.llvm.org/llvm.sh
     RUN chmod +x llvm.sh
-    RUN ./llvm.sh 12
-    RUN ln -s /usr/bin/clang-12 /usr/bin/clang
-    RUN ln -s /usr/bin/llvm-as-12 /usr/bin/llvm-as
+    RUN ./llvm.sh 13
+    RUN ln -s /usr/bin/clang-13 /usr/bin/clang
     # use lld as linker
-    RUN ln -s /usr/bin/lld-12 /usr/bin/ld.lld
+    RUN ln -s /usr/bin/lld-13 /usr/bin/ld.lld
     ENV RUSTFLAGS="-C link-arg=-fuse-ld=lld -C target-cpu=native"
     # valgrind
     RUN apt -y install valgrind
@@ -33,12 +38,13 @@ install-zig-llvm-valgrind-clippy-rustfmt:
     RUN rustup component add clippy
     # rustfmt
     RUN rustup component add rustfmt
+    # wasm repl & tests
+    RUN rustup target add wasm32-unknown-unknown wasm32-wasi
+    RUN apt -y install libssl-dev
+    RUN OPENSSL_NO_VENDOR=1 cargo install wasm-pack
     # criterion
     RUN cargo install cargo-criterion
-    # editor
-    RUN apt -y install libxkbcommon-dev
     # sccache
-    RUN apt -y install libssl-dev
     RUN cargo install sccache
     RUN sccache -V
     ENV RUSTC_WRAPPER=/usr/local/cargo/bin/sccache
@@ -47,31 +53,36 @@ install-zig-llvm-valgrind-clippy-rustfmt:
 
 copy-dirs:
     FROM +install-zig-llvm-valgrind-clippy-rustfmt
-    COPY --dir cli cli_utils compiler docs editor ast code_markup utils test_utils reporting roc_std vendor examples linker Cargo.toml Cargo.lock version.txt ./
+    COPY --dir bindgen cli cli_utils compiler docs docs_cli editor ast code_markup error_macros highlight utils test_utils reporting repl_cli repl_eval repl_test repl_wasm repl_www roc_std vendor examples linker Cargo.toml Cargo.lock version.txt www wasi-libc-sys ./
 
 test-zig:
     FROM +install-zig-llvm-valgrind-clippy-rustfmt
     COPY --dir compiler/builtins/bitcode ./
-    RUN cd bitcode && ./run-tests.sh
+    RUN cd bitcode && ./run-tests.sh && ./run-wasm-tests.sh
+
+build-rust-test:
+    FROM +copy-dirs
+    RUN --mount=type=cache,target=$SCCACHE_DIR \
+        cargo test --locked --release --features with_sound --workspace --no-run && sccache --show-stats
 
 check-clippy:
-    FROM +copy-dirs
+    FROM +build-rust-test
     RUN cargo clippy -V
     RUN --mount=type=cache,target=$SCCACHE_DIR \
-        cargo clippy -- -D warnings
+        cargo clippy --workspace --tests -- -D warnings
 
 check-rustfmt:
-    FROM +copy-dirs
+    FROM +build-rust-test
     RUN cargo fmt --version
     RUN cargo fmt --all -- --check
 
 check-typos:
     RUN cargo install typos-cli --version 1.0.11 # version set to prevent confusion if the version is updated automatically
-    COPY --dir .github ci cli cli_utils compiler docs editor examples ast code_markup utils linker nightly_benches packages roc_std www *.md LEGAL_DETAILS shell.nix version.txt ./
+    COPY --dir .github ci cli cli_utils compiler docs editor examples ast code_markup highlight utils linker nightly_benches packages roc_std www *.md LEGAL_DETAILS shell.nix version.txt ./
     RUN typos
 
 test-rust:
-    FROM +copy-dirs
+    FROM +build-rust-test
     ENV RUST_BACKTRACE=1
     # for race condition problem with cli test
     ENV ROC_NUM_WORKERS=1
@@ -86,10 +97,17 @@ test-rust:
     # gen-wasm has some multithreading problems to do with the wasmer runtime. Run it single-threaded as a separate job
     RUN --mount=type=cache,target=$SCCACHE_DIR \
         cargo test --locked --release --package test_gen --no-default-features --features gen-wasm -- --test-threads=1 && sccache --show-stats
-    # run i386 (32-bit linux) cli tests
-    RUN echo "4" | cargo run --locked --release --features="target-x86" -- --backend=x86_32 examples/benchmarks/NQueens.roc
+    # repl_test: build the compiler for wasm target, then run the tests on native target
     RUN --mount=type=cache,target=$SCCACHE_DIR \
-        cargo test --locked --release --features with_sound --test cli_run i386 --features="i386-cli-run" && sccache --show-stats
+        repl_test/test_wasm.sh && sccache --show-stats
+    # run i386 (32-bit linux) cli tests
+    # NOTE: disabled until zig 0.9
+    # RUN echo "4" | cargo run --locked --release --features="target-x86" -- --target=x86_32 examples/benchmarks/NQueens.roc
+    # RUN --mount=type=cache,target=$SCCACHE_DIR \
+    #    cargo test --locked --release --features with_sound --test cli_run i386 --features="i386-cli-run" && sccache --show-stats
+    # make sure doc generation works (that is, make sure build.sh returns status code 0)
+    RUN bash www/build.sh
+
 
 verify-no-git-changes:
     FROM +test-rust
@@ -118,7 +136,7 @@ build-nightly-release:
     RUN printf " on: " >> version.txt
     RUN date >> version.txt
     RUN RUSTFLAGS="-C target-cpu=x86-64" cargo build --features with_sound --release
-    RUN cd ./target/release && tar -czvf roc_linux_x86_64.tar.gz ./roc ../../LICENSE ../../LEGAL_DETAILS ../../examples/hello-world ../../examples/hello-rust ../../examples/hello-zig ../../compiler/builtins/bitcode/src/ ../../roc_std
+    RUN cd ./target/release && tar -czvf roc_linux_x86_64.tar.gz ./roc ../../LICENSE ../../LEGAL_DETAILS ../../examples/hello-world ../../compiler/builtins/bitcode/src/ ../../roc_std
     SAVE ARTIFACT ./target/release/roc_linux_x86_64.tar.gz AS LOCAL roc_linux_x86_64.tar.gz
 
 # compile everything needed for benchmarks and output a self-contained dir from which benchmarks can be run.

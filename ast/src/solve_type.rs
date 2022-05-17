@@ -3,6 +3,7 @@
 use bumpalo::Bump;
 use roc_can::expected::{Expected, PExpected};
 use roc_collections::all::{BumpMap, BumpMapDefault, MutMap};
+use roc_error_macros::internal_error;
 use roc_module::ident::TagName;
 use roc_module::symbol::Symbol;
 use roc_region::all::{Loc, Region};
@@ -12,7 +13,8 @@ use roc_types::subs::{
     SubsSlice, UnionTags, Variable, VariableSubsSlice,
 };
 use roc_types::types::{
-    gather_fields_unsorted_iter, Alias, Category, ErrorType, PatternCategory, RecordField,
+    gather_fields_unsorted_iter, Alias, AliasKind, Category, ErrorType, PatternCategory,
+    RecordField,
 };
 use roc_unify::unify::unify;
 use roc_unify::unify::Mode;
@@ -74,7 +76,7 @@ use crate::mem_pool::shallow_clone::ShallowClone;
 // Ranks are used to limit the number of type variables considered for generalization. Only those inside
 // of the let (so those used in inferring the type of `\x -> x`) are considered.
 
-#[derive(PartialEq, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub enum TypeError {
     BadExpr(Region, Category, ErrorType, Expected<ErrorType>),
     BadPattern(Region, PatternCategory, ErrorType, PExpected<ErrorType>),
@@ -225,13 +227,17 @@ fn solve<'a>(
                 expectation.get_type_ref(),
             );
 
-            match unify(subs, actual, expected, Mode::Eq) {
-                Success(vars) => {
+            match unify(subs, actual, expected, Mode::EQ) {
+                Success {
+                    vars,
+                    must_implement_ability: _,
+                } => {
+                    // TODO(abilities) record deferred ability checks
                     introduce(subs, rank, pools, &vars);
 
                     state
                 }
-                Failure(vars, actual_type, expected_type) => {
+                Failure(vars, actual_type, expected_type, _bad_impl) => {
                     introduce(subs, rank, pools, &vars);
 
                     let problem = TypeError::BadExpr(
@@ -266,7 +272,7 @@ fn solve<'a>(
         //
         //                    state
         //                }
-        //                Failure(vars, _actual_type, _expected_type) => {
+        //                Failure(vars, _actual_type, _expected_type, _bad_impl) => {
         //                    introduce(subs, rank, pools, &vars);
         //
         //                    // ERROR NOT REPORTED
@@ -318,14 +324,18 @@ fn solve<'a>(
                         expectation.get_type_ref(),
                     );
 
-                    match unify(subs, actual, expected, Mode::Eq) {
-                        Success(vars) => {
+                    match unify(subs, actual, expected, Mode::EQ) {
+                        Success {
+                            vars,
+                            must_implement_ability: _,
+                        } => {
+                            // TODO(abilities) record deferred ability checks
                             introduce(subs, rank, pools, &vars);
 
                             state
                         }
 
-                        Failure(vars, actual_type, expected_type) => {
+                        Failure(vars, actual_type, expected_type, _bad_impl) => {
                             introduce(subs, rank, pools, &vars);
 
                             let problem = TypeError::BadExpr(
@@ -389,13 +399,17 @@ fn solve<'a>(
             );
 
             // TODO(ayazhafiz): presence constraints for Expr2/Type2
-            match unify(subs, actual, expected, Mode::Eq) {
-                Success(vars) => {
+            match unify(subs, actual, expected, Mode::EQ) {
+                Success {
+                    vars,
+                    must_implement_ability: _,
+                } => {
+                    // TODO(abilities) record deferred ability checks
                     introduce(subs, rank, pools, &vars);
 
                     state
                 }
-                Failure(vars, actual_type, expected_type) => {
+                Failure(vars, actual_type, expected_type, _bad_impl) => {
                     introduce(subs, rank, pools, &vars);
 
                     let problem = TypeError::BadPattern(
@@ -697,13 +711,17 @@ fn solve<'a>(
             );
             let includes = type_to_var(arena, mempool, subs, rank, pools, cached_aliases, &tag_ty);
 
-            match unify(subs, actual, includes, Mode::Present) {
-                Success(vars) => {
+            match unify(subs, actual, includes, Mode::PRESENT) {
+                Success {
+                    vars,
+                    must_implement_ability: _,
+                } => {
+                    // TODO(abilities) record deferred ability checks
                     introduce(subs, rank, pools, &vars);
 
                     state
                 }
-                Failure(vars, actual_type, expected_type) => {
+                Failure(vars, actual_type, expected_type, _bad_impl) => {
                     introduce(subs, rank, pools, &vars);
 
                     // TODO: do we need a better error type here?
@@ -851,7 +869,7 @@ fn type_to_variable<'a>(
             register(subs, rank, pools, content)
         }
 
-        Alias(symbol, args, alias_type_id) => {
+        Alias(symbol, args, alias_type_id) | Opaque(symbol, args, alias_type_id) => {
             // TODO cache in uniqueness inference gives problems! all Int's get the same uniqueness var!
             // Cache aliases without type arguments. Commonly used aliases like `Int` would otherwise get O(n)
             // different variables (once for each occurrence). The recursion restriction is required
@@ -881,7 +899,7 @@ fn type_to_variable<'a>(
 
             let mut arg_vars = Vec::with_capacity(args.len());
 
-            for (_, arg_type_id) in args.iter(mempool) {
+            for arg_type_id in args.iter(mempool) {
                 let arg_type = mempool.get(*arg_type_id);
 
                 let arg_var = type_to_variable(arena, mempool, subs, rank, pools, cached, arg_type);
@@ -892,7 +910,13 @@ fn type_to_variable<'a>(
             let arg_vars = AliasVariables::insert_into_subs(subs, arg_vars, []);
 
             let alias_var = type_to_variable(arena, mempool, subs, rank, pools, cached, alias_type);
-            let content = Content::Alias(*symbol, arg_vars, alias_var);
+
+            let kind = match typ {
+                Alias(..) => AliasKind::Structural,
+                Opaque(..) => AliasKind::Opaque,
+                _ => internal_error!(),
+            };
+            let content = Content::Alias(*symbol, arg_vars, alias_var, kind);
 
             let result = register(subs, rank, pools, content);
 
@@ -1278,7 +1302,7 @@ fn adjust_rank_content(
     use roc_types::subs::FlatType::*;
 
     match content {
-        FlexVar(_) | RigidVar(_) | Error => group_rank,
+        FlexVar(_) | RigidVar(_) | FlexAbleVar(..) | RigidAbleVar(..) | Error => group_rank,
 
         RecursionVar { .. } => group_rank,
 
@@ -1384,10 +1408,10 @@ fn adjust_rank_content(
             }
         }
 
-        Alias(_, args, real_var) => {
+        Alias(_, args, real_var, _) => {
             let mut rank = Rank::toplevel();
 
-            for var_index in args.variables() {
+            for var_index in args.all_variables() {
                 let var = subs[var_index];
                 rank = rank.max(adjust_rank(subs, young_mark, visit_mark, group_rank, var));
             }
@@ -1400,6 +1424,8 @@ fn adjust_rank_content(
 
             rank
         }
+
+        RangedNumber(typ, _vars) => adjust_rank(subs, young_mark, visit_mark, group_rank, *typ),
     }
 }
 
@@ -1531,7 +1557,7 @@ fn instantiate_rigids_help(
             };
         }
 
-        FlexVar(_) | Error => {}
+        FlexVar(_) | FlexAbleVar(_, _) | Error => {}
 
         RecursionVar { structure, .. } => {
             instantiate_rigids_help(subs, max_rank, pools, structure);
@@ -1542,13 +1568,22 @@ fn instantiate_rigids_help(
             subs.set(copy, make_descriptor(FlexVar(Some(name))));
         }
 
-        Alias(_, args, real_type_var) => {
-            for var_index in args.variables() {
+        RigidAbleVar(name, ability) => {
+            // what it's all about: convert the rigid var into a flex var
+            subs.set(copy, make_descriptor(FlexAbleVar(Some(name), ability)));
+        }
+
+        Alias(_, args, real_type_var, _) => {
+            for var_index in args.all_variables() {
                 let var = subs[var_index];
                 instantiate_rigids_help(subs, max_rank, pools, var);
             }
 
             instantiate_rigids_help(subs, max_rank, pools, real_type_var);
+        }
+
+        RangedNumber(typ, _vars) => {
+            instantiate_rigids_help(subs, max_rank, pools, typ);
         }
     }
 
@@ -1763,7 +1798,7 @@ fn deep_copy_var_help(
             copy
         }
 
-        FlexVar(_) | Error => copy,
+        FlexVar(_) | FlexAbleVar(_, _) | Error => copy,
 
         RecursionVar {
             opt_name,
@@ -1788,10 +1823,16 @@ fn deep_copy_var_help(
             copy
         }
 
-        Alias(symbol, mut args, real_type_var) => {
-            let mut new_args = Vec::with_capacity(args.variables().len());
+        RigidAbleVar(name, ability) => {
+            subs.set(copy, make_descriptor(FlexAbleVar(Some(name), ability)));
 
-            for var_index in args.variables() {
+            copy
+        }
+
+        Alias(symbol, mut args, real_type_var, kind) => {
+            let mut new_args = Vec::with_capacity(args.all_variables().len());
+
+            for var_index in args.all_variables() {
                 let var = subs[var_index];
                 let new_var = deep_copy_var_help(subs, max_rank, pools, var);
                 new_args.push(new_var);
@@ -1800,7 +1841,26 @@ fn deep_copy_var_help(
             args.replace_variables(subs, new_args);
 
             let new_real_type_var = deep_copy_var_help(subs, max_rank, pools, real_type_var);
-            let new_content = Alias(symbol, args, new_real_type_var);
+            let new_content = Alias(symbol, args, new_real_type_var, kind);
+
+            subs.set(copy, make_descriptor(new_content));
+
+            copy
+        }
+
+        RangedNumber(typ, vars) => {
+            let mut new_vars = Vec::with_capacity(vars.len());
+
+            for var_index in vars {
+                let var = subs[var_index];
+                let new_var = deep_copy_var_help(subs, max_rank, pools, var);
+                new_vars.push(new_var);
+            }
+
+            let new_slice = VariableSubsSlice::insert_into_subs(subs, new_vars.drain(..));
+
+            let new_real_type = deep_copy_var_help(subs, max_rank, pools, typ);
+            let new_content = RangedNumber(new_real_type, new_slice);
 
             subs.set(copy, make_descriptor(new_content));
 

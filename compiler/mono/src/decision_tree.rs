@@ -1,10 +1,10 @@
-use crate::exhaustive::{Ctor, RenderAs, TagId, Union};
 use crate::ir::{
     BranchInfo, DestructType, Env, Expr, JoinPointId, Literal, Param, Pattern, Procs, Stmt,
 };
 use crate::layout::{Builtin, Layout, LayoutCache, TagIdIntType, UnionLayout};
 use roc_builtins::bitcode::{FloatWidth, IntWidth};
 use roc_collections::all::{MutMap, MutSet};
+use roc_exhaustive::{Ctor, CtorName, RenderAs, TagId, Union};
 use roc_module::ident::TagName;
 use roc_module::low_level::LowLevel;
 use roc_module::symbol::Symbol;
@@ -82,11 +82,12 @@ enum GuardedTest<'a> {
 enum Test<'a> {
     IsCtor {
         tag_id: TagIdIntType,
-        tag_name: TagName,
-        union: crate::exhaustive::Union,
+        ctor_name: CtorName,
+        union: roc_exhaustive::Union,
         arguments: Vec<(Pattern<'a>, Layout<'a>)>,
     },
     IsInt(i128, IntWidth),
+    IsU128(u128),
     IsFloat(u64, FloatWidth),
     IsDecimal(RocDec),
     IsStr(Box<str>),
@@ -134,7 +135,11 @@ impl<'a> Hash for Test<'a> {
             IsDecimal(v) => {
                 // TODO: Is this okay?
                 state.write_u8(6);
-                v.0.hash(state);
+                v.hash(state);
+            }
+            IsU128(v) => {
+                state.write_u8(7);
+                v.hash(state);
             }
         }
     }
@@ -311,6 +316,7 @@ fn tests_are_complete_help(last_test: &Test, number_of_tests: usize) -> bool {
         Test::IsByte { num_alts, .. } => number_of_tests == *num_alts,
         Test::IsBit(_) => number_of_tests == 2,
         Test::IsInt(_, _) => false,
+        Test::IsU128(_) => false,
         Test::IsFloat(_, _) => false,
         Test::IsDecimal(_) => false,
         Test::IsStr(_) => false,
@@ -506,7 +512,7 @@ fn test_at_path<'a>(
                         render_as: RenderAs::Tag,
                         alternatives: vec![Ctor {
                             tag_id: TagId(0),
-                            name: TagName::Global(RECORD_TAG_NAME.into()),
+                            name: CtorName::Tag(TagName::Tag(RECORD_TAG_NAME.into())),
                             arity: destructs.len(),
                         }],
                     };
@@ -526,7 +532,7 @@ fn test_at_path<'a>(
 
                     IsCtor {
                         tag_id: 0,
-                        tag_name: TagName::Global(RECORD_TAG_NAME.into()),
+                        ctor_name: CtorName::Tag(TagName::Tag(RECORD_TAG_NAME.into())),
                         union,
                         arguments,
                     }
@@ -537,11 +543,12 @@ fn test_at_path<'a>(
                     arguments,
                 } => {
                     let tag_id = 0;
-                    let union = Union::newtype_wrapper(tag_name.clone(), arguments.len());
+                    let union =
+                        Union::newtype_wrapper(CtorName::Tag(tag_name.clone()), arguments.len());
 
                     IsCtor {
                         tag_id,
-                        tag_name: tag_name.clone(),
+                        ctor_name: CtorName::Tag(tag_name.clone()),
                         union,
                         arguments: arguments.to_vec(),
                     }
@@ -555,16 +562,36 @@ fn test_at_path<'a>(
                     ..
                 } => IsCtor {
                     tag_id: *tag_id,
-                    tag_name: tag_name.clone(),
+                    ctor_name: CtorName::Tag(tag_name.clone()),
                     union: union.clone(),
                     arguments: arguments.to_vec(),
                 },
+
+                OpaqueUnwrap { opaque, argument } => {
+                    let union = Union {
+                        render_as: RenderAs::Tag,
+                        alternatives: vec![Ctor {
+                            tag_id: TagId(0),
+                            name: CtorName::Opaque(*opaque),
+                            arity: 1,
+                        }],
+                    };
+
+                    IsCtor {
+                        tag_id: 0,
+                        ctor_name: CtorName::Opaque(*opaque),
+                        union,
+                        arguments: vec![(**argument).clone()],
+                    }
+                }
+
                 BitLiteral { value, .. } => IsBit(*value),
                 EnumLiteral { tag_id, union, .. } => IsByte {
                     tag_id: *tag_id as _,
                     num_alts: union.alternatives.len(),
                 },
                 IntLiteral(v, precision) => IsInt(*v, *precision),
+                U128Literal(v) => IsU128(*v),
                 FloatLiteral(v, precision) => IsFloat(*v, *precision),
                 DecimalLiteral(v) => IsDecimal(*v),
                 StrLiteral(v) => IsStr(v.clone()),
@@ -654,11 +681,11 @@ fn to_relevant_branch_help<'a>(
 
         RecordDestructure(destructs, _) => match test {
             IsCtor {
-                tag_name: test_name,
+                ctor_name: test_name,
                 tag_id,
                 ..
             } => {
-                debug_assert!(test_name == &TagName::Global(RECORD_TAG_NAME.into()));
+                debug_assert!(test_name == &CtorName::Tag(TagName::Tag(RECORD_TAG_NAME.into())));
                 let sub_positions = destructs.into_iter().enumerate().map(|(index, destruct)| {
                     let pattern = match destruct.typ {
                         DestructType::Guard(guard) => guard.clone(),
@@ -685,16 +712,43 @@ fn to_relevant_branch_help<'a>(
             _ => None,
         },
 
+        OpaqueUnwrap { opaque, argument } => match test {
+            IsCtor {
+                ctor_name: test_opaque_tag_name,
+                tag_id,
+                ..
+            } => {
+                debug_assert_eq!(test_opaque_tag_name, &CtorName::Opaque(opaque));
+
+                let (argument, _) = *argument;
+
+                let mut new_path = path.to_vec();
+                new_path.push(PathInstruction {
+                    index: 0,
+                    tag_id: *tag_id,
+                });
+
+                start.push((new_path, argument));
+                start.extend(end);
+                Some(Branch {
+                    goal: branch.goal,
+                    guard: branch.guard.clone(),
+                    patterns: start,
+                })
+            }
+            _ => None,
+        },
+
         NewtypeDestructure {
             tag_name,
             arguments,
             ..
         } => match test {
             IsCtor {
-                tag_name: test_name,
+                ctor_name: test_name,
                 tag_id: test_id,
                 ..
-            } if &tag_name == test_name => {
+            } if test_name.is_tag(&tag_name) => {
                 let tag_id = 0;
                 debug_assert_eq!(tag_id, *test_id);
 
@@ -732,15 +786,19 @@ fn to_relevant_branch_help<'a>(
         } => {
             match test {
                 IsCtor {
-                    tag_name: test_name,
+                    ctor_name: test_name,
                     tag_id: test_id,
                     ..
-                } if &tag_name == test_name => {
+                } if test_name.is_tag(&tag_name) => {
                     debug_assert_eq!(tag_id, *test_id);
 
                     // the test matches the constructor of this pattern
                     match layout {
-                        UnionLayout::NonRecursive([[Layout::Struct([_])]]) => {
+                        UnionLayout::NonRecursive(
+                            [[Layout::Struct {
+                                field_layouts: [_], ..
+                            }]],
+                        ) => {
                             // a one-element record equivalent
                             // Theory: Unbox doesn't have any value for us
                             debug_assert_eq!(arguments.len(), 1);
@@ -823,6 +881,18 @@ fn to_relevant_branch_help<'a>(
             _ => None,
         },
 
+        U128Literal(int) => match test {
+            IsU128(is_int) if int == *is_int => {
+                start.extend(end);
+                Some(Branch {
+                    goal: branch.goal,
+                    guard: branch.guard.clone(),
+                    patterns: start,
+                })
+            }
+            _ => None,
+        },
+
         FloatLiteral(float, p1) => match test {
             IsFloat(test_float, p2) if float == *test_float => {
                 debug_assert_eq!(p1, *p2);
@@ -837,7 +907,7 @@ fn to_relevant_branch_help<'a>(
         },
 
         DecimalLiteral(dec) => match test {
-            IsDecimal(test_dec) if dec.0 == test_dec.0 => {
+            IsDecimal(test_dec) if dec.eq(test_dec) => {
                 start.extend(end);
                 Some(Branch {
                     goal: branch.goal,
@@ -931,9 +1001,11 @@ fn needs_tests(pattern: &Pattern) -> bool {
         RecordDestructure(_, _)
         | NewtypeDestructure { .. }
         | AppliedTag { .. }
+        | OpaqueUnwrap { .. }
         | BitLiteral { .. }
         | EnumLiteral { .. }
         | IntLiteral(_, _)
+        | U128Literal(_)
         | FloatLiteral(_, _)
         | DecimalLiteral(_)
         | StrLiteral(_) => true,
@@ -1215,7 +1287,7 @@ fn path_to_expr_help<'a>(
                 layout = inner_layout;
             }
 
-            Layout::Struct(field_layouts) => {
+            Layout::Struct { field_layouts, .. } => {
                 debug_assert!(field_layouts.len() > 1);
 
                 let inner_expr = Expr::StructAtIndex {
@@ -1295,12 +1367,21 @@ fn test_to_equality<'a>(
                 _ => unreachable!("{:?}", (cond_layout, union)),
             }
         }
+
         Test::IsInt(test_int, precision) => {
             // TODO don't downcast i128 here
             debug_assert!(test_int <= i64::MAX as i128);
             let lhs = Expr::Literal(Literal::Int(test_int as i128));
             let lhs_symbol = env.unique_symbol();
             stores.push((lhs_symbol, Layout::int_width(precision), lhs));
+
+            (stores, lhs_symbol, rhs_symbol, None)
+        }
+
+        Test::IsU128(test_int) => {
+            let lhs = Expr::Literal(Literal::U128(test_int));
+            let lhs_symbol = env.unique_symbol();
+            stores.push((lhs_symbol, Layout::int_width(IntWidth::U128), lhs));
 
             (stores, lhs_symbol, rhs_symbol, None)
         }
@@ -1316,7 +1397,7 @@ fn test_to_equality<'a>(
         }
 
         Test::IsDecimal(test_dec) => {
-            let lhs = Expr::Literal(Literal::Int(test_dec.0));
+            let lhs = Expr::Literal(Literal::Decimal(test_dec));
             let lhs_symbol = env.unique_symbol();
             stores.push((lhs_symbol, *cond_layout, lhs));
 

@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 
-use crate::header::{AppHeader, InterfaceHeader, PlatformHeader};
+use crate::header::{AppHeader, HostedHeader, InterfaceHeader, PlatformHeader};
 use crate::ident::Ident;
 use bumpalo::collections::{String, Vec};
 use bumpalo::Bump;
@@ -21,6 +21,20 @@ pub enum Spaced<'a, T> {
     // Spaces
     SpaceBefore(&'a Spaced<'a, T>, &'a [CommentOrNewline<'a>]),
     SpaceAfter(&'a Spaced<'a, T>, &'a [CommentOrNewline<'a>]),
+}
+
+impl<'a, T> Spaced<'a, T> {
+    /// A `Spaced` is multiline if it has newlines or comments before or after the item, since
+    /// comments induce newlines!
+    pub fn is_multiline(&self) -> bool {
+        match self {
+            Spaced::Item(_) => false,
+            Spaced::SpaceBefore(_, spaces) | Spaced::SpaceAfter(_, spaces) => {
+                debug_assert!(!spaces.is_empty());
+                true
+            }
+        }
+    }
 }
 
 impl<'a, T: Debug> Debug for Spaced<'a, T> {
@@ -70,6 +84,7 @@ pub enum Module<'a> {
     Interface { header: InterfaceHeader<'a> },
     App { header: AppHeader<'a> },
     Platform { header: PlatformHeader<'a> },
+    Hosted { header: HostedHeader<'a> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -151,6 +166,8 @@ pub enum Expr<'a> {
     Access(&'a Expr<'a>, &'a str),
     /// e.g. `.foo`
     AccessorFunction(&'a str),
+    /// eg 'b'
+    SingleQuote(&'a str),
 
     // Collection Literals
     List(Collection<'a, &'a Loc<Expr<'a>>>),
@@ -171,8 +188,10 @@ pub enum Expr<'a> {
     Underscore(&'a str),
 
     // Tags
-    GlobalTag(&'a str),
-    PrivateTag(&'a str),
+    Tag(&'a str),
+
+    // Reference to an opaque type, e.g. @Opaq
+    OpaqueRef(&'a str),
 
     // Pattern Matching
     Closure(&'a [Loc<Pattern<'a>>], &'a Loc<Expr<'a>>),
@@ -226,25 +245,75 @@ pub struct PrecedenceConflict<'a> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct AliasHeader<'a> {
+pub struct TypeHeader<'a> {
     pub name: Loc<&'a str>,
     pub vars: &'a [Loc<Pattern<'a>>],
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Def<'a> {
-    // TODO in canonicalization, validate the pattern; only certain patterns
-    // are allowed in annotations.
-    Annotation(Loc<Pattern<'a>>, Loc<TypeAnnotation<'a>>),
+impl<'a> TypeHeader<'a> {
+    pub fn region(&self) -> Region {
+        Region::across_all(
+            [self.name.region]
+                .iter()
+                .chain(self.vars.iter().map(|v| &v.region)),
+        )
+    }
+}
 
+/// The `has` keyword associated with ability definitions.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Has<'a> {
+    Has,
+    SpaceBefore(&'a Has<'a>, &'a [CommentOrNewline<'a>]),
+    SpaceAfter(&'a Has<'a>, &'a [CommentOrNewline<'a>]),
+}
+
+/// An ability demand is a value defining the ability; for example `hash : a -> U64 | a has Hash`
+/// for a `Hash` ability.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AbilityMember<'a> {
+    pub name: Loc<Spaced<'a, &'a str>>,
+    pub typ: Loc<TypeAnnotation<'a>>,
+}
+
+impl AbilityMember<'_> {
+    pub fn region(&self) -> Region {
+        Region::across_all([self.name.region, self.typ.region].iter())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TypeDef<'a> {
     /// A type alias. This is like a standalone annotation, except the pattern
     /// must be a capitalized Identifier, e.g.
     ///
     /// Foo : Bar Baz
     Alias {
-        header: AliasHeader<'a>,
+        header: TypeHeader<'a>,
         ann: Loc<TypeAnnotation<'a>>,
     },
+
+    /// An opaque type, wrapping its inner type. E.g. Age := U64.
+    Opaque {
+        header: TypeHeader<'a>,
+        typ: Loc<TypeAnnotation<'a>>,
+    },
+
+    /// An ability definition. E.g.
+    ///   Hash has
+    ///     hash : a -> U64 | a has Hash
+    Ability {
+        header: TypeHeader<'a>,
+        loc_has: Loc<Has<'a>>,
+        members: &'a [AbilityMember<'a>],
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ValueDef<'a> {
+    // TODO in canonicalization, validate the pattern; only certain patterns
+    // are allowed in annotations.
+    Annotation(Loc<Pattern<'a>>, Loc<TypeAnnotation<'a>>),
 
     // TODO in canonicalization, check to see if there are any newlines after the
     // annotation; if not, and if it's followed by a Body, then the annotation
@@ -261,6 +330,12 @@ pub enum Def<'a> {
     },
 
     Expect(&'a Loc<Expr<'a>>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Def<'a> {
+    Type(TypeDef<'a>),
+    Value(ValueDef<'a>),
 
     // Blank Space (e.g. comments, spaces, newlines) before or after a def.
     // We preserve this for the formatter; canonicalization ignores it.
@@ -279,6 +354,37 @@ impl<'a> Def<'a> {
         debug_assert!(!matches!(def, Def::SpaceBefore(_, _)));
         (spaces, def)
     }
+
+    pub fn unroll_def(&self) -> Result<&TypeDef<'a>, &ValueDef<'a>> {
+        let mut def = self;
+        loop {
+            match def {
+                Def::Type(type_def) => return Ok(type_def),
+                Def::Value(value_def) => return Err(value_def),
+                Def::SpaceBefore(def1, _) | Def::SpaceAfter(def1, _) => def = def1,
+                Def::NotYetImplemented(s) => todo!("{}", s),
+            }
+        }
+    }
+}
+
+impl<'a> From<TypeDef<'a>> for Def<'a> {
+    fn from(def: TypeDef<'a>) -> Self {
+        Self::Type(def)
+    }
+}
+
+impl<'a> From<ValueDef<'a>> for Def<'a> {
+    fn from(def: ValueDef<'a>) -> Self {
+        Self::Value(def)
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub struct HasClause<'a> {
+    pub var: Loc<Spaced<'a, &'a str>>,
+    // Should always be a zero-argument `Apply`; we'll check this in canonicalization
+    pub ability: Loc<TypeAnnotation<'a>>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -296,7 +402,7 @@ pub enum TypeAnnotation<'a> {
     As(
         &'a Loc<TypeAnnotation<'a>>,
         &'a [CommentOrNewline<'a>],
-        AliasHeader<'a>,
+        TypeHeader<'a>,
     ),
 
     Record {
@@ -320,6 +426,9 @@ pub enum TypeAnnotation<'a> {
     /// The `*` type variable, e.g. in (List *)
     Wildcard,
 
+    /// A "where" clause demanding abilities designated by a `|`, e.g. `a -> U64 | a has Hash`
+    Where(&'a Loc<TypeAnnotation<'a>>, &'a [Loc<HasClause<'a>>]),
+
     // We preserve this for the formatter; canonicalization ignores it.
     SpaceBefore(&'a TypeAnnotation<'a>, &'a [CommentOrNewline<'a>]),
     SpaceAfter(&'a TypeAnnotation<'a>, &'a [CommentOrNewline<'a>]),
@@ -330,12 +439,7 @@ pub enum TypeAnnotation<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Tag<'a> {
-    Global {
-        name: Loc<&'a str>,
-        args: &'a [Loc<TypeAnnotation<'a>>],
-    },
-
-    Private {
+    Apply {
         name: Loc<&'a str>,
         args: &'a [Loc<TypeAnnotation<'a>>],
     },
@@ -395,6 +499,15 @@ impl<'a> CommentOrNewline<'a> {
             DocComment(_) => false,
         }
     }
+
+    pub fn to_string_repr(&self) -> std::string::String {
+        use CommentOrNewline::*;
+        match self {
+            Newline => "\n".to_owned(),
+            LineComment(comment_str) => format!("#{}", comment_str),
+            DocComment(comment_str) => format!("##{}", comment_str),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -402,8 +515,10 @@ pub enum Pattern<'a> {
     // Identifier
     Identifier(&'a str),
 
-    GlobalTag(&'a str),
-    PrivateTag(&'a str),
+    Tag(&'a str),
+
+    OpaqueRef(&'a str),
+
     Apply(&'a Loc<Pattern<'a>>, &'a [Loc<Pattern<'a>>]),
 
     /// This is Located<Pattern> rather than Located<str> so we can record comments
@@ -429,6 +544,7 @@ pub enum Pattern<'a> {
     FloatLiteral(&'a str),
     StrLiteral(StrLiteral<'a>),
     Underscore(&'a str),
+    SingleQuote(&'a str),
 
     // Space
     SpaceBefore(&'a Pattern<'a>, &'a [CommentOrNewline<'a>]),
@@ -454,8 +570,8 @@ pub enum Base {
 impl<'a> Pattern<'a> {
     pub fn from_ident(arena: &'a Bump, ident: Ident<'a>) -> Pattern<'a> {
         match ident {
-            Ident::GlobalTag(string) => Pattern::GlobalTag(string),
-            Ident::PrivateTag(string) => Pattern::PrivateTag(string),
+            Ident::Tag(string) => Pattern::Tag(string),
+            Ident::OpaqueRef(string) => Pattern::OpaqueRef(string),
             Ident::Access { module_name, parts } => {
                 if parts.len() == 1 {
                     // This is valid iff there is no module.
@@ -503,8 +619,7 @@ impl<'a> Pattern<'a> {
 
         match (self, other) {
             (Identifier(x), Identifier(y)) => x == y,
-            (GlobalTag(x), GlobalTag(y)) => x == y,
-            (PrivateTag(x), PrivateTag(y)) => x == y,
+            (Tag(x), Tag(y)) => x == y,
             (Apply(constructor_x, args_x), Apply(constructor_y, args_y)) => {
                 let equivalent_args = args_x
                     .iter()
@@ -586,7 +701,7 @@ impl<'a, T> Collection<'a, T> {
         }
     }
 
-    pub fn with_items(items: &'a [T]) -> Collection<'a, T> {
+    pub const fn with_items(items: &'a [T]) -> Collection<'a, T> {
         Collection {
             items,
             final_comments: None,
@@ -777,6 +892,15 @@ impl<'a> Spaceable<'a> for Def<'a> {
     }
 }
 
+impl<'a> Spaceable<'a> for Has<'a> {
+    fn before(&'a self, spaces: &'a [CommentOrNewline<'a>]) -> Self {
+        Has::SpaceBefore(self, spaces)
+    }
+    fn after(&'a self, spaces: &'a [CommentOrNewline<'a>]) -> Self {
+        Has::SpaceAfter(self, spaces)
+    }
+}
+
 impl<'a> Expr<'a> {
     pub fn loc_ref(&'a self, region: Region) -> Loc<&'a Self> {
         Loc {
@@ -793,7 +917,7 @@ impl<'a> Expr<'a> {
     }
 
     pub fn is_tag(&self) -> bool {
-        matches!(self, Expr::GlobalTag(_) | Expr::PrivateTag(_))
+        matches!(self, Expr::Tag(_))
     }
 }
 

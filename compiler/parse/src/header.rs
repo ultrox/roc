@@ -1,12 +1,39 @@
 use crate::ast::{Collection, CommentOrNewline, Spaced, StrLiteral, TypeAnnotation};
 use crate::blankspace::space0_e;
-use crate::ident::lowercase_ident;
+use crate::ident::{lowercase_ident, UppercaseIdent};
 use crate::parser::Progress::*;
 use crate::parser::{specialize, word1, EPackageEntry, EPackageName, Parser};
 use crate::state::State;
 use crate::string_literal;
 use bumpalo::collections::Vec;
+use roc_module::symbol::Symbol;
 use roc_region::all::Loc;
+
+#[derive(Debug)]
+pub enum HeaderFor<'a> {
+    App {
+        to_platform: To<'a>,
+    },
+    Hosted {
+        generates: UppercaseIdent<'a>,
+        generates_with: &'a [Loc<ExposedName<'a>>],
+    },
+    /// Only created during canonicalization, never actually parsed from source
+    Builtin {
+        generates_with: &'a [Symbol],
+    },
+    PkgConfig {
+        /// usually `pf`
+        config_shorthand: &'a str,
+        /// the type scheme of the main function (required by the platform)
+        /// (currently unused)
+        #[allow(dead_code)]
+        platform_main_type: TypedIdent<'a>,
+        /// provided symbol to host (commonly `mainForHost`)
+        main_for_host: roc_module::symbol::Symbol,
+    },
+    Interface,
+}
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
 pub enum Version<'a> {
@@ -38,13 +65,22 @@ impl<'a> From<ModuleName<'a>> for &'a str {
 }
 
 impl<'a> ModuleName<'a> {
-    pub fn new(name: &'a str) -> Self {
+    pub const fn new(name: &'a str) -> Self {
         ModuleName(name)
     }
 
-    pub fn as_str(&'a self) -> &'a str {
+    pub const fn as_str(&'a self) -> &'a str {
         self.0
     }
+}
+
+#[derive(Debug)]
+pub enum ModuleNameEnum<'a> {
+    /// A filename
+    App(StrLiteral<'a>),
+    Interface(ModuleName<'a>),
+    Hosted(ModuleName<'a>),
+    PkgConfig,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
@@ -57,7 +93,7 @@ impl<'a> From<ExposedName<'a>> for &'a str {
 }
 
 impl<'a> ExposedName<'a> {
-    pub fn new(name: &'a str) -> Self {
+    pub const fn new(name: &'a str) -> Self {
         ExposedName(name)
     }
 
@@ -81,6 +117,27 @@ pub struct InterfaceHeader<'a> {
     pub after_imports: &'a [CommentOrNewline<'a>],
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct HostedHeader<'a> {
+    pub name: Loc<ModuleName<'a>>,
+    pub exposes: Collection<'a, Loc<Spaced<'a, ExposedName<'a>>>>,
+    pub imports: Collection<'a, Loc<Spaced<'a, ImportsEntry<'a>>>>,
+    pub generates: UppercaseIdent<'a>,
+    pub generates_with: Collection<'a, Loc<Spaced<'a, ExposedName<'a>>>>,
+
+    // Potential comments and newlines - these will typically all be empty.
+    pub before_header: &'a [CommentOrNewline<'a>],
+    pub after_hosted_keyword: &'a [CommentOrNewline<'a>],
+    pub before_exposes: &'a [CommentOrNewline<'a>],
+    pub after_exposes: &'a [CommentOrNewline<'a>],
+    pub before_imports: &'a [CommentOrNewline<'a>],
+    pub after_imports: &'a [CommentOrNewline<'a>],
+    pub before_generates: &'a [CommentOrNewline<'a>],
+    pub after_generates: &'a [CommentOrNewline<'a>],
+    pub before_with: &'a [CommentOrNewline<'a>],
+    pub after_with: &'a [CommentOrNewline<'a>],
+}
+
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum To<'a> {
     ExistingPackage(&'a str),
@@ -93,6 +150,7 @@ pub struct AppHeader<'a> {
     pub packages: Collection<'a, Loc<Spaced<'a, PackageEntry<'a>>>>,
     pub imports: Collection<'a, Loc<Spaced<'a, ImportsEntry<'a>>>>,
     pub provides: Collection<'a, Loc<Spaced<'a, ExposedName<'a>>>>,
+    pub provides_types: Option<Collection<'a, Loc<Spaced<'a, UppercaseIdent<'a>>>>>,
     pub to: Loc<To<'a>>,
 
     // Potential comments and newlines - these will typically all be empty.
@@ -126,15 +184,9 @@ pub struct PackageHeader<'a> {
     pub after_imports: &'a [CommentOrNewline<'a>],
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub struct PlatformRigid<'a> {
-    pub rigid: &'a str,
-    pub alias: &'a str,
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlatformRequires<'a> {
-    pub rigids: Collection<'a, Loc<Spaced<'a, PlatformRigid<'a>>>>,
+    pub rigids: Collection<'a, Loc<Spaced<'a, UppercaseIdent<'a>>>>,
     pub signature: Loc<Spaced<'a, TypedIdent<'a>>>,
 }
 
@@ -146,7 +198,6 @@ pub struct PlatformHeader<'a> {
     pub packages: Collection<'a, Loc<Spaced<'a, PackageEntry<'a>>>>,
     pub imports: Collection<'a, Loc<Spaced<'a, ImportsEntry<'a>>>>,
     pub provides: Collection<'a, Loc<Spaced<'a, ExposedName<'a>>>>,
-    pub effects: Effects<'a>,
 
     // Potential comments and newlines - these will typically all be empty.
     pub before_header: &'a [CommentOrNewline<'a>],
@@ -161,17 +212,6 @@ pub struct PlatformHeader<'a> {
     pub after_imports: &'a [CommentOrNewline<'a>],
     pub before_provides: &'a [CommentOrNewline<'a>],
     pub after_provides: &'a [CommentOrNewline<'a>],
-}
-
-/// e.g. fx.Effects
-#[derive(Clone, Debug, PartialEq)]
-pub struct Effects<'a> {
-    pub spaces_before_effects_keyword: &'a [CommentOrNewline<'a>],
-    pub spaces_after_effects_keyword: &'a [CommentOrNewline<'a>],
-    pub spaces_after_type_name: &'a [CommentOrNewline<'a>],
-    pub effect_shortname: &'a str,
-    pub effect_type_name: &'a str,
-    pub entries: Collection<'a, Loc<Spaced<'a, TypedIdent<'a>>>>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -220,11 +260,7 @@ pub fn package_entry<'a>() -> impl Parser<'a, Spaced<'a, PackageEntry<'a>>, EPac
                 specialize(|_, pos| EPackageEntry::Shorthand(pos), lowercase_ident()),
                 word1(b':', EPackageEntry::Colon)
             ),
-            space0_e(
-                min_indent,
-                EPackageEntry::Space,
-                EPackageEntry::IndentPackage
-            )
+            space0_e(min_indent, EPackageEntry::IndentPackage)
         ))
         .parse(arena, state)?;
 

@@ -1,60 +1,73 @@
 const std = @import("std");
 const always_inline = std.builtin.CallOptions.Modifier.always_inline;
+const Monotonic = std.builtin.AtomicOrder.Monotonic;
 
 pub fn WithOverflow(comptime T: type) type {
     return extern struct { value: T, has_overflowed: bool };
 }
 
 // If allocation fails, this must cxa_throw - it must not return a null pointer!
-extern fn roc_alloc(size: usize, alignment: u32) callconv(.C) ?*c_void;
+extern fn roc_alloc(size: usize, alignment: u32) callconv(.C) ?*anyopaque;
 
 // This should never be passed a null pointer.
 // If allocation fails, this must cxa_throw - it must not return a null pointer!
-extern fn roc_realloc(c_ptr: *c_void, new_size: usize, old_size: usize, alignment: u32) callconv(.C) ?*c_void;
+extern fn roc_realloc(c_ptr: *anyopaque, new_size: usize, old_size: usize, alignment: u32) callconv(.C) ?*anyopaque;
 
 // This should never be passed a null pointer.
-extern fn roc_dealloc(c_ptr: *c_void, alignment: u32) callconv(.C) void;
+extern fn roc_dealloc(c_ptr: *anyopaque, alignment: u32) callconv(.C) void;
 
 // Signals to the host that the program has panicked
-extern fn roc_panic(c_ptr: *c_void, tag_id: u32) callconv(.C) void;
+extern fn roc_panic(c_ptr: *anyopaque, tag_id: u32) callconv(.C) void;
+
+// should work just like libc memcpy (we can't assume libc is present)
+extern fn roc_memcpy(dst: [*]u8, src: [*]u8, size: usize) callconv(.C) void;
 
 comptime {
     const builtin = @import("builtin");
-    // During tetsts, use the testing allocators to satisfy these functions.
+    // During tests, use the testing allocators to satisfy these functions.
     if (builtin.is_test) {
         @export(testing_roc_alloc, .{ .name = "roc_alloc", .linkage = .Strong });
         @export(testing_roc_realloc, .{ .name = "roc_realloc", .linkage = .Strong });
         @export(testing_roc_dealloc, .{ .name = "roc_dealloc", .linkage = .Strong });
         @export(testing_roc_panic, .{ .name = "roc_panic", .linkage = .Strong });
+        @export(testing_roc_memcpy, .{ .name = "roc_memcpy", .linkage = .Strong });
     }
 }
 
-fn testing_roc_alloc(size: usize, _: u32) callconv(.C) ?*c_void {
-    return @ptrCast(?*c_void, std.testing.allocator.alloc(u8, size) catch unreachable);
+fn testing_roc_alloc(size: usize, _: u32) callconv(.C) ?*anyopaque {
+    return @ptrCast(?*anyopaque, std.testing.allocator.alloc(u8, size) catch unreachable);
 }
 
-fn testing_roc_realloc(c_ptr: *c_void, new_size: usize, old_size: usize, _: u32) callconv(.C) ?*c_void {
-    const ptr = @ptrCast([*]u8, @alignCast(16, c_ptr));
+fn testing_roc_realloc(c_ptr: *anyopaque, new_size: usize, old_size: usize, _: u32) callconv(.C) ?*anyopaque {
+    const ptr = @ptrCast([*]u8, @alignCast(2 * @alignOf(usize), c_ptr));
     const slice = ptr[0..old_size];
 
-    return @ptrCast(?*c_void, std.testing.allocator.realloc(slice, new_size) catch unreachable);
+    return @ptrCast(?*anyopaque, std.testing.allocator.realloc(slice, new_size) catch unreachable);
 }
 
-fn testing_roc_dealloc(c_ptr: *c_void, _: u32) callconv(.C) void {
-    const ptr = @ptrCast([*]u8, @alignCast(16, c_ptr));
+fn testing_roc_dealloc(c_ptr: *anyopaque, _: u32) callconv(.C) void {
+    const ptr = @ptrCast([*]u8, @alignCast(2 * @alignOf(usize), c_ptr));
 
     std.testing.allocator.destroy(ptr);
 }
 
-fn testing_roc_panic(c_ptr: *c_void, tag_id: u32) callconv(.C) void {
+fn testing_roc_panic(c_ptr: *anyopaque, tag_id: u32) callconv(.C) void {
     _ = c_ptr;
     _ = tag_id;
 
     @panic("Roc panicked");
 }
 
-pub fn alloc(size: usize, alignment: u32) [*]u8 {
-    return @ptrCast([*]u8, @call(.{ .modifier = always_inline }, roc_alloc, .{ size, alignment }));
+fn testing_roc_memcpy(dest: *anyopaque, src: *anyopaque, bytes: usize) callconv(.C) ?*anyopaque {
+    const zig_dest = @ptrCast([*]u8, dest);
+    const zig_src = @ptrCast([*]u8, src);
+
+    @memcpy(zig_dest, zig_src, bytes);
+    return dest;
+}
+
+pub fn alloc(size: usize, alignment: u32) ?[*]u8 {
+    return @ptrCast(?[*]u8, @call(.{ .modifier = always_inline }, roc_alloc, .{ size, alignment }));
 }
 
 pub fn realloc(c_ptr: [*]u8, new_size: usize, old_size: usize, alignment: u32) [*]u8 {
@@ -66,13 +79,17 @@ pub fn dealloc(c_ptr: [*]u8, alignment: u32) void {
 }
 
 // must export this explicitly because right now it is not used from zig code
-pub fn panic(c_ptr: *c_void, alignment: u32) callconv(.C) void {
+pub fn panic(c_ptr: *anyopaque, alignment: u32) callconv(.C) void {
     return @call(.{ .modifier = always_inline }, roc_panic, .{ c_ptr, alignment });
+}
+
+pub fn memcpy(dst: [*]u8, src: [*]u8, size: usize) void {
+    @call(.{ .modifier = always_inline }, roc_memcpy, .{ dst, src, size });
 }
 
 // indirection because otherwise zig creates an alias to the panic function which our LLVM code
 // does not know how to deal with
-pub fn test_panic(c_ptr: *c_void, alignment: u32) callconv(.C) void {
+pub fn test_panic(c_ptr: *anyopaque, alignment: u32) callconv(.C) void {
     _ = c_ptr;
     _ = alignment;
     // const cstr = @ptrCast([*:0]u8, c_ptr);
@@ -104,10 +121,32 @@ pub const IntWidth = enum(u8) {
     I128 = 9,
 };
 
+const Refcount = enum {
+    none,
+    normal,
+    atomic,
+};
+
+const RC_TYPE = Refcount.normal;
+
 pub fn increfC(ptr_to_refcount: *isize, amount: isize) callconv(.C) void {
+    if (RC_TYPE == Refcount.none) return;
     var refcount = ptr_to_refcount.*;
-    var masked_amount = if (refcount == REFCOUNT_MAX_ISIZE) 0 else amount;
-    ptr_to_refcount.* = refcount + masked_amount;
+    if (refcount < REFCOUNT_MAX_ISIZE) {
+        switch (RC_TYPE) {
+            Refcount.normal => {
+                ptr_to_refcount.* = std.math.min(refcount + amount, REFCOUNT_MAX_ISIZE);
+            },
+            Refcount.atomic => {
+                var next = std.math.min(refcount + amount, REFCOUNT_MAX_ISIZE);
+                while (@cmpxchgWeak(isize, ptr_to_refcount, refcount, next, Monotonic, Monotonic)) |found| {
+                    refcount = found;
+                    next = std.math.min(refcount + amount, REFCOUNT_MAX_ISIZE);
+                }
+            },
+            Refcount.none => unreachable,
+        }
+    }
 }
 
 pub fn decrefC(
@@ -153,69 +192,57 @@ inline fn decref_ptr_to_refcount(
     refcount_ptr: [*]isize,
     alignment: u32,
 ) void {
-    const refcount: isize = refcount_ptr[0];
+    if (RC_TYPE == Refcount.none) return;
     const extra_bytes = std.math.max(alignment, @sizeOf(usize));
-
-    if (refcount == REFCOUNT_ONE_ISIZE) {
-        dealloc(@ptrCast([*]u8, refcount_ptr) - (extra_bytes - @sizeOf(usize)), alignment);
-    } else if (refcount < 0) {
-        refcount_ptr[0] = refcount - 1;
+    switch (RC_TYPE) {
+        Refcount.normal => {
+            const refcount: isize = refcount_ptr[0];
+            if (refcount == REFCOUNT_ONE_ISIZE) {
+                dealloc(@ptrCast([*]u8, refcount_ptr) - (extra_bytes - @sizeOf(usize)), alignment);
+            } else if (refcount < REFCOUNT_MAX_ISIZE) {
+                refcount_ptr[0] = refcount - 1;
+            }
+        },
+        Refcount.atomic => {
+            if (refcount_ptr[0] < REFCOUNT_MAX_ISIZE) {
+                var last = @atomicRmw(isize, &refcount_ptr[0], std.builtin.AtomicRmwOp.Sub, 1, Monotonic);
+                if (last == REFCOUNT_ONE_ISIZE) {
+                    dealloc(@ptrCast([*]u8, refcount_ptr) - (extra_bytes - @sizeOf(usize)), alignment);
+                }
+            }
+        },
+        Refcount.none => unreachable,
     }
+}
+
+pub fn allocateWithRefcountC(
+    data_bytes: usize,
+    element_alignment: u32,
+) callconv(.C) [*]u8 {
+    return allocateWithRefcount(data_bytes, element_alignment);
 }
 
 pub fn allocateWithRefcount(
     data_bytes: usize,
     element_alignment: u32,
 ) [*]u8 {
-    const alignment = std.math.max(@sizeOf(usize), element_alignment);
-    const first_slot_offset = std.math.max(@sizeOf(usize), element_alignment);
+    const ptr_width = @sizeOf(usize);
+    const alignment = std.math.max(ptr_width, element_alignment);
     const length = alignment + data_bytes;
 
-    switch (alignment) {
-        16 => {
-            var new_bytes: [*]align(16) u8 = @alignCast(16, alloc(length, alignment));
+    var new_bytes: [*]u8 = alloc(length, alignment) orelse unreachable;
 
-            var as_usize_array = @ptrCast([*]usize, new_bytes);
-            as_usize_array[0] = 0;
-            as_usize_array[1] = REFCOUNT_ONE;
+    const data_ptr = new_bytes + alignment;
+    const refcount_ptr = @ptrCast([*]usize, @alignCast(ptr_width, data_ptr) - ptr_width);
+    refcount_ptr[0] = if (RC_TYPE == Refcount.none) REFCOUNT_MAX_ISIZE else REFCOUNT_ONE;
 
-            var as_u8_array = @ptrCast([*]u8, new_bytes);
-            const first_slot = as_u8_array + first_slot_offset;
-
-            return first_slot;
-        },
-        8 => {
-            var raw = alloc(length, alignment);
-            var new_bytes: [*]align(8) u8 = @alignCast(8, raw);
-
-            var as_isize_array = @ptrCast([*]isize, new_bytes);
-            as_isize_array[0] = REFCOUNT_ONE_ISIZE;
-
-            var as_u8_array = @ptrCast([*]u8, new_bytes);
-            const first_slot = as_u8_array + first_slot_offset;
-
-            return first_slot;
-        },
-        4 => {
-            var raw = alloc(length, alignment);
-            var new_bytes: [*]align(@alignOf(isize)) u8 = @alignCast(@alignOf(isize), raw);
-
-            var as_isize_array = @ptrCast([*]isize, new_bytes);
-            as_isize_array[0] = REFCOUNT_ONE_ISIZE;
-
-            var as_u8_array = @ptrCast([*]u8, new_bytes);
-            const first_slot = as_u8_array + first_slot_offset;
-
-            return first_slot;
-        },
-        else => {
-            // const stdout = std.io.getStdOut().writer();
-            // stdout.print("alignment: {d}", .{alignment}) catch unreachable;
-            // @panic("allocateWithRefcount with invalid alignment");
-            unreachable;
-        },
-    }
+    return data_ptr;
 }
+
+pub const CSlice = extern struct {
+    pointer: *anyopaque,
+    len: usize,
+};
 
 pub fn unsafeReallocate(
     source_ptr: [*]u8,

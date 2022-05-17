@@ -1,0 +1,22 @@
+[
+    @0-7 SpaceAfter(
+        SpaceBefore(
+            Value(
+                Body(
+                    @0-3 Identifier(
+                        "foo",
+                    ),
+                    @6-7 Num(
+                        "1",
+                    ),
+                ),
+            ),
+            [],
+        ),
+        [
+            LineComment(
+                " comment after",
+            ),
+        ],
+    ),
+]

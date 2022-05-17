@@ -1,17 +1,17 @@
 #[cfg(feature = "gen-llvm")]
-use crate::helpers::llvm::assert_evals_to;
-
-#[cfg(feature = "gen-llvm")]
-use crate::helpers::llvm::expect_runtime_error_panic;
+use crate::helpers::llvm::{assert_evals_to, expect_runtime_error_panic};
 
 #[cfg(feature = "gen-dev")]
 use crate::helpers::dev::assert_evals_to;
 
 #[cfg(feature = "gen-wasm")]
-use crate::helpers::wasm::assert_evals_to;
+use crate::helpers::wasm::{assert_evals_to, expect_runtime_error_panic};
 
 // use crate::assert_wasm_evals_to as assert_evals_to;
 use indoc::indoc;
+
+#[cfg(test)]
+use roc_std::{RocList, RocStr};
 
 #[test]
 #[cfg(any(feature = "gen-llvm", feature = "gen-dev", feature = "gen-wasm"))]
@@ -200,7 +200,7 @@ fn when_record_with_guard_pattern() {
     assert_evals_to!(
         indoc!(
             r#"
-                when { x: 0x2, y: 3.14 } is
+                when { x: 0x2, y: 1.23 } is
                     { x: var } -> var + 3
                 "#
         ),
@@ -215,7 +215,7 @@ fn let_with_record_pattern() {
     assert_evals_to!(
         indoc!(
             r#"
-                { x } = { x: 0x2, y: 3.14 }
+                { x } = { x: 0x2, y: 1.23 }
 
                 x
                 "#
@@ -231,7 +231,7 @@ fn record_guard_pattern() {
     assert_evals_to!(
         indoc!(
             r#"
-                when { x: 0x2, y: 3.14 } is
+                when { x: 0x2, y: 1.23 } is
                     { x: 0x4 } -> 5
                     { x } -> x + 3
                 "#
@@ -272,7 +272,7 @@ fn empty_record() {
     );
 }
 #[test]
-#[cfg(any(feature = "gen-llvm", feature = "gen-wasm"))]
+#[cfg(any(feature = "gen-llvm", feature = "gen-wasm", feature = "gen-dev"))]
 fn i64_record2_literal() {
     assert_evals_to!(
         indoc!(
@@ -299,7 +299,7 @@ fn i64_record2_literal() {
 //     );
 // }
 #[test]
-#[cfg(any(feature = "gen-llvm", feature = "gen-wasm"))]
+#[cfg(any(feature = "gen-llvm", feature = "gen-wasm", feature = "gen-dev"))]
 fn f64_record2_literal() {
     assert_evals_to!(
         indoc!(
@@ -401,7 +401,7 @@ fn bool_literal() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm", feature = "gen-wasm"))]
+#[cfg(any(feature = "gen-llvm", feature = "gen-wasm", feature = "gen-dev"))]
 fn return_record() {
     assert_evals_to!(
         indoc!(
@@ -587,9 +587,7 @@ fn optional_field_function_use_default() {
 
 #[test]
 #[cfg(any(feature = "gen-llvm"))]
-#[ignore]
 fn optional_field_function_no_use_default() {
-    // blocked on https://github.com/rtfeldman/roc/issues/786
     assert_evals_to!(
         indoc!(
             r#"
@@ -608,9 +606,7 @@ fn optional_field_function_no_use_default() {
 
 #[test]
 #[cfg(any(feature = "gen-llvm"))]
-#[ignore]
 fn optional_field_function_no_use_default_nested() {
-    // blocked on https://github.com/rtfeldman/roc/issues/786
     assert_evals_to!(
         indoc!(
             r#"
@@ -656,7 +652,7 @@ fn optional_field_empty_record() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm", feature = "gen-wasm"))]
+#[cfg(any(feature = "gen-llvm", feature = "gen-wasm", feature = "gen-dev"))]
 fn return_record_2() {
     assert_evals_to!(
         indoc!(
@@ -670,7 +666,7 @@ fn return_record_2() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm", feature = "gen-wasm"))]
+#[cfg(any(feature = "gen-llvm", feature = "gen-wasm", feature = "gen-dev"))]
 fn return_record_3() {
     assert_evals_to!(
         indoc!(
@@ -684,7 +680,7 @@ fn return_record_3() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm", feature = "gen-wasm"))]
+#[cfg(any(feature = "gen-llvm", feature = "gen-wasm", feature = "gen-dev"))]
 fn return_record_4() {
     assert_evals_to!(
         indoc!(
@@ -698,7 +694,7 @@ fn return_record_4() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm", feature = "gen-wasm"))]
+#[cfg(any(feature = "gen-llvm", feature = "gen-wasm", feature = "gen-dev"))]
 fn return_record_5() {
     assert_evals_to!(
         indoc!(
@@ -712,7 +708,7 @@ fn return_record_5() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm", feature = "gen-wasm"))]
+#[cfg(any(feature = "gen-llvm", feature = "gen-wasm", feature = "gen-dev"))]
 fn return_record_6() {
     assert_evals_to!(
         indoc!(
@@ -726,7 +722,7 @@ fn return_record_6() {
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm", feature = "gen-wasm"))]
+#[cfg(any(feature = "gen-llvm", feature = "gen-wasm", feature = "gen-dev"))]
 fn return_record_7() {
     assert_evals_to!(
         indoc!(
@@ -745,10 +741,10 @@ fn return_record_float_int() {
     assert_evals_to!(
         indoc!(
             r#"
-                { a: 3.14, b: 0x1 }
+                { a: 1.23, b: 0x1 }
                 "#
         ),
-        (3.14, 0x1),
+        (1.23, 0x1),
         (f64, i64)
     );
 }
@@ -759,10 +755,10 @@ fn return_record_int_float() {
     assert_evals_to!(
         indoc!(
             r#"
-                { a: 0x1, b: 3.14 }
+                { a: 0x1, b: 1.23 }
                 "#
         ),
-        (0x1, 3.14),
+        (0x1, 1.23),
         (i64, f64)
     );
 }
@@ -773,10 +769,10 @@ fn return_record_float_float() {
     assert_evals_to!(
         indoc!(
             r#"
-                { a: 6.28, b: 3.14 }
+                { a: 2.46, b: 1.23 }
                 "#
         ),
-        (6.28, 3.14),
+        (2.46, 1.23),
         (f64, f64)
     );
 }
@@ -787,24 +783,24 @@ fn return_record_float_float_float() {
     assert_evals_to!(
         indoc!(
             r#"
-                { a: 6.28, b: 3.14, c: 0.1 }
+                { a: 2.46, b: 1.23, c: 0.1 }
                 "#
         ),
-        (6.28, 3.14, 0.1),
+        (2.46, 1.23, 0.1),
         (f64, f64, f64)
     );
 }
 
 #[test]
-#[cfg(any(feature = "gen-llvm", feature = "gen-wasm"))]
+#[cfg(any(feature = "gen-llvm", feature = "gen-wasm", feature = "gen-dev"))]
 fn return_nested_record() {
     assert_evals_to!(
         indoc!(
             r#"
-                { flag: 0x0, payload: { a: 6.28, b: 3.14, c: 0.1 } }
+                { flag: 0x0, payload: { a: 2.46, b: 1.23, c: 0.1 } }
                 "#
         ),
-        (0x0, (6.28, 3.14, 0.1)),
+        (0x0, (2.46, 1.23, 0.1)),
         (i64, (f64, f64, f64))
     );
 }
@@ -830,7 +826,7 @@ fn nested_record_load() {
 #[test]
 #[cfg(any(feature = "gen-llvm"))]
 fn accessor_twice() {
-    assert_evals_to!(".foo { foo: 4 }  + .foo { bar: 6.28, foo: 3 } ", 7, i64);
+    assert_evals_to!(".foo { foo: 4 }  + .foo { bar: 2.46, foo: 3 } ", 7, i64);
 }
 
 #[test]
@@ -867,12 +863,12 @@ fn update_record() {
     assert_evals_to!(
         indoc!(
             r#"
-                rec = { foo: 42, bar: 6.28 }
+                rec = { foo: 42, bar: 2.46 }
 
                 { rec & foo: rec.foo + 1 }
                 "#
         ),
-        (6.28, 43),
+        (2.46, 43),
         (f64, i64)
     );
 }
@@ -1001,7 +997,7 @@ fn both_have_unique_fields() {
             b = { x: 42, z: 44 }
 
             f : { x : I64 }a, { x : I64 }b -> I64
-            f = \{ x: x1}, { x: x2 } -> x1 + x2 
+            f = \{ x: x1}, { x: x2 } -> x1 + x2
 
             f a b
             "#
@@ -1012,9 +1008,40 @@ fn both_have_unique_fields() {
 }
 
 #[test]
+#[cfg(any(feature = "gen-llvm", feature = "gen-wasm"))]
+// https://github.com/rtfeldman/roc/issues/2535
+fn different_proc_types_specialized_to_same_layout() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+            app "test" provides [ nums ] to "./platform"
+
+            # Top-level values compile to procedure calls with no args
+            # alpha has the generic type { a: Num *, b: Num * }
+            # and gets specialized to two procedure calls below
+            alpha = { a: 1, b: 2 }
+
+            # The wider number always comes first in the layout,
+            # which makes the two specializations look very similar.
+            # Test that the compiler doesn't get them mixed up!
+            nums : List U8
+            nums =
+                [
+                    alpha.a,   # alpha specialized to layout { b: I64, a: U8 }
+                    alpha.b,   # alpha specialized to layout { a: I64, b: U8 }
+                ]
+            "#
+        ),
+        RocList::from_slice(&[1, 2]),
+        RocList<u8>
+    );
+}
+
+#[test]
 #[cfg(any(feature = "gen-llvm"))]
 #[should_panic(
     // TODO: something upstream is escaping the '
+    // NOTE: Are we sure it's upstream? It's not escaped in gen-wasm version below!
     expected = r#"Roc failed with message: "Can\'t create record with improper layout""#
 )]
 fn call_with_bad_record_runtime_error() {
@@ -1028,4 +1055,36 @@ fn call_with_bad_record_runtime_error() {
                 get {b: ""}
             "#
     ))
+}
+
+#[test]
+#[cfg(any(feature = "gen-wasm"))]
+#[should_panic(expected = r#"Can't create record with improper layout"#)]
+fn call_with_bad_record_runtime_error() {
+    expect_runtime_error_panic!(indoc!(
+        r#"
+            app "test" provides [ main ] to "./platform"
+
+            main =
+                get : {a: Bool} -> Bool
+                get = \{a} -> a
+                get {b: ""}
+            "#
+    ))
+}
+
+#[test]
+#[cfg(any(feature = "gen-llvm", feature = "gen-wasm"))]
+fn generalized_accessor() {
+    assert_evals_to!(
+        indoc!(
+            r#"
+            returnFoo = .foo
+
+            returnFoo { foo: "foo" }
+            "#
+        ),
+        RocStr::from("foo"),
+        RocStr
+    );
 }

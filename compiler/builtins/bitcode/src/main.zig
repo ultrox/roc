@@ -1,6 +1,8 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const math = std.math;
 const utils = @import("utils.zig");
+const expect = @import("expect.zig");
 
 const ROC_BUILTINS = "roc_builtins";
 const NUM = "num";
@@ -48,12 +50,13 @@ comptime {
     exportListFn(list.listConcat, "concat");
     exportListFn(list.listSublist, "sublist");
     exportListFn(list.listDropAt, "drop_at");
-    exportListFn(list.listSet, "set");
-    exportListFn(list.listSetInPlace, "set_in_place");
+    exportListFn(list.listReplace, "replace");
+    exportListFn(list.listReplaceInPlace, "replace_in_place");
     exportListFn(list.listSwap, "swap");
     exportListFn(list.listAny, "any");
     exportListFn(list.listAll, "all");
     exportListFn(list.listFindUnsafe, "find_unsafe");
+    exportListFn(list.listIsUnique, "is_unique");
 }
 
 // Dict Module
@@ -97,13 +100,23 @@ comptime {
         num.exportDivCeil(T, ROC_BUILTINS ++ "." ++ NUM ++ ".div_ceil.");
     }
 
+    inline for (INTEGERS) |FROM| {
+        inline for (INTEGERS) |TO| {
+            // We're exporting more than we need here, but that's okay.
+            num.exportToIntCheckingMax(FROM, TO, ROC_BUILTINS ++ "." ++ NUM ++ ".int_to_" ++ @typeName(TO) ++ "_checking_max.");
+            num.exportToIntCheckingMaxAndMin(FROM, TO, ROC_BUILTINS ++ "." ++ NUM ++ ".int_to_" ++ @typeName(TO) ++ "_checking_max_and_min.");
+        }
+
+        num.exportRoundF32(FROM, ROC_BUILTINS ++ "." ++ NUM ++ ".round_f32.");
+        num.exportRoundF64(FROM, ROC_BUILTINS ++ "." ++ NUM ++ ".round_f64.");
+    }
+
     inline for (FLOATS) |T| {
         num.exportAsin(T, ROC_BUILTINS ++ "." ++ NUM ++ ".asin.");
         num.exportAcos(T, ROC_BUILTINS ++ "." ++ NUM ++ ".acos.");
         num.exportAtan(T, ROC_BUILTINS ++ "." ++ NUM ++ ".atan.");
 
         num.exportIsFinite(T, ROC_BUILTINS ++ "." ++ NUM ++ ".is_finite.");
-        num.exportRound(T, ROC_BUILTINS ++ "." ++ NUM ++ ".round.");
     }
 }
 
@@ -141,14 +154,42 @@ comptime {
 }
 
 // Utils
-
 comptime {
     exportUtilsFn(utils.test_panic, "test_panic");
     exportUtilsFn(utils.increfC, "incref");
     exportUtilsFn(utils.decrefC, "decref");
     exportUtilsFn(utils.decrefCheckNullC, "decref_check_null");
+    exportUtilsFn(utils.allocateWithRefcountC, "allocate_with_refcount");
+    exportExpectFn(expect.expectFailedC, "expect_failed");
+    exportExpectFn(expect.getExpectFailuresC, "get_expect_failures");
+    exportExpectFn(expect.deinitFailuresC, "deinit_failures");
 
     @export(utils.panic, .{ .name = "roc_builtins.utils." ++ "panic", .linkage = .Weak });
+
+    if (builtin.target.cpu.arch == .aarch64) {
+        @export(__roc_force_setjmp, .{ .name = "__roc_force_setjmp", .linkage = .Weak });
+        @export(__roc_force_longjmp, .{ .name = "__roc_force_longjmp", .linkage = .Weak });
+    }
+}
+
+// Utils continued - SJLJ
+// For tests (in particular test_gen), roc_panic is implemented in terms of
+// setjmp/longjmp. LLVM is unable to generate code for longjmp on AArch64 (https://github.com/rtfeldman/roc/issues/2965),
+// so instead we ask Zig to please provide implementations for us, which is does
+// (seemingly via musl).
+pub extern fn setjmp([*c]c_int) c_int;
+pub extern fn longjmp([*c]c_int, c_int) noreturn;
+pub extern fn _setjmp([*c]c_int) c_int;
+pub extern fn _longjmp([*c]c_int, c_int) noreturn;
+pub extern fn sigsetjmp([*c]c_int, c_int) c_int;
+pub extern fn siglongjmp([*c]c_int, c_int) noreturn;
+pub extern fn longjmperror() void;
+// Zig won't expose the externs (and hence link correctly) unless we force them to be used.
+fn __roc_force_setjmp(it: [*c]c_int) callconv(.C) c_int {
+    return setjmp(it);
+}
+fn __roc_force_longjmp(a0: [*c]c_int, a1: c_int) callconv(.C) noreturn {
+    longjmp(a0, a1);
 }
 
 // Export helpers - Must be run inside a comptime
@@ -175,9 +216,12 @@ fn exportUtilsFn(comptime func: anytype, comptime func_name: []const u8) void {
     exportBuiltinFn(func, "utils." ++ func_name);
 }
 
+fn exportExpectFn(comptime func: anytype, comptime func_name: []const u8) void {
+    exportBuiltinFn(func, "expect." ++ func_name);
+}
+
 // Custom panic function, as builtin Zig version errors during LLVM verification
 pub fn panic(message: []const u8, stacktrace: ?*std.builtin.StackTrace) noreturn {
-    const builtin = @import("builtin");
     if (builtin.is_test) {
         std.debug.print("{s}: {?}", .{ message, stacktrace });
     } else {

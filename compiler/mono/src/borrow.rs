@@ -2,13 +2,16 @@ use crate::ir::{Expr, HigherOrderLowLevel, JoinPointId, Param, Proc, ProcLayout,
 use crate::layout::Layout;
 use bumpalo::collections::Vec;
 use bumpalo::Bump;
-use roc_collections::all::{default_hasher, MutMap, MutSet};
+use roc_collections::all::{MutMap, MutSet};
+use roc_collections::ReferenceMatrix;
 use roc_module::low_level::LowLevel;
 use roc_module::symbol::Symbol;
 
-pub const OWNED: bool = false;
-pub const BORROWED: bool = true;
+pub(crate) const OWNED: bool = false;
+pub(crate) const BORROWED: bool = true;
 
+/// For reference-counted types (lists, (big) strings, recursive tags), owning a value
+/// means incrementing its reference count. Hence, we prefer borrowing for these types
 fn should_borrow_layout(layout: &Layout) -> bool {
     layout.is_refcounted()
 }
@@ -45,94 +48,27 @@ pub fn infer_borrow<'a>(
     // topological sort on these components, finally run the fix-point borrow analysis on each
     // component (in top-sorted order, from primitives (std-lib) to main)
 
-    let successor_map = &make_successor_mapping(arena, procs);
-    let successors = move |key: &Symbol| {
-        let slice = match successor_map.get(key) {
-            None => &[] as &[_],
-            Some(s) => s.as_slice(),
+    let mut matrix = ReferenceMatrix::new(procs.len());
+
+    for (row, proc) in procs.values().enumerate() {
+        let mut call_info = CallInfo {
+            keys: Vec::new_in(arena),
         };
+        call_info_stmt(arena, &proc.body, &mut call_info);
 
-        slice.iter().copied()
-    };
-
-    let mut symbols = Vec::with_capacity_in(procs.len(), arena);
-    symbols.extend(procs.keys().map(|x| x.0));
-
-    let sccs = ven_graph::strongly_connected_components(&symbols, successors);
-
-    let mut symbol_to_component = MutMap::default();
-    for (i, symbols) in sccs.iter().enumerate() {
-        for symbol in symbols {
-            symbol_to_component.insert(*symbol, i);
-        }
-    }
-
-    let mut component_to_successors = Vec::with_capacity_in(sccs.len(), arena);
-    for (i, symbols) in sccs.iter().enumerate() {
-        // guess: every function has ~1 successor
-        let mut succs = Vec::with_capacity_in(symbols.len(), arena);
-
-        for symbol in symbols {
-            for s in successors(symbol) {
-                let c = symbol_to_component[&s];
-
-                // don't insert self to prevent cycles
-                if c != i {
-                    succs.push(c);
+        for key in call_info.keys.iter() {
+            // the same symbol can be in `keys` multiple times (with different layouts)
+            for (col, (k, _)) in procs.keys().enumerate() {
+                if k == key {
+                    matrix.set_row_col(row, col, true);
                 }
             }
         }
-
-        succs.sort_unstable();
-        succs.dedup();
-
-        component_to_successors.push(succs);
     }
 
-    let mut components = Vec::with_capacity_in(component_to_successors.len(), arena);
-    components.extend(0..component_to_successors.len());
+    let sccs = matrix.strongly_connected_components_all();
 
-    let mut groups = Vec::new_in(arena);
-
-    let component_to_successors = &component_to_successors;
-    match ven_graph::topological_sort_into_groups(&components, |c: &usize| {
-        component_to_successors[*c].iter().copied()
-    }) {
-        Ok(component_groups) => {
-            let mut component_to_group = bumpalo::vec![in arena; usize::MAX; components.len()];
-
-            // for each component, store which group it is in
-            for (group_index, component_group) in component_groups.iter().enumerate() {
-                for component in component_group {
-                    component_to_group[*component] = group_index;
-                }
-            }
-
-            // prepare groups
-            groups.reserve(component_groups.len());
-            for _ in 0..component_groups.len() {
-                groups.push(Vec::new_in(arena));
-            }
-
-            for (key, proc) in procs {
-                let symbol = key.0;
-                let offset = param_map.get_param_offset(key.0, key.1);
-
-                // the component this symbol is a part of
-                let component = symbol_to_component[&symbol];
-
-                // now find the group that this component belongs to
-                let group = component_to_group[component];
-
-                groups[group].push((proc, offset));
-            }
-        }
-        Err((_groups, _remainder)) => {
-            unreachable!("because we find strongly-connected components first");
-        }
-    }
-
-    for group in groups.into_iter().rev() {
+    for group in sccs.groups() {
         // This is a fixed-point analysis
         //
         // all functions initiall own all their parameters
@@ -141,8 +77,10 @@ pub fn infer_borrow<'a>(
         //
         // when the signatures no longer change, the analysis stops and returns the signatures
         loop {
-            for (proc, param_offset) in group.iter() {
-                env.collect_proc(&mut param_map, proc, *param_offset);
+            for index in group.iter_ones() {
+                let (key, proc) = &procs.iter().nth(index).unwrap();
+                let param_offset = param_map.get_param_offset(key.0, key.1);
+                env.collect_proc(&mut param_map, proc, param_offset);
             }
 
             if !env.modified {
@@ -624,8 +562,9 @@ impl<'a> BorrowInfState<'a> {
                         }
                     }
                     ListMapWithIndex { xs } => {
-                        // own the list if the function wants to own the element
-                        if !function_ps[1].borrow {
+                        // List.mapWithIndex : List before, (before, Nat -> after) -> List after
+                        // own the list if the function wants to own the element (before, index 0)
+                        if !function_ps[0].borrow {
                             self.own_var(*xs);
                         }
                     }
@@ -723,6 +662,23 @@ impl<'a> BorrowInfState<'a> {
                 // the function must take it as an owned parameter
                 self.own_args_if_param(xs);
             }
+
+            ExprBox { symbol: x } => {
+                self.own_var(z);
+
+                // if the used symbol is an argument to the current function,
+                // the function must take it as an owned parameter
+                self.own_args_if_param(&[*x]);
+            }
+
+            ExprUnbox { symbol: x } => {
+                // if the boxed value is owned, the box is
+                self.if_is_owned_then_own(*x, z);
+
+                // if the extracted value is owned, the structure must be too
+                self.if_is_owned_then_own(z, *x);
+            }
+
             Reset { symbol: x, .. } => {
                 self.own_var(z);
                 self.own_var(*x);
@@ -933,7 +889,7 @@ pub fn lowlevel_borrow_signature(arena: &Bump, op: LowLevel) -> &[bool] {
     // - other refcounted arguments are Borrowed
     match op {
         ListLen | StrIsEmpty | StrCountGraphemes => arena.alloc_slice_copy(&[borrowed]),
-        ListSet => arena.alloc_slice_copy(&[owned, irrelevant, irrelevant]),
+        ListReplaceUnsafe => arena.alloc_slice_copy(&[owned, irrelevant, irrelevant]),
         ListGetUnsafe => arena.alloc_slice_copy(&[borrowed, irrelevant]),
         ListConcat => arena.alloc_slice_copy(&[owned, owned]),
         StrConcat => arena.alloc_slice_copy(&[owned, borrowed]),
@@ -943,7 +899,8 @@ pub fn lowlevel_borrow_signature(arena: &Bump, op: LowLevel) -> &[bool] {
         StrSplit => arena.alloc_slice_copy(&[borrowed, borrowed]),
         StrToNum => arena.alloc_slice_copy(&[borrowed]),
         ListSingle => arena.alloc_slice_copy(&[irrelevant]),
-        ListRepeat => arena.alloc_slice_copy(&[irrelevant, borrowed]),
+        // List.repeat : elem, Nat -> List.elem
+        ListRepeat => arena.alloc_slice_copy(&[borrowed, irrelevant]),
         ListReverse => arena.alloc_slice_copy(&[owned]),
         ListPrepend => arena.alloc_slice_copy(&[owned, owned]),
         StrJoinWith => arena.alloc_slice_copy(&[borrowed, borrowed]),
@@ -972,15 +929,19 @@ pub fn lowlevel_borrow_signature(arena: &Bump, op: LowLevel) -> &[bool] {
 
         Eq | NotEq => arena.alloc_slice_copy(&[borrowed, borrowed]),
 
-        And | Or | NumAdd | NumAddWrap | NumAddChecked | NumSub | NumSubWrap | NumSubChecked
-        | NumMul | NumMulWrap | NumMulChecked | NumGt | NumGte | NumLt | NumLte | NumCompare
-        | NumDivUnchecked | NumDivCeilUnchecked | NumRemUnchecked | NumIsMultipleOf | NumPow
-        | NumPowInt | NumBitwiseAnd | NumBitwiseXor | NumBitwiseOr | NumShiftLeftBy
-        | NumShiftRightBy | NumShiftRightZfBy => arena.alloc_slice_copy(&[irrelevant, irrelevant]),
+        And | Or | NumAdd | NumAddWrap | NumAddChecked | NumAddSaturated | NumSub | NumSubWrap
+        | NumSubChecked | NumSubSaturated | NumMul | NumMulWrap | NumMulChecked | NumGt
+        | NumGte | NumLt | NumLte | NumCompare | NumDivUnchecked | NumDivCeilUnchecked
+        | NumRemUnchecked | NumIsMultipleOf | NumPow | NumPowInt | NumBitwiseAnd
+        | NumBitwiseXor | NumBitwiseOr | NumShiftLeftBy | NumShiftRightBy | NumShiftRightZfBy => {
+            arena.alloc_slice_copy(&[irrelevant, irrelevant])
+        }
 
         NumToStr | NumAbs | NumNeg | NumSin | NumCos | NumSqrtUnchecked | NumLogUnchecked
-        | NumRound | NumCeiling | NumFloor | NumToFloat | Not | NumIsFinite | NumAtan | NumAcos
-        | NumAsin | NumIntCast => arena.alloc_slice_copy(&[irrelevant]),
+        | NumRound | NumCeiling | NumFloor | NumToFrac | Not | NumIsFinite | NumAtan | NumAcos
+        | NumAsin | NumIntCast | NumToIntChecked | NumToFloatCast | NumToFloatChecked => {
+            arena.alloc_slice_copy(&[irrelevant])
+        }
         NumBytesToU16 => arena.alloc_slice_copy(&[borrowed, irrelevant]),
         NumBytesToU32 => arena.alloc_slice_copy(&[borrowed, irrelevant]),
         StrStartsWith | StrEndsWith => arena.alloc_slice_copy(&[owned, borrowed]),
@@ -1004,35 +965,20 @@ pub fn lowlevel_borrow_signature(arena: &Bump, op: LowLevel) -> &[bool] {
         DictWalk => arena.alloc_slice_copy(&[owned, owned, function, closure_data]),
 
         SetFromList => arena.alloc_slice_copy(&[owned]),
+        SetToDict => arena.alloc_slice_copy(&[owned]),
 
         ExpectTrue => arena.alloc_slice_copy(&[irrelevant]),
+
+        ListIsUnique => arena.alloc_slice_copy(&[borrowed]),
+
+        BoxExpr | UnboxExpr => {
+            unreachable!("These lowlevel operations are turned into mono Expr's")
+        }
 
         PtrCast | RefCountInc | RefCountDec => {
             unreachable!("Only inserted *after* borrow checking: {:?}", op);
         }
     }
-}
-
-fn make_successor_mapping<'a>(
-    arena: &'a Bump,
-    procs: &MutMap<(Symbol, ProcLayout<'_>), Proc<'a>>,
-) -> MutMap<Symbol, Vec<'a, Symbol>> {
-    let mut result = MutMap::with_capacity_and_hasher(procs.len(), default_hasher());
-
-    for (key, proc) in procs {
-        let mut call_info = CallInfo {
-            keys: Vec::new_in(arena),
-        };
-        call_info_stmt(arena, &proc.body, &mut call_info);
-
-        let mut keys = call_info.keys;
-        keys.sort_unstable();
-        keys.dedup();
-
-        result.insert(key.0, keys);
-    }
-
-    result
 }
 
 struct CallInfo<'a> {

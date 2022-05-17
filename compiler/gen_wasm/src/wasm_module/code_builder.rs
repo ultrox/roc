@@ -1,7 +1,7 @@
 use bumpalo::collections::vec::Vec;
 use bumpalo::Bump;
 use core::panic;
-use roc_reporting::internal_error;
+use roc_error_macros::internal_error;
 
 use roc_module::symbol::Symbol;
 
@@ -37,6 +37,18 @@ impl Serialize for ValueType {
     }
 }
 
+impl From<u8> for ValueType {
+    fn from(x: u8) -> Self {
+        match x {
+            0x7f => Self::I32,
+            0x7e => Self::I64,
+            0x7d => Self::F32,
+            0x7c => Self::F64,
+            _ => internal_error!("Invalid ValueType 0x{:02x}", x),
+        }
+    }
+}
+
 const BLOCK_NO_RESULT: u8 = 0x40;
 
 /// A control block in our model of the VM
@@ -50,7 +62,7 @@ struct VmBlock<'a> {
 
 impl std::fmt::Debug for VmBlock<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!("{:?}", self.opcode))
+        f.write_fmt(format_args!("{:?} {:?}", self.opcode, self.value_stack))
     }
 }
 
@@ -58,12 +70,29 @@ impl std::fmt::Debug for VmBlock<'_> {
 /// Rust representation matches Wasm encoding.
 /// It's an error to specify alignment higher than the "natural" alignment of the instruction
 #[repr(u8)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
 pub enum Align {
     Bytes1 = 0,
     Bytes2 = 1,
     Bytes4 = 2,
     Bytes8 = 3,
+}
+
+impl Align {
+    /// Calculate the largest possible alignment for a load/store at a given stack frame offset
+    /// Assumes the stack frame is aligned to at least 8 bytes
+    pub fn from_stack_offset(max_align: Align, offset: u32) -> Align {
+        if (max_align == Align::Bytes8) && (offset & 7 == 0) {
+            return Align::Bytes8;
+        }
+        if (max_align >= Align::Bytes4) && (offset & 3 == 0) {
+            return Align::Bytes4;
+        }
+        if (max_align >= Align::Bytes2) && (offset & 1 == 0) {
+            return Align::Bytes2;
+        }
+        Align::Bytes1
+    }
 }
 
 impl From<u32> for Align {
@@ -154,6 +183,12 @@ pub struct CodeBuilder<'a> {
     /// Linker info to help combine the Roc module with builtin & platform modules,
     /// e.g. to modify call instructions when function indices change
     relocations: Vec<'a, RelocationEntry>,
+}
+
+impl<'a> Serialize for CodeBuilder<'a> {
+    fn serialize<T: SerialBuffer>(&self, buffer: &mut T) {
+        self.serialize_without_relocs(buffer);
+    }
 }
 
 #[allow(clippy::new_without_default)]
@@ -470,6 +505,26 @@ impl<'a> CodeBuilder<'a> {
 
     ***********************************************************/
 
+    pub fn size(&self) -> usize {
+        self.inner_length.len() + self.preamble.len() + self.code.len() + self.insert_bytes.len()
+    }
+
+    /// Serialize all byte vectors in the right order
+    /// Also update relocation offsets relative to the base offset (code section body start)
+    pub fn serialize_without_relocs<T: SerialBuffer>(&self, buffer: &mut T) {
+        buffer.append_slice(&self.inner_length);
+        buffer.append_slice(&self.preamble);
+
+        let mut code_pos = 0;
+        for Insertion { at, start, end } in self.insertions.iter() {
+            buffer.append_slice(&self.code[code_pos..(*at)]);
+            buffer.append_slice(&self.insert_bytes[*start..*end]);
+            code_pos = *at;
+        }
+
+        buffer.append_slice(&self.code[code_pos..self.code.len()]);
+    }
+
     /// Serialize all byte vectors in the right order
     /// Also update relocation offsets relative to the base offset (code section body start)
     pub fn serialize_with_relocs<T: SerialBuffer>(
@@ -553,7 +608,7 @@ impl<'a> CodeBuilder<'a> {
         log_instruction!(
             "{:10}\t\t{:?}",
             format!("{:?}", opcode),
-            self.current_stack()
+            self.vm_block_stack
         );
     }
 
@@ -580,7 +635,7 @@ impl<'a> CodeBuilder<'a> {
             "{:10}\t{}\t{:?}",
             format!("{:?}", opcode),
             immediate,
-            self.current_stack()
+            self.vm_block_stack
         );
     }
 
@@ -593,7 +648,7 @@ impl<'a> CodeBuilder<'a> {
             format!("{:?}", opcode),
             align,
             offset,
-            self.current_stack()
+            self.vm_block_stack
         );
     }
 
@@ -697,7 +752,7 @@ impl<'a> CodeBuilder<'a> {
             "{:10}\t{}\t{:?}",
             format!("{:?}", CALL),
             function_index,
-            self.current_stack()
+            self.vm_block_stack
         );
     }
 
@@ -768,7 +823,7 @@ impl<'a> CodeBuilder<'a> {
             "{:10}\t{}\t{:?}",
             format!("{:?}", opcode),
             x,
-            self.current_stack()
+            self.vm_block_stack
         );
     }
     pub fn i32_const(&mut self, x: i32) {
@@ -917,17 +972,4 @@ impl<'a> CodeBuilder<'a> {
     instruction_no_args!(i64_reinterpret_f64, I64REINTERPRETF64, 1, true);
     instruction_no_args!(f32_reinterpret_i32, F32REINTERPRETI32, 1, true);
     instruction_no_args!(f64_reinterpret_i64, F64REINTERPRETI64, 1, true);
-
-    /// Generate a debug assertion for an expected i32 value
-    pub fn _debug_assert_i32(&mut self, expected: i32) {
-        self.i32_const(expected);
-        self.i32_eq();
-        self.i32_eqz();
-        self.if_();
-        self.unreachable_(); // Tell Wasm runtime to throw an exception
-        self.end();
-        // It matches. Restore the original value to the VM stack and continue the program.
-        // We know it matched the expected value, so just use that!
-        self.i32_const(expected);
-    }
 }

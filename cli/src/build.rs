@@ -1,15 +1,15 @@
 use bumpalo::Bump;
 use roc_build::{
-    link::{link, rebuild_host, LinkType},
-    program,
+    link::{link, preprocess_host_wasm32, rebuild_host, LinkType, LinkingStrategy},
+    program::{self, Problems},
 };
 use roc_builtins::bitcode;
-use roc_can::builtins::builtin_defs_map;
-use roc_collections::all::MutMap;
-use roc_load::file::LoadingProblem;
+use roc_load::{LoadingProblem, Threading};
 use roc_mono::ir::OptLevel;
-use std::path::PathBuf;
+use roc_reporting::report::RenderTarget;
+use roc_target::TargetInfo;
 use std::time::{Duration, SystemTime};
+use std::{path::PathBuf, thread::JoinHandle};
 use target_lexicon::Triple;
 use tempfile::Builder;
 
@@ -21,25 +21,9 @@ fn report_timing(buf: &mut String, label: &str, duration: Duration) {
     ));
 }
 
-pub enum BuildOutcome {
-    NoProblems,
-    OnlyWarnings,
-    Errors,
-}
-
-impl BuildOutcome {
-    pub fn status_code(&self) -> i32 {
-        match self {
-            Self::NoProblems => 0,
-            Self::OnlyWarnings => 1,
-            Self::Errors => 2,
-        }
-    }
-}
-
 pub struct BuiltFile {
     pub binary_path: PathBuf,
-    pub outcome: BuildOutcome,
+    pub problems: Problems,
     pub total_time: Duration,
 }
 
@@ -53,27 +37,26 @@ pub fn build_file<'a>(
     emit_debug_info: bool,
     emit_timings: bool,
     link_type: LinkType,
-    surgically_link: bool,
+    linking_strategy: LinkingStrategy,
     precompiled: bool,
     target_valgrind: bool,
+    threading: Threading,
 ) -> Result<BuiltFile, LoadingProblem<'a>> {
     let compilation_start = SystemTime::now();
-    let ptr_bytes = target.pointer_width().unwrap().bytes() as u32;
+    let target_info = TargetInfo::from(target);
 
     // Step 1: compile the app and generate the .o file
-    let subs_by_module = MutMap::default();
+    let subs_by_module = Default::default();
 
-    // Release builds use uniqueness optimizations
-    let stdlib = arena.alloc(roc_builtins::std::standard_stdlib());
-
-    let loaded = roc_load::file::load_and_monomorphize(
+    let loaded = roc_load::load_and_monomorphize(
         arena,
         roc_file_path.clone(),
-        stdlib,
         src_dir.as_path(),
         subs_by_module,
-        ptr_bytes,
-        builtin_defs_map,
+        target_info,
+        // TODO: expose this from CLI?
+        RenderTarget::ColorTerminal,
+        threading,
     )?;
 
     use target_lexicon::Architecture;
@@ -85,8 +68,24 @@ pub fn build_file<'a>(
     // > Non-Emscripten WebAssembly hasn't implemented __builtin_return_address
     //
     // and zig does not currently emit `.a` webassembly static libraries
-    let host_extension = if emit_wasm { "zig" } else { "o" };
-    let app_extension = if emit_wasm { "bc" } else { "o" };
+    let host_extension = if emit_wasm {
+        if matches!(opt_level, OptLevel::Development) {
+            "wasm"
+        } else {
+            "zig"
+        }
+    } else {
+        "o"
+    };
+    let app_extension = if emit_wasm {
+        if matches!(opt_level, OptLevel::Development) {
+            "wasm"
+        } else {
+            "bc"
+        }
+    } else {
+        "o"
+    };
 
     let cwd = roc_file_path.parent().unwrap();
     let mut binary_path = cwd.join(&*loaded.output_path); // TODO should join ".exe" on Windows
@@ -105,18 +104,37 @@ pub fn build_file<'a>(
     // To do this we will need to preprocess files just for their exported symbols.
     // Also, we should no longer need to do this once we have platforms on
     // a package repository, as we can then get precompiled hosts from there.
+
+    let exposed_values = loaded
+        .exposed_to_host
+        .values
+        .keys()
+        .map(|x| x.as_str(&loaded.interns).to_string())
+        .collect();
+
+    let exposed_closure_types = loaded
+        .exposed_to_host
+        .closure_types
+        .iter()
+        .map(|x| x.as_str(&loaded.interns).to_string())
+        .collect();
+
+    let preprocessed_host_path = if emit_wasm {
+        host_input_path.with_file_name("preprocessedhost.o")
+    } else {
+        host_input_path.with_file_name("preprocessedhost")
+    };
+
     let rebuild_thread = spawn_rebuild_thread(
         opt_level,
-        surgically_link,
+        linking_strategy,
         precompiled,
         host_input_path.clone(),
+        preprocessed_host_path.clone(),
         binary_path.clone(),
         target,
-        loaded
-            .exposed_to_host
-            .keys()
-            .map(|x| x.as_str(&loaded.interns).to_string())
-            .collect(),
+        exposed_values,
+        exposed_closure_types,
         target_valgrind,
     );
 
@@ -175,8 +193,26 @@ pub fn build_file<'a>(
     // This only needs to be mutable for report_problems. This can't be done
     // inside a nested scope without causing a borrow error!
     let mut loaded = loaded;
-    program::report_problems_monomorphized(&mut loaded);
+    let problems = program::report_problems_monomorphized(&mut loaded);
     let loaded = loaded;
+
+    enum HostRebuildTiming {
+        BeforeApp(u128),
+        ConcurrentWithApp(JoinHandle<u128>),
+    }
+
+    let rebuild_timing = if linking_strategy == LinkingStrategy::Additive {
+        let rebuild_duration = rebuild_thread.join().unwrap();
+        if emit_timings && !precompiled {
+            println!(
+                "Finished rebuilding and preprocessing the host in {} ms\n",
+                rebuild_duration
+            );
+        }
+        HostRebuildTiming::BeforeApp(rebuild_duration)
+    } else {
+        HostRebuildTiming::ConcurrentWithApp(rebuild_thread)
+    };
 
     let code_gen_timing = program::gen_from_mono_module(
         arena,
@@ -186,6 +222,7 @@ pub fn build_file<'a>(
         app_o_file,
         opt_level,
         emit_debug_info,
+        &preprocessed_host_path,
     );
 
     buf.push('\n');
@@ -193,7 +230,11 @@ pub fn build_file<'a>(
     buf.push_str("Code Generation");
     buf.push('\n');
 
-    report_timing(buf, "Generate LLVM IR", code_gen_timing.code_gen);
+    report_timing(
+        buf,
+        "Generate Assembly from Mono IR",
+        code_gen_timing.code_gen,
+    );
     report_timing(buf, "Emit .o file", code_gen_timing.emit_o_file);
 
     let compilation_end = compilation_start.elapsed().unwrap();
@@ -220,53 +261,72 @@ pub fn build_file<'a>(
         );
     }
 
-    let rebuild_duration = rebuild_thread.join().unwrap();
-    if emit_timings && !precompiled {
-        println!(
-            "Finished rebuilding and preprocessing the host in {} ms\n",
-            rebuild_duration
-        );
+    if let HostRebuildTiming::ConcurrentWithApp(thread) = rebuild_timing {
+        let rebuild_duration = thread.join().unwrap();
+        if emit_timings && !precompiled {
+            println!(
+                "Finished rebuilding and preprocessing the host in {} ms\n",
+                rebuild_duration
+            );
+        }
     }
 
     // Step 2: link the precompiled host and compiled app
     let link_start = SystemTime::now();
-    let outcome = if surgically_link {
-        roc_linker::link_preprocessed_host(target, &host_input_path, app_o_file, &binary_path)
-            .map_err(|_| {
-                todo!("gracefully handle failing to surgically link");
-            })?;
-        BuildOutcome::NoProblems
-    } else {
-        let mut inputs = vec![
-            host_input_path.as_path().to_str().unwrap(),
-            app_o_file.to_str().unwrap(),
-        ];
-        if matches!(opt_level, OptLevel::Development) {
-            inputs.push(bitcode::BUILTINS_HOST_OBJ_PATH);
+    let problems = match (linking_strategy, link_type) {
+        (LinkingStrategy::Surgical, _) => {
+            roc_linker::link_preprocessed_host(target, &host_input_path, app_o_file, &binary_path)
+                .map_err(|err| {
+                    todo!(
+                        "gracefully handle failing to surgically link with error: {:?}",
+                        err
+                    );
+                })?;
+            problems
         }
+        (LinkingStrategy::Additive, _) | (LinkingStrategy::Legacy, LinkType::None) => {
+            // Just copy the object file to the output folder.
+            binary_path.set_extension(app_extension);
+            std::fs::copy(app_o_file, &binary_path).unwrap();
+            problems
+        }
+        (LinkingStrategy::Legacy, _) => {
+            let mut inputs = vec![
+                host_input_path.as_path().to_str().unwrap(),
+                app_o_file.to_str().unwrap(),
+            ];
+            if matches!(opt_level, OptLevel::Development) {
+                inputs.push(bitcode::BUILTINS_HOST_OBJ_PATH);
+            }
 
-        let (mut child, _) =  // TODO use lld
-            link(
-                target,
-                binary_path.clone(),
-                &inputs,
-                link_type
-            )
-            .map_err(|_| {
-                todo!("gracefully handle `ld` failing to spawn.");
+            let (mut child, _) =  // TODO use lld
+                link(
+                    target,
+                    binary_path.clone(),
+                    &inputs,
+                    link_type
+                )
+                .map_err(|_| {
+                    todo!("gracefully handle `ld` failing to spawn.");
+                })?;
+
+            let exit_status = child.wait().map_err(|_| {
+                todo!("gracefully handle error after `ld` spawned");
             })?;
 
-        let exit_status = child.wait().map_err(|_| {
-            todo!("gracefully handle error after `ld` spawned");
-        })?;
+            if exit_status.success() {
+                problems
+            } else {
+                let mut problems = problems;
 
-        // TODO change this to report whether there were errors or warnings!
-        if exit_status.success() {
-            BuildOutcome::NoProblems
-        } else {
-            BuildOutcome::Errors
+                // Add an error for `ld` failing
+                problems.errors += 1;
+
+                problems
+            }
         }
     };
+
     let linking_time = link_start.elapsed().unwrap();
 
     if emit_timings {
@@ -277,7 +337,7 @@ pub fn build_file<'a>(
 
     Ok(BuiltFile {
         binary_path,
-        outcome,
+        problems,
         total_time,
     })
 }
@@ -285,47 +345,65 @@ pub fn build_file<'a>(
 #[allow(clippy::too_many_arguments)]
 fn spawn_rebuild_thread(
     opt_level: OptLevel,
-    surgically_link: bool,
+    linking_strategy: LinkingStrategy,
     precompiled: bool,
     host_input_path: PathBuf,
+    preprocessed_host_path: PathBuf,
     binary_path: PathBuf,
     target: &Triple,
     exported_symbols: Vec<String>,
+    exported_closure_types: Vec<String>,
     target_valgrind: bool,
 ) -> std::thread::JoinHandle<u128> {
     let thread_local_target = target.clone();
     std::thread::spawn(move || {
-        print!("🔨 Rebuilding host... ");
+        if !precompiled {
+            println!("🔨 Rebuilding host...");
+        }
 
         let rebuild_host_start = SystemTime::now();
+
         if !precompiled {
-            if surgically_link {
-                roc_linker::build_and_preprocess_host(
-                    opt_level,
-                    &thread_local_target,
-                    host_input_path.as_path(),
-                    exported_symbols,
-                    target_valgrind,
-                )
-                .unwrap();
-            } else {
-                rebuild_host(
-                    opt_level,
-                    &thread_local_target,
-                    host_input_path.as_path(),
-                    None,
-                    target_valgrind,
-                );
+            match linking_strategy {
+                LinkingStrategy::Additive => {
+                    let host_dest = rebuild_host(
+                        opt_level,
+                        &thread_local_target,
+                        host_input_path.as_path(),
+                        None,
+                        target_valgrind,
+                    );
+
+                    preprocess_host_wasm32(host_dest.as_path(), &preprocessed_host_path);
+                }
+                LinkingStrategy::Surgical => {
+                    roc_linker::build_and_preprocess_host(
+                        opt_level,
+                        &thread_local_target,
+                        host_input_path.as_path(),
+                        preprocessed_host_path.as_path(),
+                        exported_symbols,
+                        exported_closure_types,
+                        target_valgrind,
+                    )
+                    .unwrap();
+                }
+                LinkingStrategy::Legacy => {
+                    rebuild_host(
+                        opt_level,
+                        &thread_local_target,
+                        host_input_path.as_path(),
+                        None,
+                        target_valgrind,
+                    );
+                }
             }
         }
-        if surgically_link {
+        if linking_strategy == LinkingStrategy::Surgical {
             // Copy preprocessed host to executable location.
-            let prehost = host_input_path.with_file_name("preprocessedhost");
-            std::fs::copy(prehost, binary_path.as_path()).unwrap();
+            std::fs::copy(preprocessed_host_path, binary_path.as_path()).unwrap();
         }
         let rebuild_host_end = rebuild_host_start.elapsed().unwrap();
-
-        println!("Done!");
 
         rebuild_host_end.as_millis()
     })
@@ -337,27 +415,26 @@ pub fn check_file(
     src_dir: PathBuf,
     roc_file_path: PathBuf,
     emit_timings: bool,
-) -> Result<usize, LoadingProblem> {
+    threading: Threading,
+) -> Result<(program::Problems, Duration), LoadingProblem> {
     let compilation_start = SystemTime::now();
 
     // only used for generating errors. We don't do code generation, so hardcoding should be fine
     // we need monomorphization for when exhaustiveness checking
-    let ptr_bytes = 8;
+    let target_info = TargetInfo::default_x86_64();
 
     // Step 1: compile the app and generate the .o file
-    let subs_by_module = MutMap::default();
+    let subs_by_module = Default::default();
 
-    // Release builds use uniqueness optimizations
-    let stdlib = arena.alloc(roc_builtins::std::standard_stdlib());
-
-    let mut loaded = roc_load::file::load_and_typecheck(
+    let mut loaded = roc_load::load_and_typecheck(
         arena,
         roc_file_path,
-        stdlib,
         src_dir.as_path(),
         subs_by_module,
-        ptr_bytes,
-        builtin_defs_map,
+        target_info,
+        // TODO: expose this from CLI?
+        RenderTarget::ColorTerminal,
+        threading,
     )?;
 
     let buf = &mut String::with_capacity(1024);
@@ -413,5 +490,8 @@ pub fn check_file(
         println!("Finished checking in {} ms\n", compilation_end.as_millis(),);
     }
 
-    Ok(program::report_problems_typechecked(&mut loaded))
+    Ok((
+        program::report_problems_typechecked(&mut loaded),
+        compilation_end,
+    ))
 }

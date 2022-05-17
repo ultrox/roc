@@ -1,6 +1,8 @@
 use bumpalo::Bump;
-use roc_can::expr::Recursive;
-use roc_can::num::{finish_parsing_base, finish_parsing_float, finish_parsing_int};
+use roc_can::expr::{IntValue, Recursive};
+use roc_can::num::{
+    finish_parsing_base, finish_parsing_float, finish_parsing_num, ParsedNumResult,
+};
 use roc_can::operator::desugar_expr;
 use roc_collections::all::MutSet;
 use roc_module::symbol::Symbol;
@@ -48,15 +50,16 @@ pub fn expr_to_expr2<'a>(
     region: Region,
 ) -> (Expr2, self::Output) {
     use roc_parse::ast::Expr::*;
+    //dbg!("{:?}", parse_expr);
 
     match parse_expr {
         Float(string) => {
             match finish_parsing_float(string) {
-                Ok(float) => {
+                Ok((string_without_suffix, float, _bound)) => {
                     let expr = Expr2::Float {
                         number: FloatVal::F64(float),
                         var: env.var_store.fresh(),
-                        text: PoolStr::new(string, env.pool),
+                        text: PoolStr::new(string_without_suffix, env.pool),
                     };
 
                     (expr, Output::default())
@@ -73,14 +76,29 @@ pub fn expr_to_expr2<'a>(
             }
         }
         Num(string) => {
-            match finish_parsing_int(string) {
-                Ok(int) => {
+            match finish_parsing_num(string) {
+                Ok((
+                    parsed,
+                    ParsedNumResult::UnknownNum(int, _) | ParsedNumResult::Int(int, _),
+                )) => {
                     let expr = Expr2::SmallInt {
-                        number: IntVal::I64(int),
+                        number: IntVal::I64(match int {
+                            IntValue::U128(_) => todo!(),
+                            IntValue::I128(n) => n as i64, // FIXME
+                        }),
                         var: env.var_store.fresh(),
                         // TODO non-hardcode
                         style: IntStyle::Decimal,
-                        text: PoolStr::new(string, env.pool),
+                        text: PoolStr::new(parsed, env.pool),
+                    };
+
+                    (expr, Output::default())
+                }
+                Ok((parsed, ParsedNumResult::Float(float, _))) => {
+                    let expr = Expr2::Float {
+                        number: FloatVal::F64(float),
+                        var: env.var_store.fresh(),
+                        text: PoolStr::new(parsed, env.pool),
                     };
 
                     (expr, Output::default())
@@ -107,9 +125,12 @@ pub fn expr_to_expr2<'a>(
             is_negative,
         } => {
             match finish_parsing_base(string, *base, *is_negative) {
-                Ok(int) => {
+                Ok((int, _bound)) => {
                     let expr = Expr2::SmallInt {
-                        number: IntVal::I64(int),
+                        number: IntVal::I64(match int {
+                            IntValue::U128(_) => todo!(),
+                            IntValue::I128(n) => n as i64, // FIXME
+                        }),
                         var: env.var_store.fresh(),
                         // TODO non-hardcode
                         style: IntStyle::from_base(*base),
@@ -155,25 +176,11 @@ pub fn expr_to_expr2<'a>(
             (expr, output)
         }
 
-        GlobalTag(tag) => {
-            // a global tag without any arguments
+        Tag(tag) => {
+            // a tag without any arguments
             (
-                Expr2::GlobalTag {
+                Expr2::Tag {
                     name: PoolStr::new(tag, env.pool),
-                    variant_var: env.var_store.fresh(),
-                    ext_var: env.var_store.fresh(),
-                    arguments: PoolVec::empty(env.pool),
-                },
-                Output::default(),
-            )
-        }
-        PrivateTag(name) => {
-            // a private tag without any arguments
-            let ident_id = env.ident_ids.get_or_insert(&(*name).into());
-            let name = Symbol::new(env.home, ident_id);
-            (
-                Expr2::PrivateTag {
-                    name,
                     variant_var: env.var_store.fresh(),
                     ext_var: env.var_store.fresh(),
                     arguments: PoolVec::empty(env.pool),
@@ -539,23 +546,12 @@ pub fn expr_to_expr2<'a>(
                     // We can't call a runtime error; bail out by propagating it!
                     return (fn_expr, output);
                 }
-                Expr2::GlobalTag {
+                Expr2::Tag {
                     variant_var,
                     ext_var,
                     name,
                     ..
-                } => Expr2::GlobalTag {
-                    variant_var,
-                    ext_var,
-                    name,
-                    arguments: args,
-                },
-                Expr2::PrivateTag {
-                    variant_var,
-                    ext_var,
-                    name,
-                    ..
-                } => Expr2::PrivateTag {
+                } => Expr2::Tag {
                     variant_var,
                     ext_var,
                     name,

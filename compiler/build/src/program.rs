@@ -1,13 +1,11 @@
-#[cfg(feature = "llvm")]
 use roc_gen_llvm::llvm::build::module_from_builtins;
-#[cfg(feature = "llvm")]
 pub use roc_gen_llvm::llvm::build::FunctionIterator;
-use roc_load::file::{LoadedModule, MonomorphizedModule};
+use roc_load::{LoadedModule, MonomorphizedModule};
 use roc_module::symbol::{Interns, ModuleId};
 use roc_mono::ir::OptLevel;
 use roc_region::all::LineInfo;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use roc_collections::all::MutMap;
 #[cfg(feature = "target-wasm32")]
@@ -19,51 +17,52 @@ pub struct CodeGenTiming {
     pub emit_o_file: Duration,
 }
 
-// TODO: If modules besides this one start needing to know which version of
-// llvm we're using, consider moving me somewhere else.
-#[cfg(feature = "llvm")]
-const LLVM_VERSION: &str = "12";
-
-// TODO instead of finding exhaustiveness problems in monomorphization, find
-// them after type checking (like Elm does) so we can complete the entire
-// `roc check` process without needing to monomorphize.
-/// Returns the number of problems reported.
-pub fn report_problems_monomorphized(loaded: &mut MonomorphizedModule) -> usize {
+pub fn report_problems_monomorphized(loaded: &mut MonomorphizedModule) -> Problems {
     report_problems_help(
         loaded.total_problems(),
-        &loaded.header_sources,
         &loaded.sources,
         &loaded.interns,
         &mut loaded.can_problems,
         &mut loaded.type_problems,
-        &mut loaded.mono_problems,
     )
 }
 
-pub fn report_problems_typechecked(loaded: &mut LoadedModule) -> usize {
+pub fn report_problems_typechecked(loaded: &mut LoadedModule) -> Problems {
     report_problems_help(
         loaded.total_problems(),
-        &loaded.header_sources,
         &loaded.sources,
         &loaded.interns,
         &mut loaded.can_problems,
         &mut loaded.type_problems,
-        &mut Default::default(),
     )
+}
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct Problems {
+    pub errors: usize,
+    pub warnings: usize,
+}
+
+impl Problems {
+    pub fn exit_code(&self) -> i32 {
+        // 0 means no problems, 1 means errors, 2 means warnings
+        if self.errors > 0 {
+            1
+        } else {
+            self.warnings.min(1) as i32
+        }
+    }
 }
 
 fn report_problems_help(
     total_problems: usize,
-    header_sources: &MutMap<ModuleId, (PathBuf, Box<str>)>,
     sources: &MutMap<ModuleId, (PathBuf, Box<str>)>,
     interns: &Interns,
     can_problems: &mut MutMap<ModuleId, Vec<roc_problem::can::Problem>>,
     type_problems: &mut MutMap<ModuleId, Vec<roc_solve::solve::TypeError>>,
-    mono_problems: &mut MutMap<ModuleId, Vec<roc_mono::ir::MonoProblem>>,
-) -> usize {
+) -> Problems {
     use roc_reporting::report::{
-        can_problem, mono_problem, type_problem, Report, RocDocAllocator, Severity::*,
-        DEFAULT_PALETTE,
+        can_problem, type_problem, Report, RocDocAllocator, Severity::*, DEFAULT_PALETTE,
     };
     let palette = DEFAULT_PALETTE;
 
@@ -75,14 +74,9 @@ fn report_problems_help(
     for (home, (module_path, src)) in sources.iter() {
         let mut src_lines: Vec<&str> = Vec::new();
 
-        if let Some((_, header_src)) = header_sources.get(home) {
-            src_lines.extend(header_src.split('\n'));
-            src_lines.extend(src.split('\n').skip(1));
-        } else {
-            src_lines.extend(src.split('\n'));
-        }
+        src_lines.extend(src.split('\n'));
 
-        let lines = LineInfo::new(src);
+        let lines = LineInfo::new(&src_lines.join("\n"));
 
         // Report parsing and canonicalization problems
         let alloc = RocDocAllocator::new(&src_lines, *home, interns);
@@ -125,25 +119,6 @@ fn report_problems_help(
                 }
             }
         }
-
-        let problems = mono_problems.remove(home).unwrap_or_default();
-
-        for problem in problems {
-            let report = mono_problem(&alloc, &lines, module_path.clone(), problem);
-            let severity = report.severity;
-            let mut buf = String::new();
-
-            report.render_color_terminal(&mut buf, &alloc, &palette);
-
-            match severity {
-                Warning => {
-                    warnings.push(buf);
-                }
-                RuntimeError => {
-                    errors.push(buf);
-                }
-            }
-        }
     }
 
     let problems_reported;
@@ -152,13 +127,13 @@ fn report_problems_help(
     if errors.is_empty() {
         problems_reported = warnings.len();
 
-        for warning in warnings {
+        for warning in warnings.iter() {
             println!("\n{}\n", warning);
         }
     } else {
         problems_reported = errors.len();
 
-        for error in errors {
+        for error in errors.iter() {
             println!("\n{}\n", error);
         }
     }
@@ -173,30 +148,13 @@ fn report_problems_help(
         println!("{}\u{001B}[0m\n", Report::horizontal_rule(&palette));
     }
 
-    problems_reported
-}
-
-#[cfg(not(feature = "llvm"))]
-pub fn gen_from_mono_module(
-    arena: &bumpalo::Bump,
-    loaded: MonomorphizedModule,
-    _roc_file_path: &Path,
-    target: &target_lexicon::Triple,
-    app_o_file: &Path,
-    opt_level: OptLevel,
-    _emit_debug_info: bool,
-) -> CodeGenTiming {
-    match opt_level {
-        OptLevel::Optimize => {
-            todo!("Return this error message in a better way: optimized builds not supported without llvm backend");
-        }
-        OptLevel::Normal | OptLevel::Development => {
-            gen_from_mono_module_dev(arena, loaded, target, app_o_file)
-        }
+    Problems {
+        errors: errors.len(),
+        warnings: warnings.len(),
     }
 }
 
-#[cfg(feature = "llvm")]
+#[allow(clippy::too_many_arguments)]
 pub fn gen_from_mono_module(
     arena: &bumpalo::Bump,
     loaded: MonomorphizedModule,
@@ -205,9 +163,10 @@ pub fn gen_from_mono_module(
     app_o_file: &Path,
     opt_level: OptLevel,
     emit_debug_info: bool,
+    preprocessed_host_path: &Path,
 ) -> CodeGenTiming {
     match opt_level {
-        OptLevel::Normal | OptLevel::Optimize => gen_from_mono_module_llvm(
+        OptLevel::Normal | OptLevel::Size | OptLevel::Optimize => gen_from_mono_module_llvm(
             arena,
             loaded,
             roc_file_path,
@@ -216,14 +175,15 @@ pub fn gen_from_mono_module(
             opt_level,
             emit_debug_info,
         ),
-        OptLevel::Development => gen_from_mono_module_dev(arena, loaded, target, app_o_file),
+        OptLevel::Development => {
+            gen_from_mono_module_dev(arena, loaded, target, app_o_file, preprocessed_host_path)
+        }
     }
 }
 
 // TODO how should imported modules factor into this? What if those use builtins too?
 // TODO this should probably use more helper functions
 // TODO make this polymorphic in the llvm functions so it can be reused for another backend.
-#[cfg(feature = "llvm")]
 pub fn gen_from_mono_module_llvm(
     arena: &bumpalo::Bump,
     loaded: MonomorphizedModule,
@@ -237,13 +197,12 @@ pub fn gen_from_mono_module_llvm(
     use inkwell::attributes::{Attribute, AttributeLoc};
     use inkwell::context::Context;
     use inkwell::module::Linkage;
-    use inkwell::targets::{CodeModel, FileType, RelocMode};
-    use std::time::SystemTime;
+    use inkwell::targets::{FileType, RelocMode};
 
     let code_gen_start = SystemTime::now();
 
     // Generate the binary
-    let ptr_bytes = target.pointer_width().unwrap().bytes() as u32;
+    let target_info = roc_target::TargetInfo::from(target);
     let context = Context::create();
     let module = arena.alloc(module_from_builtins(target, &context, "app"));
 
@@ -275,6 +234,7 @@ pub fn gen_from_mono_module_llvm(
             || name.starts_with("roc_builtins.dec")
             || name.starts_with("list.RocList")
             || name.starts_with("dict.RocDict")
+            || name.contains("incref")
             || name.contains("decref")
         {
             function.add_attribute(AttributeLoc::Function, enum_attr);
@@ -294,11 +254,11 @@ pub fn gen_from_mono_module_llvm(
         context: &context,
         interns: loaded.interns,
         module,
-        ptr_bytes,
+        target_info,
         // in gen_tests, the compiler provides roc_panic
         // and sets up the setjump/longjump exception handling
         is_gen_test: false,
-        exposed_to_host: loaded.exposed_to_host.keys().copied().collect(),
+        exposed_to_host: loaded.exposed_to_host.values.keys().copied().collect(),
     };
 
     roc_gen_llvm::llvm::build::build_procedures(
@@ -372,9 +332,11 @@ pub fn gen_from_mono_module_llvm(
 
         use target_lexicon::Architecture;
         match target.architecture {
-            Architecture::X86_64 | Architecture::X86_32(_) | Architecture::Aarch64(_) => {
-                // assemble the .ll into a .bc
-                let _ = Command::new("llvm-as")
+            Architecture::X86_64
+            | Architecture::X86_32(_)
+            | Architecture::Aarch64(_)
+            | Architecture::Wasm32 => {
+                let ll_to_bc = Command::new("llvm-as")
                     .args(&[
                         app_ll_dbg_file.to_str().unwrap(),
                         "-o",
@@ -382,6 +344,8 @@ pub fn gen_from_mono_module_llvm(
                     ])
                     .output()
                     .unwrap();
+
+                assert!(ll_to_bc.stderr.is_empty(), "{:#?}", ll_to_bc);
 
                 let llc_args = &[
                     "-relocation-model=pic",
@@ -396,26 +360,9 @@ pub fn gen_from_mono_module_llvm(
                 //
                 // different systems name this executable differently, so we shotgun for
                 // the most common ones and then give up.
-                let _: Result<std::process::Output, std::io::Error> =
-                    Command::new(format!("llc-{}", LLVM_VERSION))
-                        .args(llc_args)
-                        .output()
-                        .or_else(|_| Command::new("llc").args(llc_args).output())
-                        .map_err(|_| {
-                            panic!("We couldn't find llc-{} on your machine!", LLVM_VERSION);
-                        });
-            }
+                let bc_to_object = Command::new("llc").args(llc_args).output().unwrap();
 
-            Architecture::Wasm32 => {
-                // assemble the .ll into a .bc
-                let _ = Command::new("llvm-as")
-                    .args(&[
-                        app_ll_dbg_file.to_str().unwrap(),
-                        "-o",
-                        app_o_file.to_str().unwrap(),
-                    ])
-                    .output()
-                    .unwrap();
+                assert!(bc_to_object.stderr.is_empty(), "{:#?}", bc_to_object);
             }
             _ => unreachable!(),
         }
@@ -425,10 +372,8 @@ pub fn gen_from_mono_module_llvm(
         match target.architecture {
             Architecture::X86_64 | Architecture::X86_32(_) | Architecture::Aarch64(_) => {
                 let reloc = RelocMode::PIC;
-                let model = CodeModel::Default;
                 let target_machine =
-                    target::target_machine(target, convert_opt_level(opt_level), reloc, model)
-                        .unwrap();
+                    target::target_machine(target, convert_opt_level(opt_level), reloc).unwrap();
 
                 target_machine
                     .write_to_file(env.module, FileType::Object, app_o_file)
@@ -459,11 +404,14 @@ pub fn gen_from_mono_module_dev(
     loaded: MonomorphizedModule,
     target: &target_lexicon::Triple,
     app_o_file: &Path,
+    preprocessed_host_path: &Path,
 ) -> CodeGenTiming {
     use target_lexicon::Architecture;
 
     match target.architecture {
-        Architecture::Wasm32 => gen_from_mono_module_dev_wasm32(arena, loaded, app_o_file),
+        Architecture::Wasm32 => {
+            gen_from_mono_module_dev_wasm32(arena, loaded, app_o_file, preprocessed_host_path)
+        }
         Architecture::X86_64 | Architecture::Aarch64(_) => {
             gen_from_mono_module_dev_assembly(arena, loaded, target, app_o_file)
         }
@@ -477,6 +425,7 @@ pub fn gen_from_mono_module_dev(
     loaded: MonomorphizedModule,
     target: &target_lexicon::Triple,
     app_o_file: &Path,
+    _host_input_path: &Path,
 ) -> CodeGenTiming {
     use target_lexicon::Architecture;
 
@@ -493,7 +442,16 @@ fn gen_from_mono_module_dev_wasm32(
     arena: &bumpalo::Bump,
     loaded: MonomorphizedModule,
     app_o_file: &Path,
+    preprocessed_host_path: &Path,
 ) -> CodeGenTiming {
+    if true {
+        // WIP: gen_wasm is not yet able to link roc__mainForHost_1_exposed
+        // It works fine in tests and in the web REPL, but not with a real host!
+        // This code path is not part of test_gen or repl_wasm
+        todo!("WebAssembly development backend is not ready to use yet!")
+    }
+
+    let code_gen_start = SystemTime::now();
     let MonomorphizedModule {
         module_id,
         procedures,
@@ -503,6 +461,7 @@ fn gen_from_mono_module_dev_wasm32(
 
     let exposed_to_host = loaded
         .exposed_to_host
+        .values
         .keys()
         .copied()
         .collect::<MutSet<_>>();
@@ -513,11 +472,24 @@ fn gen_from_mono_module_dev_wasm32(
         exposed_to_host,
     };
 
-    let bytes = roc_gen_wasm::build_module(&env, &mut interns, procedures).unwrap();
+    let preloaded_host_bytes = std::fs::read(preprocessed_host_path)
+        .expect("Failed to read host object file! Try setting --precompiled-host=false");
 
-    std::fs::write(&app_o_file, &bytes).expect("failed to write object to file");
+    let final_binary_bytes =
+        roc_gen_wasm::build_module(&env, &mut interns, &preloaded_host_bytes, procedures);
 
-    CodeGenTiming::default()
+    let code_gen = code_gen_start.elapsed().unwrap();
+    let emit_o_file_start = SystemTime::now();
+
+    // The app_o_file is actually the final binary
+    std::fs::write(&app_o_file, &final_binary_bytes).expect("failed to write object to file");
+
+    let emit_o_file = emit_o_file_start.elapsed().unwrap();
+
+    CodeGenTiming {
+        code_gen,
+        emit_o_file,
+    }
 }
 
 fn gen_from_mono_module_dev_assembly(
@@ -526,6 +498,8 @@ fn gen_from_mono_module_dev_assembly(
     target: &target_lexicon::Triple,
     app_o_file: &Path,
 ) -> CodeGenTiming {
+    let code_gen_start = SystemTime::now();
+
     let lazy_literals = true;
     let generate_allocators = false; // provided by the platform
 
@@ -540,17 +514,25 @@ fn gen_from_mono_module_dev_assembly(
     let env = roc_gen_dev::Env {
         arena,
         module_id,
-        exposed_to_host: exposed_to_host.keys().copied().collect(),
+        exposed_to_host: exposed_to_host.values.keys().copied().collect(),
         lazy_literals,
         generate_allocators,
     };
 
     let module_object = roc_gen_dev::build_module(&env, &mut interns, target, procedures);
 
+    let code_gen = code_gen_start.elapsed().unwrap();
+    let emit_o_file_start = SystemTime::now();
+
     let module_out = module_object
         .write()
         .expect("failed to build output object");
     std::fs::write(&app_o_file, module_out).expect("failed to write object to file");
 
-    CodeGenTiming::default()
+    let emit_o_file = emit_o_file_start.elapsed().unwrap();
+
+    CodeGenTiming {
+        code_gen,
+        emit_o_file,
+    }
 }

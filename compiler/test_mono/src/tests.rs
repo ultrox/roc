@@ -6,9 +6,6 @@
 #![allow(clippy::float_cmp)]
 
 #[macro_use]
-extern crate pretty_assertions;
-
-#[macro_use]
 extern crate indoc;
 
 /// Used in the with_larger_debug_stack() function, for tests that otherwise
@@ -18,12 +15,13 @@ const EXPANDED_STACK_SIZE: usize = 8 * 1024 * 1024;
 
 use test_mono_macros::*;
 
-use roc_can::builtins::builtin_defs_map;
 use roc_collections::all::MutMap;
+use roc_load::Threading;
 use roc_module::symbol::Symbol;
 use roc_mono::ir::Proc;
-
 use roc_mono::ir::ProcLayout;
+
+const TARGET_INFO: roc_target::TargetInfo = roc_target::TargetInfo::default_x86_64();
 
 /// Without this, some tests pass in `cargo test --release` but fail without
 /// the --release flag because they run out of stack space. This increases
@@ -79,8 +77,6 @@ fn compiles_to_ir(test_name: &str, src: &str) {
 
     let arena = &Bump::new();
 
-    // let stdlib = roc_builtins::unique::uniq_stdlib();
-    let stdlib = roc_builtins::std::standard_stdlib();
     let filename = PathBuf::from("Test.roc");
     let src_dir = Path::new("fake/test/path");
 
@@ -95,29 +91,27 @@ fn compiles_to_ir(test_name: &str, src: &str) {
         module_src = &temp;
     }
 
-    let exposed_types = MutMap::default();
-
-    let loaded = roc_load::file::load_and_monomorphize_from_str(
+    let loaded = roc_load::load_and_monomorphize_from_str(
         arena,
         filename,
         module_src,
-        &stdlib,
         src_dir,
-        exposed_types,
-        8,
-        builtin_defs_map,
+        Default::default(),
+        TARGET_INFO,
+        roc_reporting::report::RenderTarget::Generic,
+        Threading::Single,
     );
 
     let mut loaded = match loaded {
         Ok(x) => x,
-        Err(roc_load::file::LoadingProblem::FormattedReport(report)) => {
+        Err(roc_load::LoadingProblem::FormattedReport(report)) => {
             println!("{}", report);
             panic!();
         }
         Err(e) => panic!("{:?}", e),
     };
 
-    use roc_load::file::MonomorphizedModule;
+    use roc_load::MonomorphizedModule;
     let MonomorphizedModule {
         module_id: home,
         procedures,
@@ -127,18 +121,16 @@ fn compiles_to_ir(test_name: &str, src: &str) {
 
     let can_problems = loaded.can_problems.remove(&home).unwrap_or_default();
     let type_problems = loaded.type_problems.remove(&home).unwrap_or_default();
-    let mono_problems = loaded.mono_problems.remove(&home).unwrap_or_default();
 
     if !can_problems.is_empty() {
         println!("Ignoring {} canonicalization problems", can_problems.len());
     }
 
-    assert_eq!(type_problems, Vec::new());
-    assert_eq!(mono_problems, Vec::new());
+    assert!(type_problems.is_empty());
 
-    debug_assert_eq!(exposed_to_host.len(), 1);
+    debug_assert_eq!(exposed_to_host.values.len(), 1);
 
-    let main_fn_symbol = exposed_to_host.keys().copied().next().unwrap();
+    let main_fn_symbol = exposed_to_host.values.keys().copied().next().unwrap();
 
     verify_procedures(test_name, procedures, main_fn_symbol);
 }
@@ -279,7 +271,7 @@ fn ir_round() {
 #[mono_test]
 fn ir_when_idiv() {
     r#"
-    when 1000 // 10 is
+    when Num.divTruncChecked 1000 10 is
         Ok val -> val
         Err _ -> -1
     "#
@@ -982,17 +974,17 @@ fn closure_in_list() {
     indoc!(
         r#"
         app "test" provides [ main ] to "./platform"
-    
+
         foo = \{} ->
             x = 41
-    
+
             f = \{} -> x
-    
+
             [ f ]
-    
+
         main =
             items = foo {}
-    
+
             List.len items
         "#
     )
@@ -1005,7 +997,7 @@ fn somehow_drops_definitions() {
         r#"
         app "test" provides [ main ] to "./platform"
 
-        one : I64 
+        one : I64
         one = 1
 
         two : I64
@@ -1037,7 +1029,7 @@ fn specialize_closures() {
         apply = \f, x -> f x
 
         main =
-            one : I64 
+            one : I64
             one = 1
 
             two : I64
@@ -1111,6 +1103,279 @@ fn empty_list_of_function_type() {
     )
 }
 
+#[mono_test]
+fn monomorphized_ints() {
+    indoc!(
+        r#"
+        app "test" provides [main] to "./platform"
+
+        main =
+            x = 100
+
+            f : U8, U32 -> Nat
+            f = \_, _ -> 18
+
+            f x x
+        "#
+    )
+}
+
+#[mono_test]
+fn monomorphized_floats() {
+    indoc!(
+        r#"
+        app "test" provides [main] to "./platform"
+
+        main =
+            x = 100.0
+
+            f : F32, F64 -> Nat
+            f = \_, _ -> 18
+
+            f x x
+        "#
+    )
+}
+
+#[mono_test]
+#[ignore = "TODO"]
+fn monomorphized_ints_aliased() {
+    indoc!(
+        r#"
+        app "test" provides [main] to "./platform"
+
+        main =
+            y = 100
+            w1 = y
+            w2 = y
+
+            f = \_, _ -> 1
+
+            f1 : U8, U32 -> Nat
+            f1 = f
+
+            f2 : U32, U8 -> Nat
+            f2 = f
+
+            f1 w1 w2 + f2 w1 w2
+        "#
+    )
+}
+
+#[mono_test]
+fn monomorphized_tag() {
+    indoc!(
+        r#"
+        app "test" provides [main] to "./platform"
+
+        main =
+            b = False
+            f : Bool, [True, False, Idk] -> U8
+            f = \_, _ -> 18
+            f b b
+        "#
+    )
+}
+
+#[mono_test]
+fn monomorphized_tag_with_aliased_args() {
+    indoc!(
+        r#"
+        app "test" provides [main] to "./platform"
+
+        main =
+            b = False
+            c = False
+            a = A b c
+            f : [A Bool Bool] -> Nat
+            f = \_ -> 1
+            f a
+        "#
+    )
+}
+
+#[mono_test]
+fn monomorphized_list() {
+    indoc!(
+        r#"
+        app "test" provides [main] to "./platform"
+
+        main =
+            l = [1, 2, 3]
+
+            f : List U8, List U16 -> Nat
+            f = \_, _ -> 18
+
+            f l l
+        "#
+    )
+}
+
+#[mono_test]
+fn monomorphized_applied_tag() {
+    indoc!(
+        r#"
+        app "test" provides [ main ] to "./platform"
+
+        main =
+            a = A "A"
+            f = \x ->
+                when x is
+                    A y -> y
+                    B y -> y
+            f a
+        "#
+    )
+}
+
+#[mono_test]
+#[ignore = "Cannot compile polymorphic closures yet"]
+fn aliased_polymorphic_closure() {
+    indoc!(
+        r#"
+        n : U8
+        n = 1
+        f = \{} -> (\a -> n)
+        g = f {}
+        g {}
+        "#
+    )
+}
+
+#[mono_test]
+fn issue_2535_polymorphic_fields_referenced_in_list() {
+    indoc!(
+        r#"
+        app "test" provides [ nums ] to "./platform"
+
+        alpha = { a: 1, b: 2 }
+
+        nums : List U8
+        nums =
+            [
+                alpha.a,
+                alpha.b,
+            ]
+        "#
+    )
+}
+
+#[mono_test]
+fn issue_2725_alias_polymorphic_lambda() {
+    indoc!(
+        r#"
+        wrap = \value -> Tag value
+        wrapIt = wrap
+        wrapIt 42
+        "#
+    )
+}
+
+#[mono_test]
+fn issue_2583_specialize_errors_behind_unified_branches() {
+    indoc!(
+        r#"
+        if True then List.first [] else Str.toI64 ""
+        "#
+    )
+}
+
+#[mono_test]
+fn issue_2810() {
+    indoc!(
+        r#"
+        Command : [ Command Tool ]
+
+        Job : [ Job Command ]
+
+        Tool : [ SystemTool, FromJob Job ]
+
+        a : Job
+        a = Job (Command (FromJob (Job (Command SystemTool))))
+        a
+        "#
+    )
+}
+
+#[mono_test]
+fn issue_2811() {
+    indoc!(
+        r#"
+        x = Command { tool: "bash" }
+        Command c = x
+        c.tool
+        "#
+    )
+}
+
+#[mono_test]
+fn specialize_ability_call() {
+    indoc!(
+        r#"
+        app "test" provides [ main ] to "./platform"
+
+        Hash has
+            hash : a -> U64 | a has Hash
+
+        Id := U64
+
+        hash : Id -> U64
+        hash = \@Id n -> n
+
+        main = hash (@Id 1234)
+        "#
+    )
+}
+
+#[mono_test]
+fn opaque_assign_to_symbol() {
+    indoc!(
+        r#"
+        app "test" provides [ out ] to "./platform"
+
+        Variable := U8
+
+        fromUtf8 : U8 -> Result Variable [ InvalidVariableUtf8 ]
+        fromUtf8 = \char ->
+            Ok (@Variable char)
+
+        out = fromUtf8 98
+        "#
+    )
+}
+
+#[mono_test]
+fn encode() {
+    indoc!(
+        r#"
+        app "test" provides [ myU8Bytes ] to "./platform"
+
+        Encoder fmt := List U8, fmt -> List U8 | fmt has Format
+
+        Encoding has
+          toEncoder : val -> Encoder fmt | val has Encoding, fmt has Format
+
+        Format has
+          u8 : U8 -> Encoder fmt | fmt has Format
+
+
+        Linear := {}
+
+        # impl Format for Linear
+        u8 = \n -> @Encoder (\lst, @Linear {} -> List.append lst n)
+
+        MyU8 := U8
+
+        # impl Encoding for MyU8
+        toEncoder = \@MyU8 n -> u8 n
+
+        myU8Bytes =
+            when toEncoder (@MyU8 15) is
+                @Encoder doEncode -> doEncode [] (@Linear {})
+        "#
+    )
+}
+
 // #[ignore]
 // #[mono_test]
 // fn static_str_closure() {
@@ -1129,3 +1394,50 @@ fn empty_list_of_function_type() {
 //         "#
 //     )
 // }
+
+#[mono_test]
+fn list_map_closure_borrows() {
+    indoc!(
+        r#"
+        app "test" provides [ out ] to "./platform"
+
+        list = [ Str.concat "lllllllllllllllllllllooooooooooong" "g" ]
+
+        example1 = List.map list \string -> Str.repeat string 2
+
+        out =
+            when List.get example1 0 is
+                Ok s -> s
+                Err _ -> "Hello, World!\n"
+        "#
+    )
+}
+
+#[mono_test]
+fn list_map_closure_owns() {
+    indoc!(
+        r#"
+        app "test" provides [ out ] to "./platform"
+
+        list = [ Str.concat "lllllllllllllllllllllooooooooooong" "g" ]
+
+        example2 = List.map list \string -> Str.concat string "!"
+
+        out =
+            when List.get example2 0 is
+                Ok s -> s
+                Err _ -> "Hello, World!\n"
+        "#
+    )
+}
+
+#[mono_test]
+fn list_sort_asc() {
+    indoc!(
+        r#"
+        app "test" provides [ out ] to "./platform"
+
+        out = List.sortAsc [ 4,3,2,1 ]
+        "#
+    )
+}

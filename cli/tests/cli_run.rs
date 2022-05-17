@@ -2,6 +2,7 @@
 extern crate pretty_assertions;
 
 extern crate bumpalo;
+extern crate indoc;
 extern crate roc_collections;
 extern crate roc_load;
 extern crate roc_module;
@@ -9,21 +10,44 @@ extern crate roc_module;
 #[cfg(test)]
 mod cli_run {
     use cli_utils::helpers::{
-        example_file, examples_dir, extract_valgrind_errors, fixture_file, run_cmd, run_roc,
-        run_with_valgrind, ValgrindError, ValgrindErrorXWhat,
+        example_file, examples_dir, extract_valgrind_errors, fixture_file, fixtures_dir,
+        known_bad_file, run_cmd, run_roc, run_with_valgrind, Out, ValgrindError,
+        ValgrindErrorXWhat,
     };
+    use const_format::concatcp;
+    use indoc::indoc;
+    use roc_cli::{CMD_BUILD, CMD_CHECK, CMD_FORMAT, CMD_RUN};
+    use roc_test_utils::assert_multiline_str_eq;
     use serial_test::serial;
+    use std::iter;
     use std::path::{Path, PathBuf};
+    use strum::IntoEnumIterator;
+    use strum_macros::EnumIter;
+
+    const OPTIMIZE_FLAG: &str = concatcp!("--", roc_cli::FLAG_OPTIMIZE);
+    const VALGRIND_FLAG: &str = concatcp!("--", roc_cli::FLAG_VALGRIND);
+    const LINKER_FLAG: &str = concatcp!("--", roc_cli::FLAG_LINKER);
+    const CHECK_FLAG: &str = concatcp!("--", roc_cli::FLAG_CHECK);
+    #[allow(dead_code)]
+    const TARGET_FLAG: &str = concatcp!("--", roc_cli::FLAG_TARGET);
+
+    #[derive(Debug, EnumIter)]
+    enum CliMode {
+        RocBuild,
+        RocRun,
+        Roc,
+    }
 
     #[cfg(not(debug_assertions))]
     use roc_collections::all::MutMap;
 
-    #[cfg(target_os = "linux")]
-    const TEST_SURGICAL_LINKER: bool = true;
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    const TEST_LEGACY_LINKER: bool = true;
 
-    // Surgical linker currently only supports linux.
-    #[cfg(not(target_os = "linux"))]
-    const TEST_SURGICAL_LINKER: bool = false;
+    // Surgical linker currently only supports linux x86_64,
+    // so we're always testing the legacy linker on other targets.
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    const TEST_LEGACY_LINKER: bool = false;
 
     #[cfg(not(target_os = "macos"))]
     const ALLOW_VALGRIND: bool = true;
@@ -44,6 +68,75 @@ mod cli_run {
         use_valgrind: bool,
     }
 
+    fn strip_colors(str: &str) -> String {
+        use roc_reporting::report::ANSI_STYLE_CODES;
+        str.replace(ANSI_STYLE_CODES.red, "")
+            .replace(ANSI_STYLE_CODES.green, "")
+            .replace(ANSI_STYLE_CODES.yellow, "")
+            .replace(ANSI_STYLE_CODES.blue, "")
+            .replace(ANSI_STYLE_CODES.magenta, "")
+            .replace(ANSI_STYLE_CODES.cyan, "")
+            .replace(ANSI_STYLE_CODES.white, "")
+            .replace(ANSI_STYLE_CODES.bold, "")
+            .replace(ANSI_STYLE_CODES.underline, "")
+            .replace(ANSI_STYLE_CODES.reset, "")
+            .replace(ANSI_STYLE_CODES.color_reset, "")
+    }
+
+    fn check_compile_error(file: &Path, flags: &[&str], expected: &str) {
+        let compile_out = run_roc([CMD_CHECK, file.to_str().unwrap()].iter().chain(flags), &[]);
+        let err = compile_out.stdout.trim();
+        let err = strip_colors(err);
+
+        // e.g. "1 error and 0 warnings found in 123 ms."
+        let (before_first_digit, _) = err.split_at(err.rfind("found in ").unwrap());
+        let err = format!("{}found in <ignored for test> ms.", before_first_digit);
+
+        assert_multiline_str_eq!(err.as_str(), expected);
+    }
+
+    fn check_format_check_as_expected(file: &Path, expects_success_exit_code: bool) {
+        let out = run_roc([CMD_FORMAT, file.to_str().unwrap(), CHECK_FLAG], &[]);
+
+        assert_eq!(out.status.success(), expects_success_exit_code);
+    }
+
+    fn run_roc_on<'a, I: IntoIterator<Item = &'a str>>(
+        file: &'a Path,
+        args: I,
+        stdin: &[&str],
+        input_file: Option<PathBuf>,
+    ) -> Out {
+        let compile_out = match input_file {
+            Some(input_file) => run_roc(
+                // converting these all to String avoids lifetime issues
+                args.into_iter().map(|arg| arg.to_string()).chain([
+                    file.to_str().unwrap().to_string(),
+                    input_file.to_str().unwrap().to_string(),
+                ]),
+                stdin,
+            ),
+            None => run_roc(
+                args.into_iter().chain(iter::once(file.to_str().unwrap())),
+                stdin,
+            ),
+        };
+
+        // If there is any stderr, it should be reporting the runtime and that's it!
+        if !(compile_out.stderr.is_empty()
+            || compile_out.stderr.starts_with("runtime: ") && compile_out.stderr.ends_with("ms\n"))
+        {
+            panic!(
+                "`roc` command had unexpected stderr: {}",
+                compile_out.stderr
+            );
+        }
+
+        assert!(compile_out.status.success(), "bad status {:?}", compile_out);
+
+        compile_out
+    }
+
     fn check_output_with_stdin(
         file: &Path,
         stdin: &[&str],
@@ -53,91 +146,104 @@ mod cli_run {
         expected_ending: &str,
         use_valgrind: bool,
     ) {
-        let mut all_flags = vec![];
-        all_flags.extend_from_slice(flags);
+        for cli_mode in CliMode::iter() {
+            let flags = {
+                let mut vec = flags.to_vec();
 
-        if use_valgrind {
-            all_flags.extend_from_slice(&["--valgrind"]);
-        }
+                if use_valgrind {
+                    vec.push(VALGRIND_FLAG);
+                }
 
-        let compile_out = run_roc(&[&["build", file.to_str().unwrap()], &all_flags[..]].concat());
-        if !compile_out.stderr.is_empty() {
-            panic!("{}", compile_out.stderr);
-        }
-
-        assert!(compile_out.status.success(), "bad status {:?}", compile_out);
-
-        let out = if use_valgrind && ALLOW_VALGRIND {
-            let (valgrind_out, raw_xml) = if let Some(input_file) = input_file {
-                run_with_valgrind(
-                    stdin,
-                    &[
-                        file.with_file_name(executable_filename).to_str().unwrap(),
-                        input_file.to_str().unwrap(),
-                    ],
-                )
-            } else {
-                run_with_valgrind(
-                    stdin,
-                    &[file.with_file_name(executable_filename).to_str().unwrap()],
-                )
+                vec.into_iter()
             };
 
-            if valgrind_out.status.success() {
-                let memory_errors = extract_valgrind_errors(&raw_xml).unwrap_or_else(|err| {
-                    panic!("failed to parse the `valgrind` xml output. Error was:\n\n{:?}\n\nvalgrind xml was: \"{}\"\n\nvalgrind stdout was: \"{}\"\n\nvalgrind stderr was: \"{}\"", err, raw_xml, valgrind_out.stdout, valgrind_out.stderr);
-                });
+            let out = match cli_mode {
+                CliMode::RocBuild => {
+                    run_roc_on(file, iter::once(CMD_BUILD).chain(flags.clone()), &[], None);
 
-                if !memory_errors.is_empty() {
-                    for error in memory_errors {
-                        let ValgrindError {
-                            kind,
-                            what: _,
-                            xwhat,
-                        } = error;
-                        println!("Valgrind Error: {}\n", kind);
+                    if use_valgrind && ALLOW_VALGRIND {
+                        let (valgrind_out, raw_xml) = if let Some(ref input_file) = input_file {
+                            run_with_valgrind(
+                                stdin.iter().copied(),
+                                &[
+                                    file.with_file_name(executable_filename).to_str().unwrap(),
+                                    input_file.clone().to_str().unwrap(),
+                                ],
+                            )
+                        } else {
+                            run_with_valgrind(
+                                stdin.iter().copied(),
+                                &[file.with_file_name(executable_filename).to_str().unwrap()],
+                            )
+                        };
 
-                        if let Some(ValgrindErrorXWhat {
-                            text,
-                            leakedbytes: _,
-                            leakedblocks: _,
-                        }) = xwhat
-                        {
-                            println!("    {}", text);
+                        if valgrind_out.status.success() {
+                            let memory_errors = extract_valgrind_errors(&raw_xml).unwrap_or_else(|err| {
+                                panic!("failed to parse the `valgrind` xml output. Error was:\n\n{:?}\n\nvalgrind xml was: \"{}\"\n\nvalgrind stdout was: \"{}\"\n\nvalgrind stderr was: \"{}\"", err, raw_xml, valgrind_out.stdout, valgrind_out.stderr);
+                            });
+
+                            if !memory_errors.is_empty() {
+                                for error in memory_errors {
+                                    let ValgrindError {
+                                        kind,
+                                        what: _,
+                                        xwhat,
+                                    } = error;
+                                    println!("Valgrind Error: {}\n", kind);
+
+                                    if let Some(ValgrindErrorXWhat {
+                                        text,
+                                        leakedbytes: _,
+                                        leakedblocks: _,
+                                    }) = xwhat
+                                    {
+                                        println!("    {}", text);
+                                    }
+                                }
+                                panic!("Valgrind reported memory errors");
+                            }
+                        } else {
+                            let exit_code = match valgrind_out.status.code() {
+                                Some(code) => format!("exit code {}", code),
+                                None => "no exit code".to_string(),
+                            };
+
+                            panic!("`valgrind` exited with {}. valgrind stdout was: \"{}\"\n\nvalgrind stderr was: \"{}\"", exit_code, valgrind_out.stdout, valgrind_out.stderr);
                         }
-                    }
-                    panic!("Valgrind reported memory errors");
-                }
-            } else {
-                let exit_code = match valgrind_out.status.code() {
-                    Some(code) => format!("exit code {}", code),
-                    None => "no exit code".to_string(),
-                };
 
-                panic!("`valgrind` exited with {}. valgrind stdout was: \"{}\"\n\nvalgrind stderr was: \"{}\"", exit_code, valgrind_out.stdout, valgrind_out.stderr);
+                        valgrind_out
+                    } else if let Some(ref input_file) = input_file {
+                        run_cmd(
+                            file.with_file_name(executable_filename).to_str().unwrap(),
+                            stdin.iter().copied(),
+                            &[input_file.to_str().unwrap()],
+                        )
+                    } else {
+                        run_cmd(
+                            file.with_file_name(executable_filename).to_str().unwrap(),
+                            stdin.iter().copied(),
+                            &[],
+                        )
+                    }
+                }
+                CliMode::Roc => run_roc_on(file, flags.clone(), stdin, input_file.clone()),
+                CliMode::RocRun => run_roc_on(
+                    file,
+                    iter::once(CMD_RUN).chain(flags.clone()),
+                    stdin,
+                    input_file.clone(),
+                ),
+            };
+
+            if !&out.stdout.ends_with(expected_ending) {
+                panic!(
+                    "expected output to end with {:?} but instead got {:#?} - stderr was: {:#?}",
+                    expected_ending, out.stdout, out.stderr
+                );
             }
 
-            valgrind_out
-        } else if let Some(input_file) = input_file {
-            run_cmd(
-                file.with_file_name(executable_filename).to_str().unwrap(),
-                stdin,
-                &[input_file.to_str().unwrap()],
-            )
-        } else {
-            run_cmd(
-                file.with_file_name(executable_filename).to_str().unwrap(),
-                stdin,
-                &[],
-            )
-        };
-        if !&out.stdout.ends_with(expected_ending) {
-            panic!(
-                "expected output to end with {:?} but instead got {:#?}",
-                expected_ending, out.stdout
-            );
+            assert!(out.status.success());
         }
-        assert!(out.status.success());
     }
 
     #[cfg(feature = "wasm32-cli-run")]
@@ -151,9 +257,13 @@ mod cli_run {
     ) {
         assert_eq!(input_file, None, "Wasm does not support input files");
         let mut flags = flags.to_vec();
-        flags.push("--backend=wasm32");
+        flags.push(concatcp!(TARGET_FLAG, "=wasm32"));
 
-        let compile_out = run_roc(&[&["build", file.to_str().unwrap()], flags.as_slice()].concat());
+        let compile_out = run_roc(
+            [CMD_BUILD, file.to_str().unwrap()]
+                .iter()
+                .chain(flags.as_slice()),
+        );
         if !compile_out.stderr.is_empty() {
             panic!("{}", compile_out.stderr);
         }
@@ -185,22 +295,34 @@ mod cli_run {
         ($($test_name:ident:$name:expr => $example:expr,)+) => {
             $(
                 #[test]
+                #[allow(non_snake_case)]
                 fn $test_name() {
                     let dir_name = $name;
                     let example = $example;
                     let file_name = example_file(dir_name, example.filename);
 
                     match example.executable_filename {
-                        "hello-web" => {
+                        "helloWeb" => {
                             // this is a web webassembly example, but we don't test with JS at the moment
                             eprintln!("WARNING: skipping testing example {} because the test is broken right now!", example.filename);
                             return;
                         }
-                        "hello-swift" => {
+                        "form" => {
+                            // test is skipped until we upgrate to zig 0.9 / llvm 13
+                            eprintln!("WARNING: skipping testing example {} because the test is broken right now!", example.filename);
+                            return;
+                        }
+                        "helloSwift" => {
                             if cfg!(not(target_os = "macos")) {
                                 eprintln!("WARNING: skipping testing example {} because it only works on MacOS.", example.filename);
                                 return;
                             }
+                        }
+                        "hello-gui" | "breakout" => {
+                            // Since these require opening a window, we do `roc build` on them but don't run them.
+                            run_roc_on(&file_name, [CMD_BUILD, OPTIMIZE_FLAG], &[], None);
+
+                            return;
                         }
                         _ => {}
                     }
@@ -223,20 +345,20 @@ mod cli_run {
                         &file_name,
                         example.stdin,
                         example.executable_filename,
-                        &["--optimize"],
+                        &[OPTIMIZE_FLAG],
                         example.input_file.and_then(|file| Some(example_file(dir_name, file))),
                         example.expected_ending,
                         example.use_valgrind,
                     );
 
-                    // Also check with the surgical linker.
+                    // Also check with the legacy linker.
 
-                    if TEST_SURGICAL_LINKER {
+                    if TEST_LEGACY_LINKER {
                         check_output_with_stdin(
                             &file_name,
                             example.stdin,
                             example.executable_filename,
-                            &["--roc-linker"],
+                            &[LINKER_FLAG, "legacy"],
                             example.input_file.and_then(|file| Some(example_file(dir_name, file))),
                             example.expected_ending,
                             example.use_valgrind,
@@ -270,56 +392,80 @@ mod cli_run {
     //     },
     // ]
     examples! {
-        hello_world:"hello-world" => Example {
-            filename: "Hello.roc",
-            executable_filename: "hello-world",
+        helloWorld:"hello-world" => Example {
+            filename: "helloWorld.roc",
+            executable_filename: "helloWorld",
             stdin: &[],
             input_file: None,
             expected_ending:"Hello, World!\n",
             use_valgrind: true,
         },
-        hello_zig:"hello-zig" => Example {
-            filename: "Hello.roc",
-            executable_filename: "hello-world",
+        helloC:"hello-world/c-platform" => Example {
+            filename: "helloC.roc",
+            executable_filename: "helloC",
             stdin: &[],
             input_file: None,
             expected_ending:"Hello, World!\n",
             use_valgrind: true,
         },
-        hello_rust:"hello-rust" => Example {
-            filename: "Hello.roc",
-            executable_filename: "hello-rust",
+        helloZig:"hello-world/zig-platform" => Example {
+            filename: "helloZig.roc",
+            executable_filename: "helloZig",
             stdin: &[],
             input_file: None,
             expected_ending:"Hello, World!\n",
             use_valgrind: true,
         },
-        hello_swift:"hello-swift" => Example {
-            filename: "Hello.roc",
-            executable_filename: "hello-swift",
-            stdin: &[],
-            input_file: None,
-            expected_ending:"Hello Swift, meet Roc\n",
-            use_valgrind: true,
-        },
-        hello_web:"hello-web" => Example {
-            filename: "Hello.roc",
-            executable_filename: "hello-web",
+        helloRust:"hello-world/rust-platform" => Example {
+            filename: "helloRust.roc",
+            executable_filename: "helloRust",
             stdin: &[],
             input_file: None,
             expected_ending:"Hello, World!\n",
             use_valgrind: true,
         },
-        fib:"fib" => Example {
-            filename: "Fib.roc",
-            executable_filename: "fib",
+        helloSwift:"hello-world/swift-platform" => Example {
+            filename: "helloSwift.roc",
+            executable_filename: "helloSwift",
+            stdin: &[],
+            input_file: None,
+            expected_ending:"Hello, World!\n",
+            use_valgrind: true,
+        },
+        helloWeb:"hello-world/web-platform" => Example {
+            filename: "helloWeb.roc",
+            executable_filename: "helloWeb",
+            stdin: &[],
+            input_file: None,
+            expected_ending:"Hello, World!\n",
+            use_valgrind: true,
+        },
+        fib:"algorithms" => Example {
+            filename: "fibonacci.roc",
+            executable_filename: "fibonacci",
             stdin: &[],
             input_file: None,
             expected_ending:"55\n",
             use_valgrind: true,
         },
-        quicksort:"quicksort" => Example {
-            filename: "Quicksort.roc",
+        gui:"gui" => Example {
+            filename: "Hello.roc",
+            executable_filename: "hello-gui",
+            stdin: &[],
+            input_file: None,
+            expected_ending: "",
+            use_valgrind: false,
+        },
+        breakout:"breakout" => Example {
+            filename: "breakout.roc",
+            executable_filename: "breakout",
+            stdin: &[],
+            input_file: None,
+            expected_ending: "",
+            use_valgrind: false,
+        },
+        quicksort:"algorithms" => Example {
+            filename: "quicksort.roc",
             executable_filename: "quicksort",
             stdin: &[],
             input_file: None,
@@ -334,9 +480,9 @@ mod cli_run {
         //     expected_ending: "[0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2]\n",
         //     use_valgrind: true,
         // },
-        effect:"effect" => Example {
-            filename: "Main.roc",
-            executable_filename: "effect-example",
+        effects:"interactive" => Example {
+            filename: "effects.roc",
+            executable_filename: "effects",
             stdin: &["hi there!"],
             input_file: None,
             expected_ending: "hi there!\nIt is known\n",
@@ -350,12 +496,20 @@ mod cli_run {
         //     expected_ending: "",
         //     use_valgrind: true,
         // },
-        cli:"cli" => Example {
-            filename: "Echo.roc",
-            executable_filename: "echo",
+        cli:"interactive" => Example {
+            filename: "form.roc",
+            executable_filename: "form",
             stdin: &["Giovanni\n", "Giorgio\n"],
             input_file: None,
-            expected_ending: "Hi, Giovanni Giorgio!\n",
+            expected_ending: "Hi, Giovanni Giorgio! 👋\n",
+            use_valgrind: false,
+        },
+        tui:"interactive" => Example {
+            filename: "tui.roc",
+            executable_filename: "tui",
+            stdin: &["foo\n"], // NOTE: adding more lines leads to memory leaks
+            input_file: None,
+            expected_ending: "Hello Worldfoo!\n",
             use_valgrind: true,
         },
         // custom_malloc:"custom-malloc" => Example {
@@ -381,16 +535,18 @@ mod cli_run {
                 stdin: &[],
                 input_file: Some("examples/hello.false"),
                 expected_ending:"Hello, World!\n",
-                use_valgrind: true,
+                use_valgrind: false,
             }
         },
     }
 
     macro_rules! benchmarks {
         ($($test_name:ident => $benchmark:expr,)+) => {
+
             $(
                 #[test]
                 #[cfg_attr(not(debug_assertions), serial(benchmark))]
+                #[cfg(all(not(feature = "wasm32-cli-run"), not(feature = "i386-cli-run")))]
                 fn $test_name() {
                     let benchmark = $benchmark;
                     let file_name = examples_dir("benchmarks").join(benchmark.filename);
@@ -419,7 +575,7 @@ mod cli_run {
                         &file_name,
                         benchmark.stdin,
                         benchmark.executable_filename,
-                        &["--optimize"],
+                        &[OPTIMIZE_FLAG],
                         benchmark.input_file.and_then(|file| Some(examples_dir("benchmarks").join(file))),
                         benchmark.expected_ending,
                         benchmark.use_valgrind,
@@ -461,7 +617,7 @@ mod cli_run {
                         &file_name,
                         benchmark.stdin,
                         benchmark.executable_filename,
-                        &["--optimize"],
+                        &[OPTIMIZE_FLAG],
                         benchmark.input_file.and_then(|file| Some(examples_dir("benchmarks").join(file))),
                         benchmark.expected_ending,
                     );
@@ -493,7 +649,7 @@ mod cli_run {
                         &file_name,
                         benchmark.stdin,
                         benchmark.executable_filename,
-                        &["--backend=x86_32"],
+                        [concatcp!(TARGET_FLAG, "=x86_32")],
                         benchmark.input_file.and_then(|file| Some(examples_dir("benchmarks").join(file))),
                         benchmark.expected_ending,
                         benchmark.use_valgrind,
@@ -503,7 +659,7 @@ mod cli_run {
                         &file_name,
                         benchmark.stdin,
                         benchmark.executable_filename,
-                        &["--backend=x86_32", "--optimize"],
+                        [concatcp!(TARGET_FLAG, "=x86_32"), OPTIMIZE_FLAG],
                         benchmark.input_file.and_then(|file| Some(examples_dir("benchmarks").join(file))),
                         benchmark.expected_ending,
                         benchmark.use_valgrind,
@@ -599,7 +755,7 @@ mod cli_run {
                 stdin: &[],
                 input_file: None,
                 expected_ending: "",
-                use_valgrind: true,
+                use_valgrind: false,
             },
             issue2279 => Example {
                 filename: "Issue2279.roc",
@@ -633,6 +789,22 @@ mod cli_run {
 
             if entry.file_type().unwrap().is_dir() {
                 let example_dir_name = entry.file_name().into_string().unwrap();
+
+                // TODO: Improve this with a more-dynamic approach. (Read all subdirectories?)
+                // Some hello-world examples live in nested directories
+                if example_dir_name == "hello-world" {
+                    for sub_dir in [
+                        "c-platform",
+                        "rust-platform",
+                        "swift-platform",
+                        "web-platform",
+                        "zig-platform",
+                    ] {
+                        all_examples.remove(format!("{}/{}", example_dir_name, sub_dir).as_str()).unwrap_or_else(|| {
+                            panic!("The example directory {}/{}/{} does not have any corresponding tests in cli_run. Please add one, so if it ever stops working, we'll know about it right away!", examples_dir, example_dir_name, sub_dir);
+                        });
+                    }
+                }
 
                 // We test benchmarks separately
                 if example_dir_name != "benchmarks" {
@@ -706,7 +878,7 @@ mod cli_run {
             &fixture_file("multi-dep-str", "Main.roc"),
             &[],
             "multi-dep-str",
-            &["--optimize"],
+            &[OPTIMIZE_FLAG],
             None,
             "I am Dep2.str2\n",
             true,
@@ -734,11 +906,126 @@ mod cli_run {
             &fixture_file("multi-dep-thunk", "Main.roc"),
             &[],
             "multi-dep-thunk",
-            &["--optimize"],
+            &[OPTIMIZE_FLAG],
             None,
             "I am Dep2.value2\n",
             true,
         );
+    }
+
+    #[test]
+    fn known_type_error() {
+        check_compile_error(
+            &known_bad_file("TypeError.roc"),
+            &[],
+            indoc!(
+                r#"
+                ── UNRECOGNIZED NAME ─────────────────────────── tests/known_bad/TypeError.roc ─
+
+                I cannot find a `d` value
+
+                10│      _ <- await (line d)
+                                          ^
+
+                Did you mean one of these?
+
+                    U8
+                    Ok
+                    I8
+                    F64
+
+                ────────────────────────────────────────────────────────────────────────────────
+
+                1 error and 0 warnings found in <ignored for test> ms."#
+            ),
+        );
+    }
+
+    #[test]
+    fn exposed_not_defined() {
+        check_compile_error(
+            &known_bad_file("ExposedNotDefined.roc"),
+            &[],
+            indoc!(
+                r#"
+                ── MISSING DEFINITION ────────────────── tests/known_bad/ExposedNotDefined.roc ─
+
+                bar is listed as exposed, but it isn't defined in this module.
+
+                You can fix this by adding a definition for bar, or by removing it
+                from exposes.
+
+                ────────────────────────────────────────────────────────────────────────────────
+
+                1 error and 0 warnings found in <ignored for test> ms."#
+            ),
+        );
+    }
+
+    #[test]
+    fn unused_import() {
+        check_compile_error(
+            &known_bad_file("UnusedImport.roc"),
+            &[],
+            indoc!(
+                r#"
+                ── UNUSED IMPORT ──────────────────────────── tests/known_bad/UnusedImport.roc ─
+
+                Nothing from Symbol is used in this module.
+
+                3│      imports [ Symbol.{ Ident } ]
+                                  ^^^^^^^^^^^^^^^^
+
+                Since Symbol isn't used, you don't need to import it.
+
+                ────────────────────────────────────────────────────────────────────────────────
+
+                0 errors and 1 warning found in <ignored for test> ms."#
+            ),
+        );
+    }
+
+    #[test]
+    fn unknown_generates_with() {
+        check_compile_error(
+            &known_bad_file("UnknownGeneratesWith.roc"),
+            &[],
+            indoc!(
+                r#"
+                ── UNKNOWN GENERATES FUNCTION ─────── tests/known_bad/UnknownGeneratesWith.roc ─
+
+                I don't know how to generate the foobar function.
+
+                4│      generates Effect with [ after, map, always, foobar ]
+                                                                    ^^^^^^
+
+                Only specific functions like `after` and `map` can be generated.Learn
+                more about hosted modules at TODO.
+
+                ────────────────────────────────────────────────────────────────────────────────
+
+                1 error and 0 warnings found in <ignored for test> ms."#
+            ),
+        );
+    }
+
+    #[test]
+    fn format_check_good() {
+        check_format_check_as_expected(&fixture_file("format", "Formatted.roc"), true);
+    }
+
+    #[test]
+    fn format_check_reformatting_needed() {
+        check_format_check_as_expected(&fixture_file("format", "NotFormatted.roc"), false);
+    }
+
+    #[test]
+    fn format_check_folders() {
+        // This fails, because "NotFormatted.roc" is present in this folder
+        check_format_check_as_expected(&fixtures_dir("format"), false);
+
+        // This doesn't fail, since only "Formatted.roc" and non-roc files are present in this folder
+        check_format_check_as_expected(&fixtures_dir("format/formatted_directory"), true);
     }
 }
 

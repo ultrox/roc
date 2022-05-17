@@ -1,7 +1,8 @@
 extern crate bumpalo;
 
 use self::bumpalo::Bump;
-use roc_can::constraint::Constraint;
+use roc_can::abilities::AbilitiesStore;
+use roc_can::constraint::{Constraint, Constraints};
 use roc_can::env::Env;
 use roc_can::expected::Expected;
 use roc_can::expr::{canonicalize_expr, Expr, Output};
@@ -9,14 +10,14 @@ use roc_can::operator;
 use roc_can::scope::Scope;
 use roc_collections::all::{ImMap, MutMap, SendSet};
 use roc_constrain::expr::constrain_expr;
-use roc_constrain::module::{constrain_imported_values, Import};
+use roc_constrain::module::introduce_builtin_imports;
 use roc_module::symbol::{IdentIds, Interns, ModuleId, ModuleIds};
 use roc_parse::parser::{SourceError, SyntaxError};
 use roc_problem::can::Problem;
 use roc_region::all::Loc;
-use roc_solve::solve;
+use roc_solve::solve::{self, Aliases};
 use roc_types::subs::{Content, Subs, VarStore, Variable};
-use roc_types::types::Type;
+use roc_types::types::{AliasVar, Type};
 use std::hash::Hash;
 use std::path::{Path, PathBuf};
 
@@ -28,19 +29,22 @@ pub fn test_home() -> ModuleId {
 pub fn infer_expr(
     subs: Subs,
     problems: &mut Vec<solve::TypeError>,
+    constraints: &Constraints,
     constraint: &Constraint,
+    aliases: &mut Aliases,
+    abilities_store: &mut AbilitiesStore,
     expr_var: Variable,
 ) -> (Content, Subs) {
-    let env = solve::Env {
-        aliases: MutMap::default(),
-        vars_by_symbol: MutMap::default(),
-    };
-    let (solved, _) = solve::run(&env, problems, subs, constraint);
+    let (solved, _) = solve::run(
+        constraints,
+        problems,
+        subs,
+        aliases,
+        constraint,
+        abilities_store,
+    );
 
-    let content = solved
-        .inner()
-        .get_content_without_compacting(expr_var)
-        .clone();
+    let content = *solved.inner().get_content_without_compacting(expr_var);
 
     (content, solved.into_inner())
 }
@@ -99,6 +103,7 @@ pub struct CanExprOut {
     pub var_store: VarStore,
     pub var: Variable,
     pub constraint: Constraint,
+    pub constraints: Constraints,
 }
 
 #[derive(Debug)]
@@ -144,9 +149,14 @@ pub fn can_expr_with<'a>(
     // rules multiple times unnecessarily.
     let loc_expr = operator::desugar_expr(arena, &loc_expr);
 
-    let mut scope = Scope::new(home, &mut var_store);
+    let mut scope = Scope::new(home, IdentIds::default());
+
+    // to skip loading other modules, we populate the scope with the builtin aliases
+    // that makes the reporting tests much faster
+    add_aliases(&mut scope, &mut var_store);
+
     let dep_idents = IdentIds::exposed_builtins(0);
-    let mut env = Env::new(home, &dep_idents, &module_ids, IdentIds::default());
+    let mut env = Env::new(home, &dep_idents, &module_ids);
     let (loc_expr, output) = canonicalize_expr(
         &mut env,
         &mut var_store,
@@ -155,39 +165,30 @@ pub fn can_expr_with<'a>(
         &loc_expr.value,
     );
 
+    let mut constraints = Constraints::new();
     let constraint = constrain_expr(
-        &roc_constrain::expr::Env {
-            rigids: ImMap::default(),
+        &mut constraints,
+        &mut roc_constrain::expr::Env {
+            rigids: MutMap::default(),
             home,
+            resolutions_to_make: vec![],
         },
         loc_expr.region,
         &loc_expr.value,
         expected,
     );
 
-    let types = roc_builtins::std::types();
-
-    let imports: Vec<_> = types
-        .into_iter()
-        .map(|(symbol, (solved_type, region))| Import {
-            loc_symbol: Loc::at(region, symbol),
-            solved_type,
-        })
+    let imports = roc_builtins::std::borrow_stdlib()
+        .types
+        .keys()
+        .copied()
         .collect();
 
-    //load builtin values
-    let (_introduced_rigids, constraint) =
-        constrain_imported_values(imports, constraint, &mut var_store);
+    let constraint =
+        introduce_builtin_imports(&mut constraints, imports, constraint, &mut var_store);
 
-    let mut all_ident_ids = MutMap::default();
-
-    // When pretty printing types, we may need the exposed builtins,
-    // so include them in the Interns we'll ultimately return.
-    for (module_id, ident_ids) in IdentIds::exposed_builtins(0) {
-        all_ident_ids.insert(module_id, ident_ids);
-    }
-
-    all_ident_ids.insert(home, env.ident_ids);
+    let mut all_ident_ids = IdentIds::exposed_builtins(1);
+    all_ident_ids.insert(home, scope.locals.ident_ids);
 
     let interns = Interns {
         module_ids: env.module_ids.clone(),
@@ -203,7 +204,39 @@ pub fn can_expr_with<'a>(
         interns,
         var,
         constraint,
+        constraints,
     })
+}
+
+fn add_aliases(scope: &mut Scope, var_store: &mut VarStore) {
+    use roc_types::solved_types::{BuiltinAlias, FreeVars};
+
+    let solved_aliases = roc_types::builtin_aliases::aliases();
+
+    for (symbol, builtin_alias) in solved_aliases {
+        let BuiltinAlias {
+            region,
+            vars,
+            typ,
+            kind,
+        } = builtin_alias;
+
+        let mut free_vars = FreeVars::default();
+        let typ = roc_types::solved_types::to_type(&typ, &mut free_vars, var_store);
+
+        let mut variables = Vec::new();
+        // make sure to sort these variables to make them line up with the type arguments
+        let mut type_variables: Vec<_> = free_vars.unnamed_vars.into_iter().collect();
+        type_variables.sort();
+        for (loc_name, (_, var)) in vars.iter().zip(type_variables) {
+            variables.push(Loc::at(
+                loc_name.region,
+                AliasVar::unbound(loc_name.value.clone(), var),
+            ));
+        }
+
+        scope.add_alias(symbol, region, variables, typ, kind);
+    }
 }
 
 #[allow(dead_code)]
@@ -253,11 +286,11 @@ where
 }
 
 #[allow(dead_code)]
-pub fn fixtures_dir<'a>() -> PathBuf {
+pub fn fixtures_dir() -> PathBuf {
     Path::new("tests").join("fixtures").join("build")
 }
 
 #[allow(dead_code)]
-pub fn builtins_dir<'a>() -> PathBuf {
+pub fn builtins_dir() -> PathBuf {
     PathBuf::new().join("builtins")
 }

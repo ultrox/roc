@@ -1,0 +1,12 @@
+Load command 2
+      cmd LC_SEGMENT_64
+  cmdsize 232
+  segname __DATA_CONST
+   vmaddr 0x00000001000a3000
+   vmsize 0x0000000000009000
+  fileoff 667648
+ filesize 36864
+  maxprot 0x00000003
+ initprot 0x00000003
+   nsects 2
+    flags 0x0

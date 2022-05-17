@@ -6,7 +6,7 @@ app "deriv"
 # based on: https://github.com/koka-lang/koka/blob/master/test/bench/haskell/deriv.hs
 IO a : Task.Task a []
 
-main : IO {}
+main : Task.Task {} []
 main =
     Task.after
         Task.getInt
@@ -21,11 +21,27 @@ main =
 
                 |> Task.map (\_ -> {})
 
+nest : (I64, Expr -> IO Expr), I64, Expr -> IO Expr
+nest = \f, n, e -> Task.loop { s: n, f, m: n, x: e } nestHelp
+
+State : { s : I64, f : I64, Expr -> IO Expr, m : I64, x : Expr }
+
+nestHelp : State -> IO [ Step State, Done Expr ]
+nestHelp = \{ s, f, m, x } ->
+    when m is
+        0 ->
+            Task.succeed (Done x)
+
+        _ ->
+            w <- Task.after (f (s - m) x)
+
+            Task.succeed (Step { s, f, m: (m - 1), x: w })
+
 Expr : [ Val I64, Var Str, Add Expr Expr, Mul Expr Expr, Pow Expr Expr, Ln Expr ]
 
 divmod : I64, I64 -> Result { div : I64, mod : I64 } [ DivByZero ]*
 divmod = \l, r ->
-    when Pair (l // r) (l % r) is
+    when Pair (Num.divTruncChecked l r) (Num.remChecked l r) is
         Pair (Ok div) (Ok mod) ->
             Ok { div, mod }
 
@@ -179,18 +195,6 @@ count = \expr ->
 
         Ln f ->
             count f
-
-nest : (I64, Expr -> IO Expr), I64, Expr -> IO Expr
-nest = \f, n, e -> nestHelp n f n e
-
-nestHelp : I64, (I64, Expr -> IO Expr), I64, Expr -> IO Expr
-nestHelp = \s, f, m, x ->
-    when m is
-        0 ->
-            Task.succeed x
-
-        _ ->
-            f (s - m) x |> Task.after \w -> nestHelp s f (m - 1) w
 
 deriv : I64, Expr -> IO Expr
 deriv = \i, f ->

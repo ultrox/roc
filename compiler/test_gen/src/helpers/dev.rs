@@ -1,13 +1,13 @@
 use libloading::Library;
 use roc_build::link::{link, LinkType};
 use roc_builtins::bitcode;
-use roc_can::builtins::builtin_defs_map;
 use roc_collections::all::MutMap;
+use roc_load::Threading;
 use roc_region::all::LineInfo;
 use tempfile::tempdir;
 
 #[allow(unused_imports)]
-use roc_mono::ir::PRETTY_PRINT_IR_SYMBOLS;
+use roc_mono::ir::pretty_print_ir_symbols;
 
 #[allow(dead_code)]
 fn promote_expr_to_module(src: &str) -> String {
@@ -27,7 +27,6 @@ fn promote_expr_to_module(src: &str) -> String {
 pub fn helper(
     arena: &bumpalo::Bump,
     src: &str,
-    stdlib: roc_builtins::std::StdLib,
     _leak: bool,
     lazy_literals: bool,
 ) -> (String, Vec<roc_problem::can::Problem>, Library) {
@@ -49,21 +48,20 @@ pub fn helper(
         module_src = &temp;
     }
 
-    let exposed_types = MutMap::default();
-    let loaded = roc_load::file::load_and_monomorphize_from_str(
+    let loaded = roc_load::load_and_monomorphize_from_str(
         arena,
         filename,
         module_src,
-        &stdlib,
         src_dir,
-        exposed_types,
-        8,
-        builtin_defs_map,
+        Default::default(),
+        roc_target::TargetInfo::default_x86_64(),
+        roc_reporting::report::RenderTarget::ColorTerminal,
+        Threading::Single,
     );
 
     let mut loaded = loaded.expect("failed to load module");
 
-    use roc_load::file::MonomorphizedModule;
+    use roc_load::MonomorphizedModule;
     let MonomorphizedModule {
         module_id,
         procedures,
@@ -76,7 +74,7 @@ pub fn helper(
     // while you're working on the dev backend!
     {
         // println!("=========== Procedures ==========");
-        // if PRETTY_PRINT_IR_SYMBOLS {
+        // if pretty_print_ir_symbols() {
         //     println!("");
         //     for proc in procedures.values() {
         //         println!("{}", proc.to_pretty(200));
@@ -95,7 +93,7 @@ pub fn helper(
         // println!("=================================\n");
     }
 
-    debug_assert_eq!(exposed_to_host.len(), 1);
+    debug_assert_eq!(exposed_to_host.values.len(), 1);
     let main_fn_symbol = loaded.entry_point.symbol;
     let main_fn_layout = loaded.entry_point.layout;
 
@@ -111,15 +109,12 @@ pub fn helper(
     let mut delayed_errors = Vec::new();
 
     for (home, (module_path, src)) in loaded.sources {
-        use roc_reporting::report::{
-            can_problem, mono_problem, type_problem, RocDocAllocator, DEFAULT_PALETTE,
-        };
+        use roc_reporting::report::{can_problem, type_problem, RocDocAllocator, DEFAULT_PALETTE};
 
         let can_problems = loaded.can_problems.remove(&home).unwrap_or_default();
         let type_problems = loaded.type_problems.remove(&home).unwrap_or_default();
-        let mono_problems = loaded.mono_problems.remove(&home).unwrap_or_default();
 
-        let error_count = can_problems.len() + type_problems.len() + mono_problems.len();
+        let error_count = can_problems.len() + type_problems.len();
 
         if error_count == 0 {
             continue;
@@ -160,15 +155,6 @@ pub fn helper(
                 lines.push(buf);
             }
         }
-
-        for problem in mono_problems {
-            let report = mono_problem(&alloc, &line_info, module_path.clone(), problem);
-            let mut buf = String::new();
-
-            report.render_color_terminal(&mut buf, &alloc, &palette);
-
-            lines.push(buf);
-        }
     }
 
     if !lines.is_empty() {
@@ -179,7 +165,7 @@ pub fn helper(
     let env = roc_gen_dev::Env {
         arena,
         module_id,
-        exposed_to_host: exposed_to_host.keys().copied().collect(),
+        exposed_to_host: exposed_to_host.values.keys().copied().collect(),
         lazy_literals,
         generate_allocators: true, // Needed for testing, since we don't have a platform
     };
@@ -242,11 +228,10 @@ macro_rules! assert_evals_to {
     ($src:expr, $expected:expr, $ty:ty, $transform:expr, $leak:expr, $lazy_literals:expr) => {
         use bumpalo::Bump;
         use roc_gen_dev::run_jit_function_raw;
-        let stdlib = roc_builtins::std::standard_stdlib();
 
         let arena = Bump::new();
         let (main_fn_name, errors, lib) =
-            $crate::helpers::dev::helper(&arena, $src, stdlib, $leak, $lazy_literals);
+            $crate::helpers::dev::helper(&arena, $src, $leak, $lazy_literals);
 
         let transform = |success| {
             let expected = $expected;
@@ -257,5 +242,26 @@ macro_rules! assert_evals_to {
     };
 }
 
+#[allow(unused_macros)]
+macro_rules! assert_expect_failed {
+    ($src:expr, $expected:expr, $ty:ty, $failures:expr) => {{
+        use bumpalo::Bump;
+        use roc_gen_dev::run_jit_function_raw;
+        let stdlib = roc_builtins::std::standard_stdlib();
+
+        let arena = Bump::new();
+        let (main_fn_name, errors, lib) =
+            $crate::helpers::dev::helper(&arena, $src, stdlib, true, true);
+
+        let transform = |success| {
+            let expected = $expected;
+            assert_eq!(&success, &expected);
+        };
+        run_jit_function_raw!(lib, main_fn_name, $ty, transform, errors);
+    }};
+}
+
 #[allow(unused_imports)]
 pub(crate) use assert_evals_to;
+#[allow(unused_imports)]
+pub(crate) use assert_expect_failed;

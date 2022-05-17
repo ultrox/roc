@@ -1,5 +1,3 @@
-use crate::parser::Progress;
-use bumpalo::Bump;
 use roc_region::all::{Position, Region};
 use std::fmt;
 
@@ -15,11 +13,11 @@ pub struct State<'a> {
     offset: usize,
 
     /// Position of the start of the current line
-    line_start: Position,
+    pub(crate) line_start: Position,
 
     /// Current indentation level, in columns
     /// (so no indent is col 1 - this saves an arithmetic operation.)
-    pub indent_column: u32,
+    pub(crate) indent_column: u32,
 }
 
 impl<'a> State<'a> {
@@ -36,7 +34,7 @@ impl<'a> State<'a> {
         self.original_bytes
     }
 
-    pub fn bytes(&self) -> &'a [u8] {
+    pub(crate) fn bytes(&self) -> &'a [u8] {
         &self.original_bytes[self.offset..]
     }
 
@@ -45,19 +43,18 @@ impl<'a> State<'a> {
     }
 
     #[must_use]
-    pub fn advance(&self, offset: usize) -> State<'a> {
-        let mut state = self.clone();
-        // debug_assert!(!state.bytes[..offset].iter().any(|b| *b == b'\n'));
-        state.offset += offset;
-        state
+    #[inline(always)]
+    pub(crate) const fn advance(mut self, offset: usize) -> State<'a> {
+        self.offset += offset;
+        self
     }
 
     #[must_use]
-    pub fn advance_newline(&self) -> State<'a> {
-        let mut state = self.clone();
-        state.offset += 1;
-        state.line_start = state.pos();
-        state
+    #[inline(always)]
+    pub(crate) const fn advance_newline(mut self) -> State<'a> {
+        self.offset += 1;
+        self.line_start = self.pos();
+        self
     }
 
     /// Returns the current position
@@ -76,16 +73,6 @@ impl<'a> State<'a> {
     /// and thus wanting a Region while not having access to loc().
     pub fn len_region(&self, length: u32) -> Region {
         Region::new(self.pos(), self.pos().bump_column(length))
-    }
-
-    /// Return a failing ParseResult for the given FailReason
-    pub fn fail<T, X>(
-        self,
-        _arena: &'a Bump,
-        progress: Progress,
-        reason: X,
-    ) -> Result<(Progress, T, Self), (Progress, X, Self)> {
-        Err((progress, reason, self))
     }
 }
 

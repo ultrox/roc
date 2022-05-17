@@ -3,13 +3,16 @@
 #![allow(unused_imports)]
 
 use bumpalo::collections::Vec as BumpVec;
-use roc_can::expr::unescape_char;
-use roc_can::num::{finish_parsing_base, finish_parsing_float, finish_parsing_int};
+use roc_can::expr::{unescape_char, IntValue};
+use roc_can::num::{
+    finish_parsing_base, finish_parsing_float, finish_parsing_num, ParsedNumResult,
+};
 use roc_collections::all::BumpMap;
+use roc_error_macros::todo_opaques;
 use roc_module::symbol::{Interns, Symbol};
 use roc_parse::ast::{StrLiteral, StrSegment};
 use roc_parse::pattern::PatternType;
-use roc_problem::can::{MalformedPatternProblem, Problem, RuntimeError};
+use roc_problem::can::{MalformedPatternProblem, Problem, RuntimeError, ShadowKind};
 use roc_region::all::Region;
 use roc_types::subs::Variable;
 
@@ -36,17 +39,12 @@ pub enum Pattern2 {
     IntLiteral(IntVal),        // 16B
     FloatLiteral(FloatVal),    // 16B
     StrLiteral(PoolStr),       // 8B
+    CharacterLiteral(char),    // 4B
     Underscore,                // 0B
-    GlobalTag {
+    Tag {
         whole_var: Variable,                       // 4B
         ext_var: Variable,                         // 4B
         tag_name: PoolStr,                         // 8B
-        arguments: PoolVec<(Variable, PatternId)>, // 8B
-    },
-    PrivateTag {
-        whole_var: Variable,                       // 4B
-        ext_var: Variable,                         // 4B
-        tag_name: Symbol,                          // 8B
         arguments: PoolVec<(Variable, PatternId)>, // 8B
     },
     RecordDestructure {
@@ -157,6 +155,7 @@ pub fn to_pattern2<'a>(
                 env.problem(Problem::RuntimeError(RuntimeError::Shadowing {
                     original_region,
                     shadow: shadow.clone(),
+                    kind: ShadowKind::Variable,
                 }));
 
                 let name: &str = shadow.value.as_ref();
@@ -183,18 +182,35 @@ pub fn to_pattern2<'a>(
                     let problem = MalformedPatternProblem::MalformedFloat;
                     malformed_pattern(env, problem, region)
                 }
-                Ok(float) => Pattern2::FloatLiteral(FloatVal::F64(float)),
+                Ok((_, float, _bound)) => Pattern2::FloatLiteral(FloatVal::F64(float)),
             },
             ptype => unsupported_pattern(env, ptype, region),
         },
 
         NumLiteral(string) => match pattern_type {
-            WhenBranch => match finish_parsing_int(string) {
+            WhenBranch => match finish_parsing_num(string) {
                 Err(_error) => {
                     let problem = MalformedPatternProblem::MalformedInt;
                     malformed_pattern(env, problem, region)
                 }
-                Ok(int) => Pattern2::NumLiteral(env.var_store.fresh(), int),
+                Ok((_, ParsedNumResult::UnknownNum(int, _bound))) => {
+                    Pattern2::NumLiteral(
+                        env.var_store.fresh(),
+                        match int {
+                            IntValue::U128(_) => todo!(),
+                            IntValue::I128(n) => n as i64, // FIXME
+                        },
+                    )
+                }
+                Ok((_, ParsedNumResult::Int(int, _bound))) => {
+                    Pattern2::IntLiteral(IntVal::I64(match int {
+                        IntValue::U128(_) => todo!(),
+                        IntValue::I128(n) => n as i64, // FIXME
+                    }))
+                }
+                Ok((_, ParsedNumResult::Float(int, _bound))) => {
+                    Pattern2::FloatLiteral(FloatVal::F64(int))
+                }
             },
             ptype => unsupported_pattern(env, ptype, region),
         },
@@ -209,7 +225,11 @@ pub fn to_pattern2<'a>(
                     let problem = MalformedPatternProblem::MalformedBase(*base);
                     malformed_pattern(env, problem, region)
                 }
-                Ok(int) => {
+                Ok((int, _bound)) => {
+                    let int = match int {
+                        IntValue::U128(_) => todo!(),
+                        IntValue::I128(n) => n as i64, // FIXME
+                    };
                     if *is_negative {
                         Pattern2::IntLiteral(IntVal::I64(-int))
                     } else {
@@ -225,26 +245,37 @@ pub fn to_pattern2<'a>(
             ptype => unsupported_pattern(env, ptype, region),
         },
 
-        GlobalTag(name) => {
+        SingleQuote(string) => match pattern_type {
+            WhenBranch => {
+                let mut it = string.chars().peekable();
+                if let Some(char) = it.next() {
+                    if it.peek().is_none() {
+                        Pattern2::CharacterLiteral(char)
+                    } else {
+                        // multiple chars is found
+                        let problem = MalformedPatternProblem::MultipleCharsInSingleQuote;
+                        malformed_pattern(env, problem, region)
+                    }
+                } else {
+                    // no characters found
+                    let problem = MalformedPatternProblem::EmptySingleQuote;
+                    malformed_pattern(env, problem, region)
+                }
+            }
+            ptype => unsupported_pattern(env, ptype, region),
+        },
+
+        Tag(name) => {
             // Canonicalize the tag's name.
-            Pattern2::GlobalTag {
+            Pattern2::Tag {
                 whole_var: env.var_store.fresh(),
                 ext_var: env.var_store.fresh(),
                 tag_name: PoolStr::new(name, env.pool),
                 arguments: PoolVec::empty(env.pool),
             }
         }
-        PrivateTag(name) => {
-            let ident_id = env.ident_ids.get_or_insert(&(*name).into());
 
-            // Canonicalize the tag's name.
-            Pattern2::PrivateTag {
-                whole_var: env.var_store.fresh(),
-                ext_var: env.var_store.fresh(),
-                tag_name: Symbol::new(env.home, ident_id),
-                arguments: PoolVec::empty(env.pool),
-            }
-        }
+        OpaqueRef(..) => todo_opaques!(),
 
         Apply(tag, patterns) => {
             let can_patterns = PoolVec::with_capacity(patterns.len() as u32, env.pool);
@@ -265,22 +296,12 @@ pub fn to_pattern2<'a>(
             }
 
             match tag.value {
-                GlobalTag(name) => Pattern2::GlobalTag {
+                Tag(name) => Pattern2::Tag {
                     whole_var: env.var_store.fresh(),
                     ext_var: env.var_store.fresh(),
                     tag_name: PoolStr::new(name, env.pool),
                     arguments: can_patterns,
                 },
-                PrivateTag(name) => {
-                    let ident_id = env.ident_ids.get_or_insert(&name.into());
-
-                    Pattern2::PrivateTag {
-                        whole_var: env.var_store.fresh(),
-                        ext_var: env.var_store.fresh(),
-                        tag_name: Symbol::new(env.home, ident_id),
-                        arguments: can_patterns,
-                    }
-                }
                 _ => unreachable!("Other patterns cannot be applied"),
             }
         }
@@ -317,6 +338,7 @@ pub fn to_pattern2<'a>(
                                 env.problem(Problem::RuntimeError(RuntimeError::Shadowing {
                                     original_region,
                                     shadow: shadow.clone(),
+                                    kind: ShadowKind::Variable,
                                 }));
 
                                 // let shadowed = Pattern2::Shadowed {
@@ -396,6 +418,7 @@ pub fn to_pattern2<'a>(
                                 env.problem(Problem::RuntimeError(RuntimeError::Shadowing {
                                     original_region,
                                     shadow: shadow.clone(),
+                                    kind: ShadowKind::Variable,
                                 }));
 
                                 // No matter what the other patterns
@@ -456,7 +479,7 @@ pub fn symbols_from_pattern(pool: &Pool, initial: &Pattern2) -> Vec<Symbol> {
                 symbols.push(*symbol);
             }
 
-            GlobalTag { arguments, .. } | PrivateTag { arguments, .. } => {
+            Tag { arguments, .. } => {
                 for (_, pat_id) in arguments.iter(pool) {
                     let pat = pool.get(*pat_id);
                     stack.push(pat);
@@ -480,6 +503,7 @@ pub fn symbols_from_pattern(pool: &Pool, initial: &Pattern2) -> Vec<Symbol> {
             | IntLiteral(_)
             | FloatLiteral(_)
             | StrLiteral(_)
+            | CharacterLiteral(_)
             | Underscore
             | MalformedPattern(_, _)
             | Shadowed { .. }
@@ -492,7 +516,7 @@ pub fn symbols_from_pattern(pool: &Pool, initial: &Pattern2) -> Vec<Symbol> {
 
 pub fn get_identifier_string(pattern: &Pattern2, interns: &Interns) -> ASTResult<String> {
     match pattern {
-        Pattern2::Identifier(symbol) => Ok(symbol.ident_str(interns).to_string()),
+        Pattern2::Identifier(symbol) => Ok(symbol.as_str(interns).to_string()),
         other => UnexpectedPattern2Variant {
             required_pattern2: "Identifier".to_string(),
             encountered_pattern2: format!("{:?}", other),
@@ -516,7 +540,7 @@ pub fn symbols_and_variables_from_pattern(
                 symbols.push((*symbol, variable));
             }
 
-            GlobalTag { arguments, .. } | PrivateTag { arguments, .. } => {
+            Tag { arguments, .. } => {
                 for (var, pat_id) in arguments.iter(pool) {
                     let pat = pool.get(*pat_id);
                     stack.push((*var, pat));
@@ -540,6 +564,7 @@ pub fn symbols_and_variables_from_pattern(
             | IntLiteral(_)
             | FloatLiteral(_)
             | StrLiteral(_)
+            | CharacterLiteral(_)
             | Underscore
             | MalformedPattern(_, _)
             | Shadowed { .. }

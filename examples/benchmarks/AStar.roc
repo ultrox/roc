@@ -12,27 +12,26 @@ Model position :
     }
 
 initialModel : position -> Model position
-initialModel = \start ->
-    {
-        evaluated: Set.empty,
-        openSet: Set.single start,
-        costs: Dict.single start 0,
-        cameFrom: Dict.empty,
-    }
+initialModel = \start -> {
+    evaluated: Set.empty,
+    openSet: Set.single start,
+    costs: Dict.single start 0,
+    cameFrom: Dict.empty,
+}
 
 cheapestOpen : (position -> F64), Model position -> Result position {}
 cheapestOpen = \costFn, model ->
     model.openSet
         |> Set.toList
         |> List.keepOks
-        (\position ->
-                when Dict.get model.costs position is
-                    Err _ ->
-                        Err {}
+            (\position ->
+                    when Dict.get model.costs position is
+                        Err _ ->
+                            Err {}
 
-                    Ok cost ->
-                        Ok { cost: cost + costFn position, position }
-        )
+                        Ok cost ->
+                            Ok { cost: cost + costFn position, position }
+            )
         |> Quicksort.sortBy .cost
         |> List.first
         |> Result.map .position
@@ -58,7 +57,7 @@ updateCost = \current, neighbor, model ->
     distanceTo =
         reconstructPath newCameFrom neighbor
             |> List.len
-            |> Num.toFloat
+            |> Num.toFrac
 
     newModel =
         { model &
@@ -79,7 +78,7 @@ updateCost = \current, neighbor, model ->
 astar : (position, position -> F64), (position -> Set position), position, Model position -> Result (List position) {}
 astar = \costFn, moveFn, goal, model ->
     when cheapestOpen (\source -> costFn source goal) model is
-        Err {  } ->
+        Err {} ->
             Err {}
 
         Ok current ->
