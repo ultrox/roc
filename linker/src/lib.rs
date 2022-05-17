@@ -987,6 +987,11 @@ fn gen_macho_le(
                         section.offset.get(NativeEndian) + added_bytes as u32,
                     );
 
+                    // dbg!(&section.reloff.get(NativeEndian));
+                    // dbg!(section.reloff.get(NativeEndian) as i32);
+                    // dbg!(&section);
+                    // dbg!(&added_bytes);
+                    // dbg!(String::from_utf8_lossy(&section.sectname));
 
                     let rel_offset = section.reloff.get(NativeEndian) + added_bytes as u32;
 
@@ -1026,6 +1031,9 @@ fn gen_macho_le(
                 //         }
                 //     }
                 // }
+
+                // TODO this seems to be wrong and unnecessary, and should probably be deleted.
+                // offset += num_sections as usize * mem::size_of::<macho::Section64<LittleEndian>>();
             }
             macho::LC_SYMTAB => {
                 let cmd = load_struct_inplace_mut::<macho::SymtabCommand<LittleEndian>>(
@@ -1248,7 +1256,7 @@ fn gen_macho_le(
             }
         }
 
-        offset += cmd_size;
+        offset += dbg!(cmd_size);
     }
 
     // cmd_loc should be where the last offset ended
