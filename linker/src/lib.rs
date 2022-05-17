@@ -966,7 +966,7 @@ fn gen_macho_le(
                 let num_sections = cmd.nsects.get(NativeEndian);
                 let sections = load_structs_inplace_mut::<macho::Section64<LittleEndian>>(
                     &mut out_mmap,
-                    offset + cmd_size,
+                    offset + mem::size_of::<macho::SegmentCommand64<LittleEndian>>(),
                     num_sections as usize,
                 );
                 struct Relocation {
