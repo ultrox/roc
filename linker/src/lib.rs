@@ -54,12 +54,22 @@ fn report_timing(label: &str, duration: Duration) {
 }
 
 pub fn supported(link_type: LinkType, target: &Triple) -> bool {
-    link_type == LinkType::Executable
-        && matches!(target.architecture, target_lexicon::Architecture::X86_64)
-        && matches!(
-            target.binary_format,
-            target_lexicon::BinaryFormat::Elf | target_lexicon::BinaryFormat::Macho
+    matches!(
+        (link_type, target),
+        (
+            LinkType::Executable,
+            Triple {
+                architecture: target_lexicon::Architecture::X86_64,
+                operating_system: target_lexicon::OperatingSystem::Linux,
+                binary_format: target_lexicon::BinaryFormat::Elf,
+                ..
+            } | Triple {
+                operating_system: target_lexicon::OperatingSystem::Darwin,
+                binary_format: target_lexicon::BinaryFormat::Macho,
+                ..
+            }
         )
+    )
 }
 
 pub fn build_and_preprocess_host(

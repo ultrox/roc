@@ -45,6 +45,8 @@ fn main() {
     generate_bc_file(&bitcode_path, "ir-i386", "builtins-i386");
 
     generate_bc_file(&bitcode_path, "ir-x86_64", "builtins-x86_64");
+    generate_bc_file(&bitcode_path, "ir-mac_x86", "builtins-mac_x86");
+    generate_bc_file(&bitcode_path, "ir-mac_arm", "builtins-mac_arm");
 
     // OBJECT FILES
     #[cfg(windows)]

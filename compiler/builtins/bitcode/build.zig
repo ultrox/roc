@@ -30,12 +30,16 @@ pub fn build(b: *Builder) void {
     });
     const linux32_target = makeLinux32Target();
     const linux64_target = makeLinux64Target();
+    const macx86_target = makeMacX86Target();
+    const macarm_target = makeMacArmTarget();
     const wasm32_target = makeWasm32Target();
 
     // LLVM IR
     generateLlvmIrFile(b, mode, host_target, main_path, "ir", "builtins-host");
     generateLlvmIrFile(b, mode, linux32_target, main_path, "ir-i386", "builtins-i386");
     generateLlvmIrFile(b, mode, linux64_target, main_path, "ir-x86_64", "builtins-x86_64");
+    generateLlvmIrFile(b, mode, macx86_target, main_path, "ir-mac_x86", "builtins-mac_x86");
+    generateLlvmIrFile(b, mode, macarm_target, main_path, "ir-mac_arm", "builtins-mac_arm");
     generateLlvmIrFile(b, mode, wasm32_target, main_path, "ir-wasm32", "builtins-wasm32");
 
     // Generate Object Files
@@ -106,6 +110,26 @@ fn makeLinux64Target() CrossTarget {
     target.cpu_arch = std.Target.Cpu.Arch.x86_64;
     target.os_tag = std.Target.Os.Tag.linux;
     target.abi = std.Target.Abi.musl;
+
+    return target;
+}
+
+fn makeMacX86Target() CrossTarget {
+    var target = CrossTarget.parse(.{}) catch unreachable;
+
+    target.cpu_arch = std.Target.Cpu.Arch.x86_64;
+    target.os_tag = std.Target.Os.Tag.macos;
+    target.abi = std.Target.Abi.none;
+
+    return target;
+}
+
+fn makeMacArmTarget() CrossTarget {
+    var target = CrossTarget.parse(.{}) catch unreachable;
+
+    target.cpu_arch = std.Target.Cpu.Arch.aarch64;
+    target.os_tag = std.Target.Os.Tag.macos;
+    target.abi = std.Target.Abi.none;
 
     return target;
 }

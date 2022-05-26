@@ -15,7 +15,8 @@ use std::path::Path;
 use std::process;
 use target_lexicon::BinaryFormat;
 use target_lexicon::{
-    Architecture, Environment, OperatingSystem, Triple, Vendor, X86_32Architecture,
+    Aarch64Architecture, Architecture, Environment, OperatingSystem, Triple, Vendor,
+    X86_32Architecture,
 };
 
 pub mod build;
@@ -640,6 +641,8 @@ pub enum Target {
     System,
     Linux32,
     Linux64,
+    MacX86,
+    MacArm,
     Wasm32,
 }
 
@@ -657,6 +660,8 @@ impl Target {
             System => "system",
             Linux32 => "linux32",
             Linux64 => "linux64",
+            MacX86 => "mac-x86",
+            MacArm => "mac-arm",
             Wasm32 => "wasm32",
         }
     }
@@ -666,6 +671,8 @@ impl Target {
         Target::System.as_str(),
         Target::Linux32.as_str(),
         Target::Linux64.as_str(),
+        Target::MacX86.as_str(),
+        Target::MacArm.as_str(),
         Target::Wasm32.as_str(),
     ];
 
@@ -687,6 +694,20 @@ impl Target {
                 operating_system: OperatingSystem::Linux,
                 environment: Environment::Musl,
                 binary_format: BinaryFormat::Elf,
+            },
+            MacX86 => Triple {
+                architecture: Architecture::X86_64,
+                vendor: Vendor::Apple,
+                operating_system: OperatingSystem::Darwin,
+                environment: Environment::Unknown,
+                binary_format: BinaryFormat::Macho,
+            },
+            MacArm => Triple {
+                architecture: Architecture::Aarch64(Aarch64Architecture::Aarch64),
+                vendor: Vendor::Apple,
+                operating_system: OperatingSystem::Darwin,
+                environment: Environment::Unknown,
+                binary_format: BinaryFormat::Macho,
             },
             Wasm32 => Triple {
                 architecture: Architecture::Wasm32,
@@ -719,6 +740,8 @@ impl std::str::FromStr for Target {
             "system" => Ok(Target::System),
             "linux32" => Ok(Target::Linux32),
             "linux64" => Ok(Target::Linux64),
+            "mac-x86" => Ok(Target::MacX86),
+            "mac-arm" => Ok(Target::MacArm),
             "wasm32" => Ok(Target::Wasm32),
             _ => Err(format!("Roc does not know how to compile to {}", string)),
         }

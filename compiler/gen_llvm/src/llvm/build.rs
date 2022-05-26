@@ -434,6 +434,20 @@ pub fn module_from_builtins<'ctx>(
                 include_bytes!("../../../builtins/bitcode/builtins-i386.bc")
             }
             Triple {
+                architecture: Architecture::Aarch64(_),
+                operating_system: OperatingSystem::Darwin,
+                ..
+            } => {
+                include_bytes!("../../../builtins/bitcode/builtins-mac_arm.bc")
+            }
+            Triple {
+                architecture: Architecture::X86_64,
+                operating_system: OperatingSystem::Darwin,
+                ..
+            } => {
+                include_bytes!("../../../builtins/bitcode/builtins-mac_x86.bc")
+            }
+            Triple {
                 architecture: Architecture::X86_64,
                 operating_system: OperatingSystem::Linux,
                 ..
