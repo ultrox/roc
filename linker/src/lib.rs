@@ -946,16 +946,8 @@ fn gen_macho_le(
 
     // minus one because we "deleted" a load command
     for index in 0..(num_load_cmds - 1) {
-        dbg!(&index);
-
         let info = load_struct_inplace::<macho::LoadCommand<LittleEndian>>(&mut out_mmap, offset);
         let cmd_size = info.cmdsize.get(NativeEndian) as usize;
-
-        eprintln!(
-            "\n* * * PROCESSING 0x{:x?} at {}\n",
-            info.cmd.get(NativeEndian),
-            offset
-        );
 
         match info.cmd.get(NativeEndian) {
             macho::LC_SEGMENT_64 => {
