@@ -903,24 +903,34 @@ fn gen_macho_le(
 
     // "Delete" the dylib load command - by copying all the bytes before it
     // and all the bytes after it, while skipping over its bytes.
-    // out_mmap[..macho_load_so_offset].copy_from_slice(&exec_data[..macho_load_so_offset]);
-    // out_mmap[macho_load_so_offset..end_of_cmds - dylib_cmd_size]
-    //     .copy_from_slice(&exec_data[macho_load_so_offset + dylib_cmd_size..end_of_cmds]);
+    // It has a dynamic-length string at the end that we also need to delete,
+    // in addition to the header.
+    out_mmap[..macho_load_so_offset].copy_from_slice(&exec_data[..macho_load_so_offset]);
+
+    // We need the full command size, including the dynamic-length string at the end.
+    // To get that, we need to load the command.
+    let info =
+        load_struct_inplace::<macho::LoadCommand<LittleEndian>>(exec_data, macho_load_so_offset);
+    let total_cmd_size = info.cmdsize.get(NativeEndian) as usize;
+
+    out_mmap[macho_load_so_offset..end_of_cmds - total_cmd_size]
+        .copy_from_slice(&exec_data[macho_load_so_offset + total_cmd_size..end_of_cmds]);
 
     // Copy the rest of the file, leaving a gap for the surgical linking to add our 2 commands
     // (which happens after preprocessing), and some zero padding at the end for alignemnt.
     // (It seems to cause bugs if that padding isn't there!)
-    // let rest_of_data = &exec_data[end_of_cmds..];
-    // let start_index = end_of_cmds + added_bytes;
+    let rest_of_data = &exec_data[end_of_cmds..];
+    let start_index = end_of_cmds + added_bytes;
 
-    // out_mmap[start_index..start_index + rest_of_data.len()].copy_from_slice(rest_of_data);
+    out_mmap[start_index..start_index + rest_of_data.len()].copy_from_slice(rest_of_data);
 
-    // let out_header = load_struct_inplace_mut::<macho::MachHeader64<LittleEndian>>(&mut out_mmap, 0);
+    let out_header = load_struct_inplace_mut::<macho::MachHeader64<LittleEndian>>(&mut out_mmap, 0);
 
-    // out_header.ncmds.set(LittleEndian, num_load_cmds + 2);
-    // out_header
-    //     .sizeofcmds
-    //     .set(LittleEndian, (size_of_cmds + added_bytes) as u32);
+    // +1 because we're deleting 1 load command and then adding 2 new ones.
+    out_header.ncmds.set(LittleEndian, num_load_cmds + 1);
+    out_header
+        .sizeofcmds
+        .set(LittleEndian, (size_of_cmds + added_bytes) as u32);
 
     // Go through every command and shift it by added_bytes if it's absolute, unless it's inside the command header
     let mut offset = mem::size_of_val(exec_header);
@@ -934,13 +944,14 @@ fn gen_macho_le(
         }
     };
 
-    for index in 0..num_load_cmds {
+    // minus one because we "deleted" a load command
+    for index in 0..(num_load_cmds - 1) {
         dbg!(&index);
 
         let info = load_struct_inplace::<macho::LoadCommand<LittleEndian>>(&mut out_mmap, offset);
         let cmd_size = info.cmdsize.get(NativeEndian) as usize;
 
-        println!(
+        eprintln!(
             "\n* * * PROCESSING 0x{:x?} at {}\n",
             info.cmd.get(NativeEndian),
             offset
