@@ -11,12 +11,12 @@ use object::{
 };
 use roc_build::link::{rebuild_host, LinkType};
 use roc_collections::all::MutMap;
+use roc_error_macros::internal_error;
 use roc_mono::ir::OptLevel;
 use std::cmp::Ordering;
 use std::convert::TryFrom;
 use std::ffi::CStr;
 use std::fs::{self, File};
-use std::io;
 use std::io::{BufReader, BufWriter};
 use std::mem;
 use std::os::raw::c_char;
@@ -80,9 +80,9 @@ pub fn build_and_preprocess_host(
     exposed_to_host: Vec<String>,
     exported_closure_types: Vec<String>,
     target_valgrind: bool,
-) -> io::Result<()> {
+) {
     let dummy_lib = host_input_path.with_file_name("libapp.so");
-    generate_dynamic_lib(target, exposed_to_host, exported_closure_types, &dummy_lib)?;
+    generate_dynamic_lib(target, exposed_to_host, exported_closure_types, &dummy_lib);
     rebuild_host(
         opt_level,
         target,
@@ -94,7 +94,7 @@ pub fn build_and_preprocess_host(
     let metadata = host_input_path.with_file_name("metadata");
     let prehost = host_input_path.with_file_name("preprocessedhost");
 
-    if preprocess(
+    preprocess(
         target,
         dynhost.to_str().unwrap(),
         metadata.to_str().unwrap(),
@@ -102,11 +102,7 @@ pub fn build_and_preprocess_host(
         &dummy_lib,
         false,
         false,
-    )? != 0
-    {
-        panic!("Failed to preprocess host");
-    }
-    Ok(())
+    )
 }
 
 pub fn link_preprocessed_host(
@@ -114,20 +110,16 @@ pub fn link_preprocessed_host(
     host_input_path: &Path,
     roc_app_obj: &Path,
     binary_path: &Path,
-) -> io::Result<()> {
+) {
     let metadata = host_input_path.with_file_name("metadata");
-    if surgery(
+    surgery(
         roc_app_obj.to_str().unwrap(),
         metadata.to_str().unwrap(),
         binary_path.to_str().unwrap(),
         false,
         false,
         target,
-    )? != 0
-    {
-        panic!("Failed to surgically link host");
-    }
-    Ok(())
+    )
 }
 
 fn generate_dynamic_lib(
@@ -135,8 +127,12 @@ fn generate_dynamic_lib(
     exposed_to_host: Vec<String>,
     exported_closure_types: Vec<String>,
     dummy_lib_path: &Path,
-) -> io::Result<()> {
-    let dummy_obj_file = Builder::new().prefix("roc_lib").suffix(".o").tempfile()?;
+) {
+    let dummy_obj_file = Builder::new()
+        .prefix("roc_lib")
+        .suffix(".o")
+        .tempfile()
+        .unwrap_or_else(|e| internal_error!("{}", e));
     let dummy_obj_file = dummy_obj_file.path();
 
     let obj_target = match target.binary_format {
@@ -242,7 +238,6 @@ fn generate_dynamic_lib(
             ),
         }
     }
-    Ok(())
 }
 
 // TODO: Most of this file is a mess of giant functions just to check if things work.
@@ -255,7 +250,7 @@ pub fn preprocess(
     shared_lib: &Path,
     verbose: bool,
     time: bool,
-) -> io::Result<i32> {
+) {
     let verbose = true;
     if verbose {
         println!("Targeting: {}", target.to_string());
@@ -263,14 +258,13 @@ pub fn preprocess(
 
     let total_start = SystemTime::now();
     let exec_parsing_start = total_start;
-    let exec_file = fs::File::open(exec_filename)?;
-    let exec_mmap = unsafe { Mmap::map(&exec_file)? };
+    let exec_file = fs::File::open(exec_filename).unwrap_or_else(|e| internal_error!("{}", e));
+    let exec_mmap = unsafe { Mmap::map(&exec_file).unwrap_or_else(|e| internal_error!("{}", e)) };
     let exec_data = &*exec_mmap;
     let exec_obj = match object::File::parse(exec_data) {
         Ok(obj) => obj,
         Err(err) => {
-            println!("Failed to parse executable file: {}", err);
-            return Ok(-1);
+            internal_error!("Failed to parse executable file: {}", err);
         }
     };
 
@@ -335,15 +329,13 @@ pub fn preprocess(
                     },
                 ) => range.offset,
                 _ => {
-                    println!("Surgical linking does not work with compressed plt section");
-                    return Ok(-1);
+                    internal_error!("Surgical linking does not work with compressed plt section");
                 }
             };
             (section.address(), file_offset)
         }
         None => {
-            println!("Failed to find PLT section. Probably an malformed executable.");
-            return Ok(-1);
+            internal_error!("Failed to find PLT section. Probably an malformed executable.");
         }
     };
     if verbose {
@@ -378,9 +370,7 @@ pub fn preprocess(
             let plt_relocs: Vec<_> = (match exec_obj.dynamic_relocations() {
                 Some(relocs) => relocs,
                 None => {
-                    println!("Executable does not have any dynamic relocations.");
-                    println!("No work to do. Probably an invalid input.");
-                    return Ok(-1);
+                    internal_error!("Executable does not have any dynamic relocations. No work to do. Probably an invalid input.");
                 }
             })
             .filter_map(|(_, reloc)| {
@@ -572,8 +562,7 @@ pub fn preprocess(
         .filter(|sec| sec.kind() == SectionKind::Text)
         .collect();
     if text_sections.is_empty() {
-        println!("No text sections found. This application has no code.");
-        return Ok(-1);
+        internal_error!("No text sections found. This application has no code.");
     }
     if verbose {
         println!();
@@ -598,19 +587,18 @@ pub fn preprocess(
             ) => (range.offset, false),
             Ok(range) => (range.offset, true),
             Err(err) => {
-                println!(
+                internal_error!(
                     "Issues dealing with section compression for {:+x?}: {}",
-                    sec, err
+                    sec,
+                    err
                 );
-                return Ok(-1);
             }
         };
 
         let data = match sec.uncompressed_data() {
             Ok(data) => data,
             Err(err) => {
-                println!("Failed to load text section, {:+x?}: {}", sec, err);
-                return Ok(-1);
+                internal_error!("Failed to load text section, {:+x?}: {}", sec, err);
             }
         };
         let mut decoder = Decoder::with_ip(64, &data, sec.address(), DecoderOptions::NONE);
@@ -630,8 +618,7 @@ pub fn preprocess(
                     let target = inst.near_branch_target();
                     if let Some(func_name) = app_func_addresses.get(&target) {
                         if compressed {
-                            println!("Surgical linking does not work with compressed text sections: {:+x?}", sec);
-                            return Ok(-1);
+                            internal_error!("Surgical linking does not work with compressed text sections: {:+x?}", sec);
                         }
 
                         if verbose {
@@ -651,11 +638,10 @@ pub fn preprocess(
                             OpCodeOperandKind::br16_2 => 2,
                             OpCodeOperandKind::br32_4 | OpCodeOperandKind::br64_4 => 4,
                             _ => {
-                                println!(
+                                internal_error!(
                                     "Ran into an unknown operand kind when analyzing branches: {:?}",
                                     op_kind
                                 );
-                                return Ok(-1);
                             }
                         };
                         let offset = inst.next_ip() - op_size as u64 - sec.address() + file_offset;
@@ -680,11 +666,10 @@ pub fn preprocess(
                     }
                 }
                 Ok(OpKind::FarBranch16 | OpKind::FarBranch32) => {
-                    println!(
+                    internal_error!(
                         "Found branch type instruction that is not yet support: {:+x?}",
                         inst
                     );
-                    return Ok(-1);
                 }
                 Ok(_) => {
                     if (inst.is_call_far_indirect()
@@ -702,8 +687,7 @@ pub fn preprocess(
                     }
                 }
                 Err(err) => {
-                    println!("Failed to decode assembly: {}", err);
-                    return Ok(-1);
+                    internal_error!("Failed to decode assembly: {}", err);
                 }
             }
         }
@@ -728,7 +712,7 @@ pub fn preprocess(
                     shared_lib_index,
                 } = scan_elf_dynamic_deps(
                     &exec_obj, &mut md, &app_syms, shared_lib, exec_data, verbose,
-                )?;
+                );
 
                 scanning_dynamic_deps_duration = scanning_dynamic_deps_start.elapsed().unwrap();
 
@@ -744,7 +728,7 @@ pub fn preprocess(
                     dynamic_lib_count,
                     shared_lib_index,
                     verbose,
-                )?
+                )
             }
             target_lexicon::Endianness::Big => {
                 // TODO probably need to make gen_elf a macro to get this
@@ -768,7 +752,7 @@ pub fn preprocess(
                     //     shared_lib_index,
                     // } = scan_elf_dynamic_deps(
                     //     &exec_obj, &mut md, &app_syms, shared_lib, exec_data, verbose,
-                    // )?;
+                    // );
 
                     scanning_dynamic_deps_duration = scanning_dynamic_deps_start.elapsed().unwrap();
 
@@ -778,9 +762,10 @@ pub fn preprocess(
                     let macho_load_so_offset = match macho_load_so_offset {
                         Some(offset) => offset,
                         None => {
-                            eprintln!("Host does not link library `{}`!", shared_lib.display());
-
-                            return Ok(-1);
+                            internal_error!(
+                                "Host does not link library `{}`!",
+                                shared_lib.display()
+                            );
                         }
                     };
 
@@ -791,7 +776,7 @@ pub fn preprocess(
                         macho_load_so_offset,
                         target,
                         verbose,
-                    )?
+                    )
                 }
                 target_lexicon::Endianness::Big => {
                     // TODO Is big-endian macOS even a thing that exists anymore?
@@ -826,17 +811,19 @@ pub fn preprocess(
     let saving_metadata_start = SystemTime::now();
     // This block ensure that the metadata is fully written and timed before continuing.
     {
-        let output = fs::File::create(metadata_filename)?;
+        let output =
+            fs::File::create(metadata_filename).unwrap_or_else(|e| internal_error!("{}", e));
         let output = BufWriter::new(output);
         if let Err(err) = serialize_into(output, &md) {
-            println!("Failed to serialize metadata: {}", err);
-            return Ok(-1);
+            internal_error!("Failed to serialize metadata: {}", err);
         };
     }
     let saving_metadata_duration = saving_metadata_start.elapsed().unwrap();
 
     let flushing_data_start = SystemTime::now();
-    out_mmap.flush()?;
+    out_mmap
+        .flush()
+        .unwrap_or_else(|e| internal_error!("{}", e));
     // Also drop files to to ensure data is fully written here.
     drop(out_mmap);
     drop(out_file);
@@ -870,8 +857,6 @@ pub fn preprocess(
         );
         report_timing("Total", total_duration);
     }
-
-    Ok(0)
 }
 
 fn gen_macho_le(
@@ -881,7 +866,7 @@ fn gen_macho_le(
     macho_load_so_offset: usize,
     target: &Triple,
     _verbose: bool,
-) -> io::Result<(MmapMut, File)> {
+) -> (MmapMut, File) {
     use macho::{DylibCommand, Section64, SegmentCommand64};
 
     let exec_header = load_struct_inplace::<macho::MachHeader64<LittleEndian>>(exec_data, 0);
@@ -907,9 +892,13 @@ fn gen_macho_le(
         .write(true)
         .create(true)
         .truncate(true)
-        .open(out_filename)?;
-    out_file.set_len(md.exec_len)?;
-    let mut out_mmap = unsafe { MmapMut::map_mut(&out_file)? };
+        .open(out_filename)
+        .unwrap_or_else(|e| internal_error!("{}", e));
+    out_file
+        .set_len(md.exec_len)
+        .unwrap_or_else(|e| internal_error!("{}", e));
+    let mut out_mmap =
+        unsafe { MmapMut::map_mut(&out_file).unwrap_or_else(|e| internal_error!("{}", e)) };
     let end_of_cmds = size_of_cmds + mem::size_of_val(exec_header);
 
     // "Delete" the dylib load command - by copying all the bytes before it
@@ -1273,7 +1262,7 @@ fn gen_macho_le(
     // cmd_loc should be where the last offset ended
     md.macho_cmd_loc = offset as u64;
 
-    Ok((out_mmap, out_file))
+    (out_mmap, out_file)
 }
 
 fn gen_elf_le(
@@ -1285,7 +1274,7 @@ fn gen_elf_le(
     dynamic_lib_count: usize,
     shared_lib_index: usize,
     verbose: bool,
-) -> io::Result<(MmapMut, File)> {
+) -> (MmapMut, File) {
     let exec_header = load_struct_inplace::<elf::FileHeader64<LittleEndian>>(exec_data, 0);
     let ph_offset = exec_header.e_phoff.get(NativeEndian);
     let ph_ent_size = exec_header.e_phentsize.get(NativeEndian);
@@ -1318,9 +1307,13 @@ fn gen_elf_le(
         .write(true)
         .create(true)
         .truncate(true)
-        .open(out_filename)?;
-    out_file.set_len(md.exec_len)?;
-    let mut out_mmap = unsafe { MmapMut::map_mut(&out_file)? };
+        .open(out_filename)
+        .unwrap_or_else(|e| internal_error!("{}", e));
+    out_file
+        .set_len(md.exec_len)
+        .unwrap_or_else(|e| internal_error!("{}", e));
+    let mut out_mmap =
+        unsafe { MmapMut::map_mut(&out_file).unwrap_or_else(|e| internal_error!("{}", e)) };
 
     out_mmap[..ph_end].copy_from_slice(&exec_data[..ph_end]);
 
@@ -1596,7 +1589,7 @@ fn gen_elf_le(
     }
     file_header.e_phnum = endian::U16::new(LittleEndian, ph_num + added_header_count as u16);
 
-    Ok((out_mmap, out_file))
+    (out_mmap, out_file)
 }
 
 fn scan_macho_dynamic_deps(
@@ -1606,9 +1599,8 @@ fn scan_macho_dynamic_deps(
     _shared_lib: &str,
     _exec_data: &[u8],
     _verbose: bool,
-) -> io::Result</*MachoDynamicDeps*/ ()> {
+) {
     // TODO
-    Ok(())
 }
 
 fn scan_elf_dynamic_deps(
@@ -1618,7 +1610,7 @@ fn scan_elf_dynamic_deps(
     shared_lib: &Path,
     exec_data: &[u8],
     verbose: bool,
-) -> io::Result<ElfDynamicDeps> {
+) -> ElfDynamicDeps {
     let dyn_sec = match exec_obj.section_by_name(".dynamic") {
         Some(sec) => sec,
         None => {
@@ -1770,12 +1762,12 @@ fn scan_elf_dynamic_deps(
     })
     .collect();
 
-    Ok(ElfDynamicDeps {
+    ElfDynamicDeps {
         got_app_syms,
         got_sections,
         dynamic_lib_count,
         shared_lib_index,
-    })
+    }
 }
 
 pub fn surgery(
@@ -1785,29 +1777,27 @@ pub fn surgery(
     verbose: bool,
     time: bool,
     target: &Triple,
-) -> io::Result<i32> {
+) {
     let total_start = SystemTime::now();
     let loading_metadata_start = total_start;
-    let input = fs::File::open(metadata_filename)?;
+    let input = fs::File::open(metadata_filename).unwrap_or_else(|e| internal_error!("{}", e));
     let input = BufReader::new(input);
-    let md: metadata::Metadata = match deserialize_from(input) {
+    let mut md: metadata::Metadata = match deserialize_from(input) {
         Ok(data) => data,
         Err(err) => {
-            println!("Failed to deserialize metadata: {}", err);
-            return Ok(-1);
+            internal_error!("Failed to deserialize metadata: {}", err);
         }
     };
     let loading_metadata_duration = loading_metadata_start.elapsed().unwrap();
 
     let app_parsing_start = SystemTime::now();
-    let app_file = fs::File::open(app_filename)?;
-    let app_mmap = unsafe { Mmap::map(&app_file)? };
+    let app_file = fs::File::open(app_filename).unwrap_or_else(|e| internal_error!("{}", e));
+    let app_mmap = unsafe { Mmap::map(&app_file).unwrap_or_else(|e| internal_error!("{}", e)) };
     let app_data = &*app_mmap;
     let app_obj = match object::File::parse(app_data) {
         Ok(obj) => obj,
         Err(err) => {
-            println!("Failed to parse application file: {}", err);
-            return Ok(-1);
+            internal_error!("Failed to parse application file: {}", err);
         }
     };
     let app_parsing_duration = app_parsing_start.elapsed().unwrap();
@@ -1816,12 +1806,16 @@ pub fn surgery(
     let exec_file = fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .open(out_filename)?;
+        .open(out_filename)
+        .unwrap_or_else(|e| internal_error!("{}", e));
 
     let max_out_len = md.exec_len + app_data.len() as u64 + md.load_align_constraint;
-    exec_file.set_len(max_out_len)?;
+    exec_file
+        .set_len(max_out_len)
+        .unwrap_or_else(|e| internal_error!("{}", e));
 
-    let mut exec_mmap = unsafe { MmapMut::map_mut(&exec_file)? };
+    let mut exec_mmap =
+        unsafe { MmapMut::map_mut(&exec_file).unwrap_or_else(|e| internal_error!("{}", e)) };
 
     let load_and_mmap_duration = load_and_mmap_start.elapsed().unwrap();
     let out_gen_start = SystemTime::now();
@@ -1846,17 +1840,21 @@ pub fn surgery(
             // We should have verified this via supported() before calling this function
             unreachable!()
         }
-    }?;
+    };
 
     let out_gen_duration = out_gen_start.elapsed().unwrap();
     let flushing_data_start = SystemTime::now();
 
     // TODO investigate using the async version of flush - might be faster due to not having to block on that
-    exec_mmap.flush()?;
+    exec_mmap
+        .flush()
+        .unwrap_or_else(|e| internal_error!("{}", e));
     // Also drop files to to ensure data is fully written here.
     drop(exec_mmap);
 
-    exec_file.set_len(offset as u64 + 1)?;
+    exec_file
+        .set_len(offset as u64 + 1)
+        .unwrap_or_else(|e| internal_error!("{}", e));
     drop(exec_file);
     let flushing_data_duration = flushing_data_start.elapsed().unwrap();
 
@@ -1865,9 +1863,11 @@ pub fn surgery(
     {
         use std::os::unix::fs::PermissionsExt;
 
-        let mut perms = fs::metadata(out_filename)?.permissions();
+        let mut perms = fs::metadata(out_filename)
+            .unwrap_or_else(|e| internal_error!("{}", e))
+            .permissions();
         perms.set_mode(perms.mode() | 0o111);
-        fs::set_permissions(out_filename, perms)?;
+        fs::set_permissions(out_filename, perms).unwrap_or_else(|e| internal_error!("{}", e));
     }
 
     let total_duration = total_start.elapsed().unwrap();
@@ -1891,7 +1891,7 @@ pub fn surgery(
         report_timing("Total", total_duration);
     }
 
-    Ok(output)
+    output
 }
 
 pub fn surgery_macho(
@@ -1904,7 +1904,7 @@ pub fn surgery_macho(
     exec_mmap: &mut MmapMut,
     offset_ref: &mut usize, // TODO return this instead of taking a mutable reference to it
     app_obj: object::File,
-) -> io::Result<i32> {
+) {
     let mut offset = align_by_constraint(md.exec_len as usize, MIN_SECTION_ALIGNMENT);
     let new_rodata_section_offset = offset;
 
@@ -1951,8 +1951,7 @@ pub fn surgery_macho(
         .filter(|sec| sec.kind() == SectionKind::Text)
         .collect();
     if text_sections.is_empty() {
-        println!("No text sections found. This application has no code.");
-        return Ok(-1);
+        internal_error!("No text sections found. This application has no code.");
     }
 
     // Calculate addresses and load symbols.
@@ -1994,10 +1993,7 @@ pub fn surgery_macho(
             // bss sections only modify the virtual size.
             virt_offset += sec.size() as usize;
         } else if section_size != sec.size() {
-            println!(
-                "We do not deal with non bss sections that have different on disk and in memory sizes"
-            );
-            return Ok(-1);
+            internal_error!( "We do not deal with non bss sections that have different on disk and in memory sizes");
         } else {
             offset += section_size as usize;
             virt_offset += sec.size() as usize;
@@ -2025,12 +2021,11 @@ pub fn surgery_macho(
         let data = match sec.data() {
             Ok(data) => data,
             Err(err) => {
-                println!(
+                internal_error!(
                     "Failed to load data for section, {:+x?}: {}",
                     sec.name().unwrap(),
                     err
                 );
-                return Ok(-1);
             }
         };
         let (section_offset, section_virtual_offset) =
@@ -2086,8 +2081,7 @@ pub fn surgery_macho(
                                 target_offset - virt_base as i64 + rel.1.addend()
                             }
                             x => {
-                                println!("Relocation Kind not yet support: {:?}", x);
-                                return Ok(-1);
+                                internal_error!("Relocation Kind not yet support: {:?}", x);
                             }
                         };
                         if verbose {
@@ -2107,8 +2101,7 @@ pub fn surgery_macho(
                                 exec_mmap[base..base + 8].copy_from_slice(&data);
                             }
                             x => {
-                                println!("Relocation size not yet supported: {}", x);
-                                return Ok(-1);
+                                internal_error!("Relocation size not yet supported: {}", x);
                             }
                         }
                     } else if matches!(app_obj.symbol_by_index(index), Ok(sym) if ["__divti3", "__udivti3", "___divti3", "___udivti3"].contains(&sym.name().unwrap_or_default()))
@@ -2116,25 +2109,25 @@ pub fn surgery_macho(
                         // Explicitly ignore some symbols that are currently always linked.
                         continue;
                     } else {
-                        println!(
+                        internal_error!(
                             "Undefined Symbol in relocation, {:+x?}: {:+x?}",
                             rel,
                             app_obj.symbol_by_index(index)
                         );
-                        return Ok(-1);
                     }
                 }
 
                 _ => {
-                    println!("Relocation target not yet support: {:+x?}", rel);
-                    return Ok(-1);
+                    internal_error!("Relocation target not yet support: {:+x?}", rel);
                 }
             }
         }
     }
 
     // Flush app only data to speed up write to disk.
-    exec_mmap.flush_async_range(md.exec_len as usize, offset - md.exec_len as usize)?;
+    exec_mmap
+        .flush_async_range(md.exec_len as usize, offset - md.exec_len as usize)
+        .unwrap_or_else(|e| internal_error!("{}", e));
 
     // TODO: look into merging symbol tables, debug info, and eh frames to enable better debugger experience.
 
@@ -2228,8 +2221,7 @@ pub fn surgery_macho(
         let func_virt_offset = match app_func_vaddr_map.get(func_name) {
             Some(offset) => *offset as u64,
             None => {
-                println!("Function, {}, was not defined by the app", &func_name);
-                return Ok(-1);
+                internal_error!("Function, {}, was not defined by the app", &func_name);
             }
         };
         if verbose {
@@ -2269,8 +2261,7 @@ pub fn surgery_macho(
                         .copy_from_slice(&data);
                 }
                 x => {
-                    println!("Surgery size not yet supported: {}", x);
-                    return Ok(-1);
+                    internal_error!("Surgery size not yet supported: {}", x);
                 }
             }
         }
@@ -2307,8 +2298,7 @@ pub fn surgery_macho(
         //         match app_func_size_map.get(func_name) {
         //             Some(size) => *size,
         //             None => {
-        //                 println!("Size missing for: {}", func_name);
-        //                 return Ok(-1);
+        //                 internal_error!("Size missing for: {}", func_name);
         //             }
         //         },
         //     );
@@ -2316,8 +2306,6 @@ pub fn surgery_macho(
     }
 
     *offset_ref = offset;
-
-    Ok(-1)
 }
 
 pub fn surgery_elf(
@@ -2326,12 +2314,11 @@ pub fn surgery_elf(
     exec_mmap: &mut MmapMut,
     offset_ref: &mut usize, // TODO return this instead of taking a mutable reference to it
     app_obj: object::File,
-) -> io::Result<i32> {
+) {
     let elf64 = exec_mmap[4] == 2;
     let litte_endian = exec_mmap[5] == 1;
     if !elf64 || !litte_endian {
-        println!("Only 64bit little endian elf currently supported for surgery");
-        return Ok(-1);
+        internal_error!("Only 64bit little endian elf currently supported for surgery");
     }
     let exec_header = load_struct_inplace::<elf::FileHeader64<LittleEndian>>(&exec_mmap, 0);
 
@@ -2406,8 +2393,7 @@ pub fn surgery_elf(
         .filter(|sec| sec.name().unwrap_or_default().starts_with(".text"))
         .collect();
     if text_sections.is_empty() {
-        println!("No text sections found. This application has no code.");
-        return Ok(-1);
+        internal_error!("No text sections found. This application has no code.");
     }
 
     // Calculate addresses and load symbols.
@@ -2449,10 +2435,7 @@ pub fn surgery_elf(
             // bss sections only modify the virtual size.
             virt_offset += sec.size() as usize;
         } else if section_size != sec.size() {
-            println!(
-                "We do not deal with non bss sections that have different on disk and in memory sizes"
-            );
-            return Ok(-1);
+            internal_error!( "We do not deal with non bss sections that have different on disk and in memory sizes");
         } else {
             offset += section_size as usize;
             virt_offset += sec.size() as usize;
@@ -2480,12 +2463,11 @@ pub fn surgery_elf(
         let data = match sec.data() {
             Ok(data) => data,
             Err(err) => {
-                println!(
+                internal_error!(
                     "Failed to load data for section, {:+x?}: {}",
                     sec.name().unwrap(),
                     err
                 );
-                return Ok(-1);
             }
         };
         let (section_offset, section_virtual_offset) =
@@ -2541,8 +2523,7 @@ pub fn surgery_elf(
                                 target_offset - virt_base as i64 + rel.1.addend()
                             }
                             x => {
-                                println!("Relocation Kind not yet support: {:?}", x);
-                                return Ok(-1);
+                                internal_error!("Relocation Kind not yet support: {:?}", x);
                             }
                         };
                         if verbose {
@@ -2562,8 +2543,7 @@ pub fn surgery_elf(
                                 exec_mmap[base..base + 8].copy_from_slice(&data);
                             }
                             x => {
-                                println!("Relocation size not yet supported: {}", x);
-                                return Ok(-1);
+                                internal_error!("Relocation size not yet supported: {}", x);
                             }
                         }
                     } else if matches!(app_obj.symbol_by_index(index), Ok(sym) if ["__divti3", "__udivti3"].contains(&sym.name().unwrap_or_default()))
@@ -2571,18 +2551,16 @@ pub fn surgery_elf(
                         // Explicitly ignore some symbols that are currently always linked.
                         continue;
                     } else {
-                        println!(
+                        internal_error!(
                             "Undefined Symbol in relocation, {:+x?}: {:+x?}",
                             rel,
                             app_obj.symbol_by_index(index)
                         );
-                        return Ok(-1);
                     }
                 }
 
                 _ => {
-                    println!("Relocation target not yet support: {:+x?}", rel);
-                    return Ok(-1);
+                    internal_error!("Relocation target not yet support: {:+x?}", rel);
                 }
             }
         }
@@ -2594,10 +2572,12 @@ pub fn surgery_elf(
     offset += sh_size;
 
     // Flush app only data to speed up write to disk.
-    exec_mmap.flush_async_range(
-        new_rodata_section_offset,
-        offset - new_rodata_section_offset,
-    )?;
+    exec_mmap
+        .flush_async_range(
+            new_rodata_section_offset,
+            offset - new_rodata_section_offset,
+        )
+        .unwrap_or_else(|e| internal_error!("{}", e));
 
     // TODO: look into merging symbol tables, debug info, and eh frames to enable better debugger experience.
 
@@ -2680,8 +2660,7 @@ pub fn surgery_elf(
         let func_virt_offset = match app_func_vaddr_map.get(func_name) {
             Some(offset) => *offset as u64,
             None => {
-                println!("Function, {}, was not defined by the app", &func_name);
-                return Ok(-1);
+                internal_error!("Function, {}, was not defined by the app", &func_name);
             }
         };
         if verbose {
@@ -2721,8 +2700,7 @@ pub fn surgery_elf(
                         .copy_from_slice(&data);
                 }
                 x => {
-                    println!("Surgery size not yet supported: {}", x);
-                    return Ok(-1);
+                    internal_error!("Surgery size not yet supported: {}", x);
                 }
             }
         }
@@ -2759,8 +2737,7 @@ pub fn surgery_elf(
                 match app_func_size_map.get(func_name) {
                     Some(size) => *size,
                     None => {
-                        println!("Size missing for: {}", func_name);
-                        return Ok(-1);
+                        internal_error!("Size missing for: {}", func_name);
                     }
                 },
             );
@@ -2769,8 +2746,6 @@ pub fn surgery_elf(
 
     // TODO return this instead of accepting a mutable ref!
     *offset_ref = offset;
-
-    Ok(0)
 }
 
 fn align_by_constraint(offset: usize, constraint: usize) -> usize {

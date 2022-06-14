@@ -15,6 +15,7 @@ path = "src/lib.rs"
 roc_mono = { path = "../compiler/mono" }
 roc_build = { path = "../compiler/build" }
 roc_collections = { path = "../compiler/collections" }
+roc_error_macros = { path = "../error_macros" }
 bumpalo = { version = "3.8.0", features = ["collections"] }
 clap = { version = "3.1.15", default-features = false, features = ["std", "color", "suggestions"] }
 iced-x86 = { version = "1.15.0", default-features = false, features = ["std", "decoder", "op_code_info", "instr_info"] }
