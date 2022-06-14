@@ -2110,7 +2110,7 @@ pub fn surgery_macho(
                                 return Ok(-1);
                             }
                         }
-                    } else if matches!(app_obj.symbol_by_index(index), Ok(sym) if ["__divti3", "__udivti3"].contains(&sym.name().unwrap_or_default()))
+                    } else if matches!(app_obj.symbol_by_index(index), Ok(sym) if ["__divti3", "__udivti3", "___divti3", "___udivti3"].contains(&sym.name().unwrap_or_default()))
                     {
                         // Explicitly ignore some symbols that are currently always linked.
                         continue;
