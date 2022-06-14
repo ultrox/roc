@@ -1936,18 +1936,18 @@ pub fn surgery_macho(
 
     let rodata_sections: Vec<Section> = app_obj
         .sections()
-        .filter(|sec| sec.name().unwrap_or_default().starts_with("__RODATA"))
+        .filter(|sec| sec.kind() == SectionKind::ReadOnlyData)
         .collect();
 
     // bss section is like rodata section, but it has zero file size and non-zero virtual size.
     let bss_sections: Vec<Section> = app_obj
         .sections()
-        .filter(|sec| sec.name().unwrap_or_default().starts_with("__BSS"))
+        .filter(|sec| sec.kind() == SectionKind::UninitializedData)
         .collect();
 
     let text_sections: Vec<Section> = app_obj
         .sections()
-        .filter(|sec| sec.name().unwrap_or_default().starts_with("__TEXT"))
+        .filter(|sec| sec.kind() == SectionKind::Text)
         .collect();
     if text_sections.is_empty() {
         println!("No text sections found. This application has no code.");
