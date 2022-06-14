@@ -547,14 +547,6 @@ pub fn preprocess(
             unreachable!()
         }
     };
-    let macho_load_so_offset = match macho_load_so_offset {
-        Some(offset) => offset,
-        None => {
-            eprintln!("Host does not link library `{}`!", shared_lib.display());
-
-            return Ok(-1);
-        }
-    };
 
     for sym in app_syms.iter() {
         let name = sym.name().unwrap().to_string();
@@ -783,6 +775,15 @@ pub fn preprocess(
                     platform_gen_start = SystemTime::now();
 
                     // TODO little endian
+                    let macho_load_so_offset = match macho_load_so_offset {
+                        Some(offset) => offset,
+                        None => {
+                            eprintln!("Host does not link library `{}`!", shared_lib.display());
+
+                            return Ok(-1);
+                        }
+                    };
+
                     gen_macho_le(
                         exec_data,
                         &mut md,
