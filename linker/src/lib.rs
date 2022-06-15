@@ -1012,11 +1012,11 @@ fn gen_macho_le(
                     // dbg!(&section);
                     // dbg!(&added_bytes);
                     // dbg!(String::from_utf8_lossy(&section.sectname));
-                    let old_rel_offset = section.reloff.get(NativeEndian);
-                    if old_rel_offset > 0 {
-                        section
-                            .reloff
-                            .set(LittleEndian, old_rel_offset + added_bytes as u32);
+                    if section.nreloc.get(NativeEndian) > 0 {
+                        section.reloff.set(
+                            LittleEndian,
+                            section.reloff.get(NativeEndian) + added_bytes as u32,
+                        );
                     }
 
                     relocation_offsets.push(Relocation {
@@ -1066,13 +1066,17 @@ fn gen_macho_le(
                 let sym_offset = cmd.symoff.get(NativeEndian);
                 let num_syms = cmd.nsyms.get(NativeEndian);
 
-                cmd.symoff
-                    .set(LittleEndian, sym_offset + added_bytes as u32);
+                if num_syms > 0 {
+                    cmd.symoff
+                        .set(LittleEndian, sym_offset + added_bytes as u32);
+                }
 
-                cmd.stroff.set(
-                    LittleEndian,
-                    cmd.stroff.get(NativeEndian) + added_bytes as u32,
-                );
+                if cmd.strsize.get(NativeEndian) > 0 {
+                    cmd.stroff.set(
+                        LittleEndian,
+                        cmd.stroff.get(NativeEndian) + added_bytes as u32,
+                    );
+                }
 
                 let table = load_structs_inplace_mut::<macho::Nlist64<LittleEndian>>(
                     &mut out_mmap,
@@ -1095,40 +1099,46 @@ fn gen_macho_le(
                     offset,
                 );
 
-                let old_toc_offset = cmd.tocoff.get(NativeEndian);
-                if old_toc_offset > 0 {
-                    cmd.tocoff
-                        .set(LittleEndian, old_toc_offset + added_bytes as u32);
+                if cmd.ntoc.get(NativeEndian) > 0 {
+                    cmd.tocoff.set(
+                        LittleEndian,
+                        cmd.tocoff.get(NativeEndian) + added_bytes as u32,
+                    );
                 }
 
-                let old_modtab_offset = cmd.modtaboff.get(NativeEndian);
-                if old_modtab_offset > 0 {
-                    cmd.modtaboff
-                        .set(LittleEndian, old_modtab_offset + added_bytes as u32);
+                if cmd.nmodtab.get(NativeEndian) > 0 {
+                    cmd.modtaboff.set(
+                        LittleEndian,
+                        cmd.modtaboff.get(NativeEndian) + added_bytes as u32,
+                    );
                 }
 
-                let old_extrefsym_offset = cmd.extrefsymoff.get(NativeEndian);
-                if old_extrefsym_offset > 0 {
-                    cmd.extrefsymoff
-                        .set(LittleEndian, old_extrefsym_offset + added_bytes as u32);
+                if cmd.nextrefsyms.get(NativeEndian) > 0 {
+                    cmd.extrefsymoff.set(
+                        LittleEndian,
+                        cmd.extrefsymoff.get(NativeEndian) + added_bytes as u32,
+                    );
                 }
 
-                let old_indirectsym_offset = cmd.indirectsymoff.get(NativeEndian);
-                if old_indirectsym_offset > 0 {
-                    cmd.indirectsymoff
-                        .set(LittleEndian, old_indirectsym_offset + added_bytes as u32);
+                if cmd.nindirectsyms.get(NativeEndian) > 0 {
+                    cmd.indirectsymoff.set(
+                        LittleEndian,
+                        cmd.indirectsymoff.get(NativeEndian) + added_bytes as u32,
+                    );
                 }
 
-                let old_extrel_offset = cmd.extreloff.get(NativeEndian);
-                if old_extrel_offset > 0 {
-                    cmd.extreloff
-                        .set(LittleEndian, old_extrel_offset + added_bytes as u32);
+                if cmd.nextrel.get(NativeEndian) > 0 {
+                    cmd.extreloff.set(
+                        LittleEndian,
+                        cmd.extreloff.get(NativeEndian) + added_bytes as u32,
+                    );
                 }
 
-                let old_locrel_offset = cmd.locreloff.get(NativeEndian);
-                if old_locrel_offset > 0 {
-                    cmd.locreloff
-                        .set(LittleEndian, old_locrel_offset + added_bytes as u32);
+                if cmd.nlocrel.get(NativeEndian) > 0 {
+                    cmd.locreloff.set(
+                        LittleEndian,
+                        cmd.locreloff.get(NativeEndian) + added_bytes as u32,
+                    );
                 }
 
                 // TODO maybe we need to update something else too - relocations maybe?
@@ -1139,10 +1149,12 @@ fn gen_macho_le(
                     offset,
                 );
 
-                cmd.offset.set(
-                    LittleEndian,
-                    cmd.offset.get(NativeEndian) + added_bytes as u32,
-                );
+                if cmd.nhints.get(NativeEndian) > 0 {
+                    cmd.offset.set(
+                        LittleEndian,
+                        cmd.offset.get(NativeEndian) + added_bytes as u32,
+                    );
+                }
             }
             macho::LC_CODE_SIGNATURE
             | macho::LC_SEGMENT_SPLIT_INFO
@@ -1157,10 +1169,12 @@ fn gen_macho_le(
                     offset,
                 );
 
-                cmd.dataoff.set(
-                    LittleEndian,
-                    cmd.dataoff.get(NativeEndian) + added_bytes as u32,
-                );
+                if cmd.datasize.get(NativeEndian) > 0 {
+                    cmd.dataoff.set(
+                        LittleEndian,
+                        cmd.dataoff.get(NativeEndian) + added_bytes as u32,
+                    );
+                }
             }
             macho::LC_ENCRYPTION_INFO_64 => {
                 let cmd = load_struct_inplace_mut::<macho::EncryptionInfoCommand64<LittleEndian>>(
@@ -1168,10 +1182,12 @@ fn gen_macho_le(
                     offset,
                 );
 
-                cmd.cryptoff.set(
-                    LittleEndian,
-                    cmd.cryptoff.get(NativeEndian) + added_bytes as u32,
-                );
+                if cmd.cryptsize.get(NativeEndian) > 0 {
+                    cmd.cryptoff.set(
+                        LittleEndian,
+                        cmd.cryptoff.get(NativeEndian) + added_bytes as u32,
+                    );
+                }
             }
             macho::LC_DYLD_INFO | macho::LC_DYLD_INFO_ONLY => {
                 let cmd = load_struct_inplace_mut::<macho::DyldInfoCommand<LittleEndian>>(
@@ -1179,25 +1195,33 @@ fn gen_macho_le(
                     offset,
                 );
 
-                cmd.rebase_off.set(
-                    LittleEndian,
-                    cmd.rebase_off.get(NativeEndian) + added_bytes as u32,
-                );
+                if cmd.rebase_size.get(NativeEndian) > 0 {
+                    cmd.rebase_off.set(
+                        LittleEndian,
+                        cmd.rebase_off.get(NativeEndian) + added_bytes as u32,
+                    );
+                }
 
-                cmd.bind_off.set(
-                    LittleEndian,
-                    cmd.bind_off.get(NativeEndian) + added_bytes as u32,
-                );
+                if cmd.bind_size.get(NativeEndian) > 0 {
+                    cmd.bind_off.set(
+                        LittleEndian,
+                        cmd.bind_off.get(NativeEndian) + added_bytes as u32,
+                    );
+                }
 
-                cmd.weak_bind_off.set(
-                    LittleEndian,
-                    cmd.weak_bind_off.get(NativeEndian) + added_bytes as u32,
-                );
+                if cmd.weak_bind_size.get(NativeEndian) > 0 {
+                    cmd.weak_bind_off.set(
+                        LittleEndian,
+                        cmd.weak_bind_off.get(NativeEndian) + added_bytes as u32,
+                    );
+                }
 
-                cmd.lazy_bind_off.set(
-                    LittleEndian,
-                    cmd.lazy_bind_off.get(NativeEndian) + added_bytes as u32,
-                );
+                if cmd.lazy_bind_size.get(NativeEndian) > 0 {
+                    cmd.lazy_bind_off.set(
+                        LittleEndian,
+                        cmd.lazy_bind_off.get(NativeEndian) + added_bytes as u32,
+                    );
+                }
             }
             macho::LC_SYMSEG => {
                 let cmd = load_struct_inplace_mut::<macho::SymsegCommand<LittleEndian>>(
@@ -1205,10 +1229,12 @@ fn gen_macho_le(
                     offset,
                 );
 
-                cmd.offset.set(
-                    LittleEndian,
-                    cmd.offset.get(NativeEndian) + added_bytes as u32,
-                );
+                if cmd.size.get(NativeEndian) > 0 {
+                    cmd.offset.set(
+                        LittleEndian,
+                        cmd.offset.get(NativeEndian) + added_bytes as u32,
+                    );
+                }
             }
             macho::LC_MAIN => {
                 let cmd = load_struct_inplace_mut::<macho::EntryPointCommand<LittleEndian>>(
@@ -1227,10 +1253,12 @@ fn gen_macho_le(
                     offset,
                 );
 
-                cmd.offset.set(
-                    LittleEndian,
-                    cmd.offset.get(NativeEndian) + added_bytes as u64,
-                );
+                if cmd.size.get(NativeEndian) > 0 {
+                    cmd.offset.set(
+                        LittleEndian,
+                        cmd.offset.get(NativeEndian) + added_bytes as u64,
+                    );
+                }
             }
             macho::LC_ID_DYLIB
             | macho::LC_LOAD_WEAK_DYLIB
