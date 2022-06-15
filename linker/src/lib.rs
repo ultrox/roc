@@ -969,10 +969,19 @@ fn gen_macho_le(
                     cmd.vmaddr.get(NativeEndian) + added_bytes as u64,
                 );
 
-                cmd.fileoff.set(
-                    LittleEndian,
-                    cmd.fileoff.get(NativeEndian) + added_bytes as u64,
-                );
+                let old_file_offest = cmd.fileoff.get(NativeEndian);
+                // The segment with offset zero also includes the header.
+                // As such, its file offset does not change.
+                // Instead, its file size should be increased.
+                if old_file_offest > 0 {
+                    cmd.fileoff
+                        .set(LittleEndian, old_file_offest + added_bytes as u64);
+                } else {
+                    cmd.filesize.set(
+                        LittleEndian,
+                        cmd.filesize.get(NativeEndian) + added_bytes as u64,
+                    );
+                }
 
                 let num_sections = cmd.nsects.get(NativeEndian);
                 let sections = load_structs_inplace_mut::<macho::Section64<LittleEndian>>(
@@ -1003,13 +1012,15 @@ fn gen_macho_le(
                     // dbg!(&section);
                     // dbg!(&added_bytes);
                     // dbg!(String::from_utf8_lossy(&section.sectname));
-
-                    let rel_offset = section.reloff.get(NativeEndian) + added_bytes as u32;
-
-                    section.reloff.set(LittleEndian, rel_offset);
+                    let old_rel_offset = section.reloff.get(NativeEndian);
+                    if old_rel_offset > 0 {
+                        section
+                            .reloff
+                            .set(LittleEndian, old_rel_offset + added_bytes as u32);
+                    }
 
                     relocation_offsets.push(Relocation {
-                        offset: rel_offset,
+                        offset: section.reloff.get(NativeEndian),
                         num_relocations: section.nreloc.get(NativeEndian),
                     });
                 }
@@ -1084,35 +1095,41 @@ fn gen_macho_le(
                     offset,
                 );
 
-                cmd.tocoff.set(
-                    LittleEndian,
-                    cmd.tocoff.get(NativeEndian) + added_bytes as u32,
-                );
+                let old_toc_offset = cmd.tocoff.get(NativeEndian);
+                if old_toc_offset > 0 {
+                    cmd.tocoff
+                        .set(LittleEndian, old_toc_offset + added_bytes as u32);
+                }
 
-                cmd.modtaboff.set(
-                    LittleEndian,
-                    cmd.modtaboff.get(NativeEndian) + added_bytes as u32,
-                );
+                let old_modtab_offset = cmd.modtaboff.get(NativeEndian);
+                if old_modtab_offset > 0 {
+                    cmd.modtaboff
+                        .set(LittleEndian, old_modtab_offset + added_bytes as u32);
+                }
 
-                cmd.extrefsymoff.set(
-                    LittleEndian,
-                    cmd.extrefsymoff.get(NativeEndian) + added_bytes as u32,
-                );
+                let old_extrefsym_offset = cmd.extrefsymoff.get(NativeEndian);
+                if old_extrefsym_offset > 0 {
+                    cmd.extrefsymoff
+                        .set(LittleEndian, old_extrefsym_offset + added_bytes as u32);
+                }
 
-                cmd.indirectsymoff.set(
-                    LittleEndian,
-                    cmd.indirectsymoff.get(NativeEndian) + added_bytes as u32,
-                );
+                let old_indirectsym_offset = cmd.indirectsymoff.get(NativeEndian);
+                if old_indirectsym_offset > 0 {
+                    cmd.indirectsymoff
+                        .set(LittleEndian, old_indirectsym_offset + added_bytes as u32);
+                }
 
-                cmd.extreloff.set(
-                    LittleEndian,
-                    cmd.extreloff.get(NativeEndian) + added_bytes as u32,
-                );
+                let old_extrel_offset = cmd.extreloff.get(NativeEndian);
+                if old_extrel_offset > 0 {
+                    cmd.extreloff
+                        .set(LittleEndian, old_extrel_offset + added_bytes as u32);
+                }
 
-                cmd.locreloff.set(
-                    LittleEndian,
-                    cmd.locreloff.get(NativeEndian) + added_bytes as u32,
-                );
+                let old_locrel_offset = cmd.locreloff.get(NativeEndian);
+                if old_locrel_offset > 0 {
+                    cmd.locreloff
+                        .set(LittleEndian, old_locrel_offset + added_bytes as u32);
+                }
 
                 // TODO maybe we need to update something else too - relocations maybe?
             }
