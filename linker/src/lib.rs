@@ -890,6 +890,7 @@ fn gen_macho_le(
 
     // Copy header and shift everything to enable more program sections.
     let added_bytes = (2 * segment_cmd_size) + (2 * section_size) - total_cmd_size;
+    let added_bytes = 0;
 
     md.added_byte_count = added_bytes as u64
         // add some alignment padding
@@ -930,11 +931,14 @@ fn gen_macho_le(
 
     let out_header = load_struct_inplace_mut::<macho::MachHeader64<LittleEndian>>(&mut out_mmap, 0);
 
-    // +1 because we're deleting 1 load command and then adding 2 new ones.
-    out_header.ncmds.set(LittleEndian, num_load_cmds + 1);
-    out_header
-        .sizeofcmds
-        .set(LittleEndian, (size_of_cmds + added_bytes) as u32);
+    // -1 because we're deleting 1 load command and then NOT adding 2 new ones.
+    {
+        let added_bytes = -(total_cmd_size as isize); // TODO REMOVE THIS
+        out_header.ncmds.set(LittleEndian, num_load_cmds - 1);
+        out_header
+            .sizeofcmds
+            .set(LittleEndian, (size_of_cmds as isize + added_bytes) as u32);
+    }
 
     // Go through every command and shift it by added_bytes if it's absolute, unless it's inside the command header
     let mut offset = mem::size_of_val(exec_header);
@@ -2140,93 +2144,93 @@ pub fn surgery_macho(
 
     let mut cmd_offset = md.macho_cmd_loc as usize;
 
-    // Load this section (we made room for it earlier) and then mutate all its data to make it the desired command
-    {
-        let cmd =
-            load_struct_inplace_mut::<macho::SegmentCommand64<LittleEndian>>(exec_mmap, cmd_offset);
-        let size_of_section = mem::size_of::<macho::Section64<LittleEndian>>() as u32;
-        let size_of_cmd = mem::size_of_val(cmd);
+    // // Load this section (we made room for it earlier) and then mutate all its data to make it the desired command
+    // {
+    //     let cmd =
+    //         load_struct_inplace_mut::<macho::SegmentCommand64<LittleEndian>>(exec_mmap, cmd_offset);
+    //     let size_of_section = mem::size_of::<macho::Section64<LittleEndian>>() as u32;
+    //     let size_of_cmd = mem::size_of_val(cmd);
 
-        cmd_offset += size_of_cmd;
+    //     cmd_offset += size_of_cmd;
 
-        cmd.cmd.set(LittleEndian, macho::LC_SEGMENT_64);
-        cmd.cmdsize
-            .set(LittleEndian, size_of_section + size_of_cmd as u32);
-        cmd.segname = *b"__DATA_CONST\0\0\0\0";
-        cmd.vmaddr
-            .set(LittleEndian, new_rodata_section_vaddr as u64);
-        cmd.vmsize.set(
-            LittleEndian,
-            (new_text_section_vaddr - new_rodata_section_vaddr) as u64,
-        );
-        cmd.fileoff
-            .set(LittleEndian, new_rodata_section_offset as u64);
-        cmd.filesize.set(
-            LittleEndian,
-            (new_text_section_offset - new_rodata_section_offset) as u64,
-        );
-        cmd.nsects.set(LittleEndian, 1);
-        cmd.maxprot.set(LittleEndian, 0x00000003);
-        cmd.initprot.set(LittleEndian, 0x00000003);
+    //     cmd.cmd.set(LittleEndian, macho::LC_SEGMENT_64);
+    //     cmd.cmdsize
+    //         .set(LittleEndian, size_of_section + size_of_cmd as u32);
+    //     cmd.segname = *b"__DATA_CONST\0\0\0\0";
+    //     cmd.vmaddr
+    //         .set(LittleEndian, new_rodata_section_vaddr as u64);
+    //     cmd.vmsize.set(
+    //         LittleEndian,
+    //         (new_text_section_vaddr - new_rodata_section_vaddr) as u64,
+    //     );
+    //     cmd.fileoff
+    //         .set(LittleEndian, new_rodata_section_offset as u64);
+    //     cmd.filesize.set(
+    //         LittleEndian,
+    //         (new_text_section_offset - new_rodata_section_offset) as u64,
+    //     );
+    //     cmd.nsects.set(LittleEndian, 1);
+    //     cmd.maxprot.set(LittleEndian, 0x00000003);
+    //     cmd.initprot.set(LittleEndian, 0x00000003);
 
-        // TODO set protection
-    }
+    //     // TODO set protection
+    // }
 
-    {
-        let cmd = load_struct_inplace_mut::<macho::Section64<LittleEndian>>(exec_mmap, cmd_offset);
-        let size_of_cmd = mem::size_of_val(cmd);
+    // {
+    //     let cmd = load_struct_inplace_mut::<macho::Section64<LittleEndian>>(exec_mmap, cmd_offset);
+    //     let size_of_cmd = mem::size_of_val(cmd);
 
-        cmd_offset += size_of_cmd;
+    //     cmd_offset += size_of_cmd;
 
-        cmd.sectname = *b"__const\0\0\0\0\0\0\0\0\0";
-        cmd.segname = *b"__DATA_CONST\0\0\0\0";
-        cmd.addr.set(LittleEndian, new_rodata_section_vaddr as u64);
-        cmd.size.set(
-            LittleEndian,
-            (new_text_section_offset - new_rodata_section_offset) as u64,
-        );
-        cmd.offset.set(LittleEndian, 0); // TODO is this offset since the start of the file, or segment offset?
-        cmd.align.set(LittleEndian, 12); // TODO should this be 4096?
-        cmd.reloff.set(LittleEndian, 264); // TODO this should NOT be hardcoded! Should get it from somewhere.
-    }
+    //     cmd.sectname = *b"__const\0\0\0\0\0\0\0\0\0";
+    //     cmd.segname = *b"__DATA_CONST\0\0\0\0";
+    //     cmd.addr.set(LittleEndian, new_rodata_section_vaddr as u64);
+    //     cmd.size.set(
+    //         LittleEndian,
+    //         (new_text_section_offset - new_rodata_section_offset) as u64,
+    //     );
+    //     cmd.offset.set(LittleEndian, 0); // TODO is this offset since the start of the file, or segment offset?
+    //     cmd.align.set(LittleEndian, 12); // TODO should this be 4096?
+    //     cmd.reloff.set(LittleEndian, 264); // TODO this should NOT be hardcoded! Should get it from somewhere.
+    // }
 
-    {
-        let cmd =
-            load_struct_inplace_mut::<macho::SegmentCommand64<LittleEndian>>(exec_mmap, cmd_offset);
-        let size_of_section = mem::size_of::<macho::Section64<LittleEndian>>() as u32;
-        let size_of_cmd = mem::size_of_val(cmd);
+    // {
+    //     let cmd =
+    //         load_struct_inplace_mut::<macho::SegmentCommand64<LittleEndian>>(exec_mmap, cmd_offset);
+    //     let size_of_section = mem::size_of::<macho::Section64<LittleEndian>>() as u32;
+    //     let size_of_cmd = mem::size_of_val(cmd);
 
-        cmd_offset += size_of_cmd;
+    //     cmd_offset += size_of_cmd;
 
-        cmd.cmd.set(LittleEndian, macho::LC_SEGMENT_64);
-        cmd.cmdsize
-            .set(LittleEndian, size_of_section + size_of_cmd as u32);
-        cmd.segname = *b"__TEXT\0\0\0\0\0\0\0\0\0\0";
-        cmd.vmaddr.set(LittleEndian, new_text_section_vaddr as u64);
-        cmd.vmsize
-            .set(LittleEndian, (offset - new_text_section_offset) as u64);
-        cmd.fileoff
-            .set(LittleEndian, new_text_section_offset as u64);
-        cmd.filesize
-            .set(LittleEndian, (offset - new_text_section_offset) as u64);
-        cmd.nsects.set(LittleEndian, 1);
-        cmd.maxprot.set(LittleEndian, 0x00000005); // this is what a zig-generated host had
-        cmd.initprot.set(LittleEndian, 0x00000005); // this is what a zig-generated host had
-    }
+    //     cmd.cmd.set(LittleEndian, macho::LC_SEGMENT_64);
+    //     cmd.cmdsize
+    //         .set(LittleEndian, size_of_section + size_of_cmd as u32);
+    //     cmd.segname = *b"__TEXT\0\0\0\0\0\0\0\0\0\0";
+    //     cmd.vmaddr.set(LittleEndian, new_text_section_vaddr as u64);
+    //     cmd.vmsize
+    //         .set(LittleEndian, (offset - new_text_section_offset) as u64);
+    //     cmd.fileoff
+    //         .set(LittleEndian, new_text_section_offset as u64);
+    //     cmd.filesize
+    //         .set(LittleEndian, (offset - new_text_section_offset) as u64);
+    //     cmd.nsects.set(LittleEndian, 1);
+    //     cmd.maxprot.set(LittleEndian, 0x00000005); // this is what a zig-generated host had
+    //     cmd.initprot.set(LittleEndian, 0x00000005); // this is what a zig-generated host had
+    // }
 
-    {
-        let cmd = load_struct_inplace_mut::<macho::Section64<LittleEndian>>(exec_mmap, cmd_offset);
+    // {
+    //     let cmd = load_struct_inplace_mut::<macho::Section64<LittleEndian>>(exec_mmap, cmd_offset);
 
-        cmd.segname = *b"__TEXT\0\0\0\0\0\0\0\0\0\0";
-        cmd.sectname = *b"__text\0\0\0\0\0\0\0\0\0\0";
-        cmd.addr.set(LittleEndian, new_text_section_vaddr as u64);
-        cmd.size
-            .set(LittleEndian, (offset - new_text_section_offset) as u64);
-        cmd.offset.set(LittleEndian, 0); // TODO is this offset since the start of the file, or segment offset?
-        cmd.align.set(LittleEndian, 12); // TODO this is 4096 (2^12) - which load_align_constraint does, above - but should it?
-        cmd.flags.set(LittleEndian, 0x80000400); // TODO this is what a zig-generated host had
-        cmd.reloff.set(LittleEndian, 264); // TODO this should NOT be hardcoded! Should get it from somewhere.
-    }
+    //     cmd.segname = *b"__TEXT\0\0\0\0\0\0\0\0\0\0";
+    //     cmd.sectname = *b"__text\0\0\0\0\0\0\0\0\0\0";
+    //     cmd.addr.set(LittleEndian, new_text_section_vaddr as u64);
+    //     cmd.size
+    //         .set(LittleEndian, (offset - new_text_section_offset) as u64);
+    //     cmd.offset.set(LittleEndian, 0); // TODO is this offset since the start of the file, or segment offset?
+    //     cmd.align.set(LittleEndian, 12); // TODO this is 4096 (2^12) - which load_align_constraint does, above - but should it?
+    //     cmd.flags.set(LittleEndian, 0x80000400); // TODO this is what a zig-generated host had
+    //     cmd.reloff.set(LittleEndian, 264); // TODO this should NOT be hardcoded! Should get it from somewhere.
+    // }
 
     // Update calls from platform and dynamic symbols.
     let dynsym_offset = md.dynamic_symbol_table_section_offset + md.added_byte_count;
