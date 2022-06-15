@@ -890,7 +890,6 @@ fn gen_macho_le(
 
     // Copy header and shift everything to enable more program sections.
     let added_bytes = (2 * segment_cmd_size) + (2 * section_size) - total_cmd_size;
-    let added_bytes = 0;
 
     md.added_byte_count = added_bytes as u64
         // add some alignment padding
