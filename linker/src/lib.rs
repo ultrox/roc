@@ -769,6 +769,11 @@ pub fn preprocess(
                         }
                     };
 
+                    // TODO this is correct on modern Macs (they align to the page size)
+                    // but maybe someone can override the alignment somehow? Maybe in the
+                    // future this could change? Is there some way to make this more future-proof?
+                    md.load_align_constraint = 4096;
+
                     gen_macho_le(
                         exec_data,
                         &mut md,
