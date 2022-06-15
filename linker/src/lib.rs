@@ -881,10 +881,15 @@ fn gen_macho_le(
     // Add a new text segment and data segment
     let segment_cmd_size = mem::size_of::<SegmentCommand64<LittleEndian>>();
     let section_size = mem::size_of::<Section64<LittleEndian>>();
-    let dylib_cmd_size = mem::size_of::<DylibCommand<LittleEndian>>();
+
+    // We need the full command size, including the dynamic-length string at the end.
+    // To get that, we need to load the command.
+    let info =
+        load_struct_inplace::<macho::LoadCommand<LittleEndian>>(exec_data, macho_load_so_offset);
+    let total_cmd_size = info.cmdsize.get(NativeEndian) as usize;
 
     // Copy header and shift everything to enable more program sections.
-    let added_bytes = (2 * segment_cmd_size) + (2 * section_size) - dylib_cmd_size;
+    let added_bytes = (2 * segment_cmd_size) + (2 * section_size) - total_cmd_size;
 
     md.added_byte_count = added_bytes as u64
         // add some alignment padding
@@ -911,12 +916,6 @@ fn gen_macho_le(
     // It has a dynamic-length string at the end that we also need to delete,
     // in addition to the header.
     out_mmap[..macho_load_so_offset].copy_from_slice(&exec_data[..macho_load_so_offset]);
-
-    // We need the full command size, including the dynamic-length string at the end.
-    // To get that, we need to load the command.
-    let info =
-        load_struct_inplace::<macho::LoadCommand<LittleEndian>>(exec_data, macho_load_so_offset);
-    let total_cmd_size = info.cmdsize.get(NativeEndian) as usize;
 
     out_mmap[macho_load_so_offset..end_of_cmds - total_cmd_size]
         .copy_from_slice(&exec_data[macho_load_so_offset + total_cmd_size..end_of_cmds]);
@@ -950,7 +949,7 @@ fn gen_macho_le(
     };
 
     // minus one because we "deleted" a load command
-    for index in 0..(num_load_cmds - 1) {
+    for _ in 0..(num_load_cmds - 1) {
         let info = load_struct_inplace::<macho::LoadCommand<LittleEndian>>(&mut out_mmap, offset);
         let cmd_size = info.cmdsize.get(NativeEndian) as usize;
 
@@ -2145,12 +2144,14 @@ pub fn surgery_macho(
     {
         let cmd =
             load_struct_inplace_mut::<macho::SegmentCommand64<LittleEndian>>(exec_mmap, cmd_offset);
+        let size_of_section = mem::size_of::<macho::Section64<LittleEndian>>() as u32;
         let size_of_cmd = mem::size_of_val(cmd);
 
         cmd_offset += size_of_cmd;
 
         cmd.cmd.set(LittleEndian, macho::LC_SEGMENT_64);
-        cmd.cmdsize.set(LittleEndian, size_of_cmd as u32);
+        cmd.cmdsize
+            .set(LittleEndian, size_of_section + size_of_cmd as u32);
         cmd.segname = *b"__RODATA\0\0\0\0\0\0\0\0";
         cmd.vmaddr
             .set(LittleEndian, new_rodata_section_vaddr as u64);
@@ -2190,12 +2191,14 @@ pub fn surgery_macho(
     {
         let cmd =
             load_struct_inplace_mut::<macho::SegmentCommand64<LittleEndian>>(exec_mmap, cmd_offset);
+        let size_of_section = mem::size_of::<macho::Section64<LittleEndian>>() as u32;
         let size_of_cmd = mem::size_of_val(cmd);
 
         cmd_offset += size_of_cmd;
 
         cmd.cmd.set(LittleEndian, macho::LC_SEGMENT_64);
-        cmd.cmdsize.set(LittleEndian, size_of_cmd as u32);
+        cmd.cmdsize
+            .set(LittleEndian, size_of_section + size_of_cmd as u32);
         cmd.segname = *b"__TEXT\0\0\0\0\0\0\0\0\0\0";
         cmd.vmaddr.set(LittleEndian, new_text_section_vaddr as u64);
         cmd.vmsize
