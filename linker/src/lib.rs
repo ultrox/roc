@@ -963,18 +963,23 @@ fn gen_macho_le(
                     offset,
                 );
 
-                cmd.vmaddr.set(
-                    LittleEndian,
-                    cmd.vmaddr.get(NativeEndian) + added_bytes as u64,
-                );
+                // Ignore page zero, it never moves.
+                if cmd.segname = "__PAGEZERO" || cmd.vmaddr.get(NativeEndian) == 0 {
+                    offset += cmd_size;
+                    continue;
+                }
 
                 let old_file_offest = cmd.fileoff.get(NativeEndian);
-                // The segment with offset zero also includes the header.
+                // The segment with file offset zero also includes the header.
                 // As such, its file offset does not change.
                 // Instead, its file size should be increased.
                 if old_file_offest > 0 {
                     cmd.fileoff
                         .set(LittleEndian, old_file_offest + added_bytes as u64);
+                    cmd.vmaddr.set(
+                        LittleEndian,
+                        cmd.vmaddr.get(NativeEndian) + added_bytes as u64,
+                    );
                 } else {
                     cmd.filesize.set(
                         LittleEndian,
@@ -1001,10 +1006,14 @@ fn gen_macho_le(
                         section.addr.get(NativeEndian) + added_bytes as u64,
                     );
 
-                    section.offset.set(
-                        LittleEndian,
-                        section.offset.get(NativeEndian) + added_bytes as u32,
-                    );
+                    // If offset is zero, don't update it.
+                    // Zero is used for things like BSS that don't exist in the file.
+                    let old_offset = section.offset.get(NativeEndian);
+                    if old_offset > 0 {
+                        section
+                            .offset
+                            .set(LittleEndian, old_offset + added_bytes as u32);
+                    }
 
                     // dbg!(&section.reloff.get(NativeEndian));
                     // dbg!(section.reloff.get(NativeEndian) as i32);
