@@ -2152,7 +2152,7 @@ pub fn surgery_macho(
         cmd.cmd.set(LittleEndian, macho::LC_SEGMENT_64);
         cmd.cmdsize
             .set(LittleEndian, size_of_section + size_of_cmd as u32);
-        cmd.segname = *b"__RODATA\0\0\0\0\0\0\0\0";
+        cmd.segname = *b"__DATA_CONST\0\0\0\0";
         cmd.vmaddr
             .set(LittleEndian, new_rodata_section_vaddr as u64);
         cmd.vmsize.set(
@@ -2166,6 +2166,8 @@ pub fn surgery_macho(
             (new_text_section_offset - new_rodata_section_offset) as u64,
         );
         cmd.nsects.set(LittleEndian, 1);
+        cmd.maxprot.set(LittleEndian, 0x00000003);
+        cmd.initprot.set(LittleEndian, 0x00000003);
 
         // TODO set protection
     }
@@ -2176,8 +2178,8 @@ pub fn surgery_macho(
 
         cmd_offset += size_of_cmd;
 
-        cmd.sectname = *b"__RODATA\0\0\0\0\0\0\0\0";
-        cmd.segname = *b"__RODATA\0\0\0\0\0\0\0\0";
+        cmd.sectname = *b"__const\0\0\0\0\0\0\0\0\0";
+        cmd.segname = *b"__DATA_CONST\0\0\0\0";
         cmd.addr.set(LittleEndian, new_rodata_section_vaddr as u64);
         cmd.size.set(
             LittleEndian,
@@ -2185,7 +2187,7 @@ pub fn surgery_macho(
         );
         cmd.offset.set(LittleEndian, 0); // TODO is this offset since the start of the file, or segment offset?
         cmd.align.set(LittleEndian, 12); // TODO should this be 4096?
-                                         // TODO flags
+        cmd.reloff.set(LittleEndian, 264); // TODO this should NOT be hardcoded! Should get it from somewhere.
     }
 
     {
@@ -2208,21 +2210,22 @@ pub fn surgery_macho(
         cmd.filesize
             .set(LittleEndian, (offset - new_text_section_offset) as u64);
         cmd.nsects.set(LittleEndian, 1);
-
-        // TODO set protection
+        cmd.maxprot.set(LittleEndian, 0x00000005); // this is what a zig-generated host had
+        cmd.initprot.set(LittleEndian, 0x00000005); // this is what a zig-generated host had
     }
 
     {
         let cmd = load_struct_inplace_mut::<macho::Section64<LittleEndian>>(exec_mmap, cmd_offset);
 
-        cmd.sectname = *b"__TEXT\0\0\0\0\0\0\0\0\0\0";
         cmd.segname = *b"__TEXT\0\0\0\0\0\0\0\0\0\0";
+        cmd.sectname = *b"__text\0\0\0\0\0\0\0\0\0\0";
         cmd.addr.set(LittleEndian, new_text_section_vaddr as u64);
         cmd.size
             .set(LittleEndian, (offset - new_text_section_offset) as u64);
         cmd.offset.set(LittleEndian, 0); // TODO is this offset since the start of the file, or segment offset?
-        cmd.align.set(LittleEndian, 12); // TODO should this be 4096?
-                                         // TODO flags
+        cmd.align.set(LittleEndian, 12); // TODO this is 4096 (2^12) - which load_align_constraint does, above - but should it?
+        cmd.flags.set(LittleEndian, 0x80000400); // TODO this is what a zig-generated host had
+        cmd.reloff.set(LittleEndian, 264); // TODO this should NOT be hardcoded! Should get it from somewhere.
     }
 
     // Update calls from platform and dynamic symbols.
