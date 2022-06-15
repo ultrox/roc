@@ -964,10 +964,10 @@ fn gen_macho_le(
                     offset,
                 );
 
-                // cmd.vmaddr.set(
-                //     LittleEndian,
-                //     cmd.vmaddr.get(NativeEndian) + added_bytes as u64,
-                // );
+                cmd.vmaddr.set(
+                    LittleEndian,
+                    cmd.vmaddr.get(NativeEndian) + added_bytes as u64,
+                );
 
                 let old_file_offest = cmd.fileoff.get(NativeEndian);
                 // The segment with offset zero also includes the header.
@@ -997,10 +997,10 @@ fn gen_macho_le(
                 let mut relocation_offsets = Vec::with_capacity(sections.len());
 
                 for section in sections {
-                    // section.addr.set(
-                    //     LittleEndian,
-                    //     section.addr.get(NativeEndian) + added_bytes as u64,
-                    // );
+                    section.addr.set(
+                        LittleEndian,
+                        section.addr.get(NativeEndian) + added_bytes as u64,
+                    );
 
                     section.offset.set(
                         LittleEndian,
