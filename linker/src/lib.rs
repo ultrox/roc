@@ -964,7 +964,9 @@ fn gen_macho_le(
                 );
 
                 // Ignore page zero, it never moves.
-                if cmd.segname = "__PAGEZERO" || cmd.vmaddr.get(NativeEndian) == 0 {
+                if cmd.segname == "__PAGEZERO\0\0\0\0\0\0".as_bytes()
+                    || cmd.vmaddr.get(NativeEndian) == 0
+                {
                     offset += cmd_size;
                     continue;
                 }
