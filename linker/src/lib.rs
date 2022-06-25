@@ -888,12 +888,23 @@ fn gen_macho_le(
         load_struct_inplace::<macho::LoadCommand<LittleEndian>>(exec_data, macho_load_so_offset);
     let total_cmd_size = info.cmdsize.get(NativeEndian) as usize;
 
-    // Copy header and shift everything to enable more program sections.
-    let added_bytes = (2 * segment_cmd_size) + (2 * section_size) - total_cmd_size;
+    // ======================== Important TODO ==========================
+    // TODO: we accidentally instroduced a big change here.
+    // We use a mix of added_bytes and md.added_byte_count.
+    // Theses should proabably be the same variable.
+    // Also, I just realized that I have been shifting a lot of virtual offsets.
+    // This should not be necessary. If we add a fully 4k of buffer to the file, all of the virtual offsets will still stay aligned.
+    // So a lot of the following work can probably be commented out if we fix that at the small cost of at most 4k bytes to a final executable.
+    // This is what the elf version currently does. Theoretically it is not needed (if we update all virtual addresses in the binary), but I definitely ran into problems with elf when not adding this extra buffering.
 
-    md.added_byte_count = added_bytes as u64
+    // Copy header and shift everything to enable more program sections.
+    let added_bytes = dbg!((2 * segment_cmd_size) + (2 * section_size) - total_cmd_size);
+
+    md.added_byte_count = dbg!(
+        added_bytes as u64
         // add some alignment padding
-        + (MIN_SECTION_ALIGNMENT as u64 - md.added_byte_count % MIN_SECTION_ALIGNMENT as u64);
+        + (MIN_SECTION_ALIGNMENT as u64 - md.added_byte_count % MIN_SECTION_ALIGNMENT as u64)
+    );
 
     md.exec_len = exec_data.len() as u64 + md.added_byte_count;
 
