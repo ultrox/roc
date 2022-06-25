@@ -1089,23 +1089,21 @@ fn gen_macho_le(
                     );
                 }
 
-                // TOOD: this is wrong. It does not shift correctly.
-                // This should move all of the function names and other symbols.
-                // look at otool -xv before and after.
-                // let table = load_structs_inplace_mut::<macho::Nlist64<LittleEndian>>(
-                //     &mut out_mmap,
-                //     sym_offset as usize + added_bytes,
-                //     num_syms as usize,
-                // );
+                let table = load_structs_inplace_mut::<macho::Nlist64<LittleEndian>>(
+                    &mut out_mmap,
+                    sym_offset as usize + added_bytes,
+                    num_syms as usize,
+                );
 
-                // for entry in table {
-                //     if entry.n_type & macho::N_TYPE == macho::N_ABS {
-                //         entry.n_value.set(
-                //             LittleEndian,
-                //             entry.n_value.get(NativeEndian) + added_bytes as u64,
-                //         );
-                //     }
-                // }
+                for entry in table {
+                    let entry_type = entry.n_type & macho::N_TYPE;
+                    if entry_type == macho::N_ABS || entry_type == macho::N_SECT {
+                        entry.n_value.set(
+                            LittleEndian,
+                            entry.n_value.get(NativeEndian) + added_bytes as u64,
+                        );
+                    }
+                }
             }
             macho::LC_DYSYMTAB => {
                 let cmd = load_struct_inplace_mut::<macho::DysymtabCommand<LittleEndian>>(
@@ -1172,10 +1170,57 @@ fn gen_macho_le(
                     );
                 }
             }
+            macho::LC_FUNCTION_STARTS => {
+                let cmd = load_struct_inplace_mut::<macho::LinkeditDataCommand<LittleEndian>>(
+                    &mut out_mmap,
+                    offset,
+                );
+
+                if cmd.datasize.get(NativeEndian) > 0 {
+                    cmd.dataoff.set(
+                        LittleEndian,
+                        cmd.dataoff.get(NativeEndian) + added_bytes as u32,
+                    );
+                    // This lists the start of every function. Which, of course, have moved.
+                }
+            }
+            macho::LC_DATA_IN_CODE => {
+                let (offset, size) = {
+                    let cmd = load_struct_inplace_mut::<macho::LinkeditDataCommand<LittleEndian>>(
+                        &mut out_mmap,
+                        offset,
+                    );
+
+                    if cmd.datasize.get(NativeEndian) > 0 {
+                        cmd.dataoff.set(
+                            LittleEndian,
+                            cmd.dataoff.get(NativeEndian) + added_bytes as u32,
+                        );
+                    }
+                    (
+                        cmd.dataoff.get(NativeEndian),
+                        cmd.datasize.get(NativeEndian),
+                    )
+                };
+
+                // Update every data in code entry.
+                if size > 0 {
+                    let entry_size = mem::size_of::<macho::DataInCodeEntry<LittleEndian>>();
+                    let entries = load_structs_inplace_mut::<macho::DataInCodeEntry<LittleEndian>>(
+                        &mut out_mmap,
+                        offset as usize,
+                        size as usize / entry_size,
+                    );
+                    for entry in entries.iter_mut() {
+                        entry.offset.set(
+                            LittleEndian,
+                            entry.offset.get(NativeEndian) + added_bytes as u32,
+                        )
+                    }
+                }
+            }
             macho::LC_CODE_SIGNATURE
             | macho::LC_SEGMENT_SPLIT_INFO
-            | macho::LC_FUNCTION_STARTS
-            | macho::LC_DATA_IN_CODE
             | macho::LC_DYLIB_CODE_SIGN_DRS
             | macho::LC_LINKER_OPTIMIZATION_HINT
             | macho::LC_DYLD_EXPORTS_TRIE
