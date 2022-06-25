@@ -874,8 +874,11 @@ fn gen_macho_le(
 ) -> (MmapMut, File) {
     // Just adding some extra context/useful info here.
     // I was talking to Jakub from the Zig team about macho linking and here are some useful comments:
-    // 1) Macho WILL run fine with multiple text segments (and theoretically data segments)
-    // 2) Apple tooling dislikes whenever you do something non-standard and there is a chance it won't work right (e.g. codesigning might fail)
+    // 1) Macho WILL run fine with multiple text segments (and theoretically data segments).
+    // 2) Theoretically the headers just need to be in a loadable segment,
+    //    but otherwise don't need to relate to the starting text segment (releated to some added byte shifting infomation below).
+    // 2) Apple tooling dislikes whenever you do something non-standard,
+    //    and there is a chance it won't work right (e.g. codesigning might fail)
     // 3) Jakub wants to make apple tooling absolute is working on zignature for code signing and zig-deploy for ios apps
     // https://github.com/kubkon/zignature
     // https://github.com/kubkon/zig-deploy
@@ -902,8 +905,11 @@ fn gen_macho_le(
     // Theses should proabably be the same variable.
     // Also, I just realized that I have been shifting a lot of virtual offsets.
     // This should not be necessary. If we add a fully 4k of buffer to the file, all of the virtual offsets will still stay aligned.
-    // So a lot of the following work can probably be commented out if we fix that at the small cost of at most 4k bytes to a final executable.
-    // This is what the elf version currently does. Theoretically it is not needed (if we update all virtual addresses in the binary), but I definitely ran into problems with elf when not adding this extra buffering.
+    // So a lot of the following work can probably be commented out if we fix that.
+    // Of coruse, it will cost about 4k bytes to a final executable.
+    // This is what the elf version currently does.
+    // Theoretically it is not needed (if we update all virtual addresses in the binary),
+    // but I definitely ran into problems with elf when not adding this extra buffering.
 
     // Copy header and shift everything to enable more program sections.
     let added_bytes = dbg!((2 * segment_cmd_size) + (2 * section_size) - total_cmd_size);
