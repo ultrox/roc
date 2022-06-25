@@ -1192,7 +1192,10 @@ fn gen_macho_le(
                         LittleEndian,
                         cmd.dataoff.get(NativeEndian) + added_bytes as u32,
                     );
-                    // This lists the start of every function. Which, of course, have moved.
+                    // TODO: This lists the start of every function. Which, of course, have moved.
+                    // That being said, to my understanding this section is optional and may just be debug information.
+                    // As such, updating it should not be required.
+                    // It will be more work to update due to being in "DWARF-style ULEB128" values.
                 }
             }
             macho::LC_DATA_IN_CODE => {
