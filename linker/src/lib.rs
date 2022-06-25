@@ -930,6 +930,7 @@ fn gen_macho_le(
 
     let out_header = load_struct_inplace_mut::<macho::MachHeader64<LittleEndian>>(&mut out_mmap, 0);
 
+    // TODO: this needs to change to adding the 2 new commands when we are ready.
     // -1 because we're deleting 1 load command and then NOT adding 2 new ones.
     {
         let added_bytes = -(total_cmd_size as isize); // TODO REMOVE THIS
@@ -1088,20 +1089,23 @@ fn gen_macho_le(
                     );
                 }
 
-                let table = load_structs_inplace_mut::<macho::Nlist64<LittleEndian>>(
-                    &mut out_mmap,
-                    sym_offset as usize + added_bytes,
-                    num_syms as usize,
-                );
+                // TOOD: this is wrong. It does not shift correctly.
+                // This should move all of the function names and other symbols.
+                // look at otool -xv before and after.
+                // let table = load_structs_inplace_mut::<macho::Nlist64<LittleEndian>>(
+                //     &mut out_mmap,
+                //     sym_offset as usize + added_bytes,
+                //     num_syms as usize,
+                // );
 
-                for entry in table {
-                    if entry.n_type == macho::N_ABS {
-                        entry.n_value.set(
-                            LittleEndian,
-                            entry.n_value.get(NativeEndian) + added_bytes as u64,
-                        );
-                    }
-                }
+                // for entry in table {
+                //     if entry.n_type & macho::N_TYPE == macho::N_ABS {
+                //         entry.n_value.set(
+                //             LittleEndian,
+                //             entry.n_value.get(NativeEndian) + added_bytes as u64,
+                //         );
+                //     }
+                // }
             }
             macho::LC_DYSYMTAB => {
                 let cmd = load_struct_inplace_mut::<macho::DysymtabCommand<LittleEndian>>(
@@ -1152,6 +1156,8 @@ fn gen_macho_le(
                 }
 
                 // TODO maybe we need to update something else too - relocations maybe?
+                // I think this also has symbols that need to get moved around.
+                // Look at otool -I at least for the indirect symbols.
             }
             macho::LC_TWOLEVEL_HINTS => {
                 let cmd = load_struct_inplace_mut::<macho::TwolevelHintsCommand<LittleEndian>>(
