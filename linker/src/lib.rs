@@ -872,6 +872,14 @@ fn gen_macho_le(
     target: &Triple,
     _verbose: bool,
 ) -> (MmapMut, File) {
+    // Just adding some extra context/useful info here.
+    // I was talking to Jakub from the Zig team about macho linking and here are some useful comments:
+    // 1) Macho WILL run fine with multiple text segments (and theoretically data segments)
+    // 2) Apple tooling dislikes whenever you do something non-standard and there is a chance it won't work right (e.g. codesigning might fail)
+    // 3) Jakub wants to make apple tooling absolute is working on zignature for code signing and zig-deploy for ios apps
+    // https://github.com/kubkon/zignature
+    // https://github.com/kubkon/zig-deploy
+
     use macho::{DylibCommand, Section64, SegmentCommand64};
 
     let exec_header = load_struct_inplace::<macho::MachHeader64<LittleEndian>>(exec_data, 0);
