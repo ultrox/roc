@@ -1012,6 +1012,10 @@ fn gen_macho_le(
                         LittleEndian,
                         cmd.filesize.get(NativeEndian) + md.added_byte_count as u64,
                     );
+                    cmd.vmsize.set(
+                        LittleEndian,
+                        cmd.vmsize.get(NativeEndian) + md.added_byte_count as u64,
+                    );
                 }
 
                 let num_sections = cmd.nsects.get(NativeEndian);
