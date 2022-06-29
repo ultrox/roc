@@ -1314,6 +1314,10 @@ fn gen_macho_le(
                         cmd.lazy_bind_off.get(NativeEndian) + md.added_byte_count as u32,
                     );
                 }
+
+                // TODO: Parse and update the related tables here.
+                // It is possible we may just need to delete things that point to stuff that will be in the roc app.
+                // We also may just be able to ignore it (lazy bindings should never run).
             }
             macho::LC_SYMSEG => {
                 let cmd = load_struct_inplace_mut::<macho::SymsegCommand<LittleEndian>>(
