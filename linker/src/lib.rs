@@ -913,11 +913,9 @@ fn gen_macho_le(
 
     // Copy header and shift everything to enable more program sections.
     let added_byte_count = ((2 * segment_cmd_size) + (2 * section_size) - total_cmd_size) as u64;
-    md.added_byte_count = dbg!(
-        added_byte_count
+    md.added_byte_count = added_byte_count
         // add some alignment padding
-        + (MIN_SECTION_ALIGNMENT as u64 - added_byte_count % MIN_SECTION_ALIGNMENT as u64)
-    );
+        + (MIN_SECTION_ALIGNMENT as u64 - added_byte_count % MIN_SECTION_ALIGNMENT as u64);
 
     md.exec_len = exec_data.len() as u64 + md.added_byte_count;
 
