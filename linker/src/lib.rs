@@ -912,12 +912,11 @@ fn gen_macho_le(
     // but I definitely ran into problems with elf when not adding this extra buffering.
 
     // Copy header and shift everything to enable more program sections.
-    let added_bytes = dbg!((2 * segment_cmd_size) + (2 * section_size) - total_cmd_size);
-
+    let added_byte_count = ((2 * segment_cmd_size) + (2 * section_size) - total_cmd_size) as u64;
     md.added_byte_count = dbg!(
-        added_bytes as u64
+        added_byte_count
         // add some alignment padding
-        + (MIN_SECTION_ALIGNMENT as u64 - md.added_byte_count % MIN_SECTION_ALIGNMENT as u64)
+        + (MIN_SECTION_ALIGNMENT as u64 - added_byte_count % MIN_SECTION_ALIGNMENT as u64)
     );
 
     md.exec_len = exec_data.len() as u64 + md.added_byte_count;
@@ -949,7 +948,7 @@ fn gen_macho_le(
     // (which happens after preprocessing), and some zero padding at the end for alignemnt.
     // (It seems to cause bugs if that padding isn't there!)
     let rest_of_data = &exec_data[end_of_cmds..];
-    let start_index = end_of_cmds + added_bytes;
+    let start_index = end_of_cmds + md.added_byte_count as usize;
 
     out_mmap[start_index..start_index + rest_of_data.len()].copy_from_slice(rest_of_data);
 
@@ -958,7 +957,7 @@ fn gen_macho_le(
     // TODO: this needs to change to adding the 2 new commands when we are ready.
     // -1 because we're deleting 1 load command and then NOT adding 2 new ones.
     {
-        let added_bytes = -(total_cmd_size as isize); // TODO REMOVE THIS
+        let added_bytes = -(total_cmd_size as isize); // TODO: Change when add the new sections.
         out_header.ncmds.set(LittleEndian, num_load_cmds - 1);
         out_header
             .sizeofcmds
@@ -1003,15 +1002,15 @@ fn gen_macho_le(
                 // Instead, its file size should be increased.
                 if old_file_offest > 0 {
                     cmd.fileoff
-                        .set(LittleEndian, old_file_offest + added_bytes as u64);
+                        .set(LittleEndian, old_file_offest + md.added_byte_count as u64);
                     cmd.vmaddr.set(
                         LittleEndian,
-                        cmd.vmaddr.get(NativeEndian) + added_bytes as u64,
+                        cmd.vmaddr.get(NativeEndian) + md.added_byte_count as u64,
                     );
                 } else {
                     cmd.filesize.set(
                         LittleEndian,
-                        cmd.filesize.get(NativeEndian) + added_bytes as u64,
+                        cmd.filesize.get(NativeEndian) + md.added_byte_count as u64,
                     );
                 }
 
@@ -1031,7 +1030,7 @@ fn gen_macho_le(
                 for section in sections {
                     section.addr.set(
                         LittleEndian,
-                        section.addr.get(NativeEndian) + added_bytes as u64,
+                        section.addr.get(NativeEndian) + md.added_byte_count as u64,
                     );
 
                     // If offset is zero, don't update it.
@@ -1040,18 +1039,18 @@ fn gen_macho_le(
                     if old_offset > 0 {
                         section
                             .offset
-                            .set(LittleEndian, old_offset + added_bytes as u32);
+                            .set(LittleEndian, old_offset + md.added_byte_count as u32);
                     }
 
                     // dbg!(&section.reloff.get(NativeEndian));
                     // dbg!(section.reloff.get(NativeEndian) as i32);
                     // dbg!(&section);
-                    // dbg!(&added_bytes);
+                    // dbg!(&md.added_byte_count);
                     // dbg!(String::from_utf8_lossy(&section.sectname));
                     if section.nreloc.get(NativeEndian) > 0 {
                         section.reloff.set(
                             LittleEndian,
-                            section.reloff.get(NativeEndian) + added_bytes as u32,
+                            section.reloff.get(NativeEndian) + md.added_byte_count as u32,
                         );
                     }
 
@@ -1079,7 +1078,7 @@ fn gen_macho_le(
                 //             let mut scattered_info = relo.scattered_info(NativeEndian);
 
                 //             if !scattered_info.r_pcrel {
-                //                 scattered_info.r_value += added_bytes as u32;
+                //                 scattered_info.r_value += md.added_byte_count as u32;
 
                 //                 let new_info = scattered_info.relocation(LittleEndian);
 
@@ -1104,19 +1103,19 @@ fn gen_macho_le(
 
                 if num_syms > 0 {
                     cmd.symoff
-                        .set(LittleEndian, sym_offset + added_bytes as u32);
+                        .set(LittleEndian, sym_offset + md.added_byte_count as u32);
                 }
 
                 if cmd.strsize.get(NativeEndian) > 0 {
                     cmd.stroff.set(
                         LittleEndian,
-                        cmd.stroff.get(NativeEndian) + added_bytes as u32,
+                        cmd.stroff.get(NativeEndian) + md.added_byte_count as u32,
                     );
                 }
 
                 let table = load_structs_inplace_mut::<macho::Nlist64<LittleEndian>>(
                     &mut out_mmap,
-                    sym_offset as usize + added_bytes,
+                    sym_offset as usize + md.added_byte_count as usize,
                     num_syms as usize,
                 );
 
@@ -1125,7 +1124,7 @@ fn gen_macho_le(
                     if entry_type == macho::N_ABS || entry_type == macho::N_SECT {
                         entry.n_value.set(
                             LittleEndian,
-                            entry.n_value.get(NativeEndian) + added_bytes as u64,
+                            entry.n_value.get(NativeEndian) + md.added_byte_count as u64,
                         );
                     }
                 }
@@ -1139,42 +1138,42 @@ fn gen_macho_le(
                 if cmd.ntoc.get(NativeEndian) > 0 {
                     cmd.tocoff.set(
                         LittleEndian,
-                        cmd.tocoff.get(NativeEndian) + added_bytes as u32,
+                        cmd.tocoff.get(NativeEndian) + md.added_byte_count as u32,
                     );
                 }
 
                 if cmd.nmodtab.get(NativeEndian) > 0 {
                     cmd.modtaboff.set(
                         LittleEndian,
-                        cmd.modtaboff.get(NativeEndian) + added_bytes as u32,
+                        cmd.modtaboff.get(NativeEndian) + md.added_byte_count as u32,
                     );
                 }
 
                 if cmd.nextrefsyms.get(NativeEndian) > 0 {
                     cmd.extrefsymoff.set(
                         LittleEndian,
-                        cmd.extrefsymoff.get(NativeEndian) + added_bytes as u32,
+                        cmd.extrefsymoff.get(NativeEndian) + md.added_byte_count as u32,
                     );
                 }
 
                 if cmd.nindirectsyms.get(NativeEndian) > 0 {
                     cmd.indirectsymoff.set(
                         LittleEndian,
-                        cmd.indirectsymoff.get(NativeEndian) + added_bytes as u32,
+                        cmd.indirectsymoff.get(NativeEndian) + md.added_byte_count as u32,
                     );
                 }
 
                 if cmd.nextrel.get(NativeEndian) > 0 {
                     cmd.extreloff.set(
                         LittleEndian,
-                        cmd.extreloff.get(NativeEndian) + added_bytes as u32,
+                        cmd.extreloff.get(NativeEndian) + md.added_byte_count as u32,
                     );
                 }
 
                 if cmd.nlocrel.get(NativeEndian) > 0 {
                     cmd.locreloff.set(
                         LittleEndian,
-                        cmd.locreloff.get(NativeEndian) + added_bytes as u32,
+                        cmd.locreloff.get(NativeEndian) + md.added_byte_count as u32,
                     );
                 }
 
@@ -1191,7 +1190,7 @@ fn gen_macho_le(
                 if cmd.nhints.get(NativeEndian) > 0 {
                     cmd.offset.set(
                         LittleEndian,
-                        cmd.offset.get(NativeEndian) + added_bytes as u32,
+                        cmd.offset.get(NativeEndian) + md.added_byte_count as u32,
                     );
                 }
             }
@@ -1204,7 +1203,7 @@ fn gen_macho_le(
                 if cmd.datasize.get(NativeEndian) > 0 {
                     cmd.dataoff.set(
                         LittleEndian,
-                        cmd.dataoff.get(NativeEndian) + added_bytes as u32,
+                        cmd.dataoff.get(NativeEndian) + md.added_byte_count as u32,
                     );
                     // TODO: This lists the start of every function. Which, of course, have moved.
                     // That being said, to my understanding this section is optional and may just be debug information.
@@ -1222,7 +1221,7 @@ fn gen_macho_le(
                     if cmd.datasize.get(NativeEndian) > 0 {
                         cmd.dataoff.set(
                             LittleEndian,
-                            cmd.dataoff.get(NativeEndian) + added_bytes as u32,
+                            cmd.dataoff.get(NativeEndian) + md.added_byte_count as u32,
                         );
                     }
                     (
@@ -1242,7 +1241,7 @@ fn gen_macho_le(
                     for entry in entries.iter_mut() {
                         entry.offset.set(
                             LittleEndian,
-                            entry.offset.get(NativeEndian) + added_bytes as u32,
+                            entry.offset.get(NativeEndian) + md.added_byte_count as u32,
                         )
                     }
                 }
@@ -1261,7 +1260,7 @@ fn gen_macho_le(
                 if cmd.datasize.get(NativeEndian) > 0 {
                     cmd.dataoff.set(
                         LittleEndian,
-                        cmd.dataoff.get(NativeEndian) + added_bytes as u32,
+                        cmd.dataoff.get(NativeEndian) + md.added_byte_count as u32,
                     );
                 }
             }
@@ -1274,7 +1273,7 @@ fn gen_macho_le(
                 if cmd.cryptsize.get(NativeEndian) > 0 {
                     cmd.cryptoff.set(
                         LittleEndian,
-                        cmd.cryptoff.get(NativeEndian) + added_bytes as u32,
+                        cmd.cryptoff.get(NativeEndian) + md.added_byte_count as u32,
                     );
                 }
             }
@@ -1287,28 +1286,28 @@ fn gen_macho_le(
                 if cmd.rebase_size.get(NativeEndian) > 0 {
                     cmd.rebase_off.set(
                         LittleEndian,
-                        cmd.rebase_off.get(NativeEndian) + added_bytes as u32,
+                        cmd.rebase_off.get(NativeEndian) + md.added_byte_count as u32,
                     );
                 }
 
                 if cmd.bind_size.get(NativeEndian) > 0 {
                     cmd.bind_off.set(
                         LittleEndian,
-                        cmd.bind_off.get(NativeEndian) + added_bytes as u32,
+                        cmd.bind_off.get(NativeEndian) + md.added_byte_count as u32,
                     );
                 }
 
                 if cmd.weak_bind_size.get(NativeEndian) > 0 {
                     cmd.weak_bind_off.set(
                         LittleEndian,
-                        cmd.weak_bind_off.get(NativeEndian) + added_bytes as u32,
+                        cmd.weak_bind_off.get(NativeEndian) + md.added_byte_count as u32,
                     );
                 }
 
                 if cmd.lazy_bind_size.get(NativeEndian) > 0 {
                     cmd.lazy_bind_off.set(
                         LittleEndian,
-                        cmd.lazy_bind_off.get(NativeEndian) + added_bytes as u32,
+                        cmd.lazy_bind_off.get(NativeEndian) + md.added_byte_count as u32,
                     );
                 }
             }
@@ -1321,7 +1320,7 @@ fn gen_macho_le(
                 if cmd.size.get(NativeEndian) > 0 {
                     cmd.offset.set(
                         LittleEndian,
-                        cmd.offset.get(NativeEndian) + added_bytes as u32,
+                        cmd.offset.get(NativeEndian) + md.added_byte_count as u32,
                     );
                 }
             }
@@ -1333,7 +1332,7 @@ fn gen_macho_le(
 
                 cmd.entryoff.set(
                     LittleEndian,
-                    cmd.entryoff.get(NativeEndian) + added_bytes as u64,
+                    cmd.entryoff.get(NativeEndian) + md.added_byte_count as u64,
                 );
             }
             macho::LC_NOTE => {
@@ -1345,7 +1344,7 @@ fn gen_macho_le(
                 if cmd.size.get(NativeEndian) > 0 {
                     cmd.offset.set(
                         LittleEndian,
-                        cmd.offset.get(NativeEndian) + added_bytes as u64,
+                        cmd.offset.get(NativeEndian) + md.added_byte_count as u64,
                     );
                 }
             }
