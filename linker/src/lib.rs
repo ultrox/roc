@@ -1316,6 +1316,9 @@ fn gen_macho_le(
                 // TODO: Parse and update the related tables here.
                 // It is possible we may just need to delete things that point to stuff that will be in the roc app.
                 // We also may just be able to ignore it (lazy bindings should never run).
+                // This definitely has a list of virtual address that need to be updated.
+                // Some of them definitely will point to the roc app and should probably be removed.
+                // Also `xcrun dyldinfo` is useful for debugging this.
             }
             macho::LC_SYMSEG => {
                 let cmd = load_struct_inplace_mut::<macho::SymsegCommand<LittleEndian>>(
