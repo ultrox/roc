@@ -13,21 +13,22 @@ State : [Executing, InComment, InLambda Nat (List U8), InString (List U8), InNum
 Context : { scopes : List Scope, stack : List Data, vars : List Data, state : State }
 
 pushStack : Context, Data -> Context
-pushStack = \ctx, data ->
-    { ctx & stack: List.append ctx.stack data }
+pushStack = \{ scopes, stack, state, vars }, data ->
+    { scopes, state, vars, stack: List.append stack data }
 
 # I think an open tag union should just work here.
 # Instead at a call sites, I need to match on the error and then return the same error.
 # Otherwise it hits unreachable code in ir.rs
-popStack : Context -> Result [T Context Data] [EmptyStack]*
-popStack = \ctx ->
-    when List.last ctx.stack is
+popStack : Context -> Result [T Context Data] [EmptyStack Context]*
+popStack = \{ scopes, stack, state, vars } ->
+    when List.last stack is
         Ok val ->
-            poppedCtx = { ctx & stack: List.dropAt ctx.stack (List.len ctx.stack - 1) }
+            last = List.len stack - 1
+            poppedCtx = { scopes, state, vars, stack: List.dropAt stack last }
 
             Ok (T poppedCtx val)
         Err ListWasEmpty ->
-            Err EmptyStack
+            Err (EmptyStack { scopes, stack, state, vars })
 
 toStrData : Data -> Str
 toStrData = \data ->
@@ -75,37 +76,44 @@ with = \path, callback ->
     callback { scopes: [{ data: Some handle, index: 0, buf: [], whileInfo: None }], state: Executing, stack: [], vars: List.repeat (Number 0) Variable.totalCount }
 
 # I am pretty sure there is a syntax to destructure and keep a reference to the whole, but Im not sure what it is.
-getChar : Context -> Task [T U8 Context] [EndOfData, NoScope]*
-getChar = \ctx ->
-    when List.last ctx.scopes is
+getChar : Context -> Task [T U8 Context] [EndOfData Context, NoScope]*
+getChar = \{ scopes, stack, state, vars } ->
+    when List.last scopes is
         Ok scope ->
-            (T val newScope) <- Task.await (getCharScope scope)
-            Task.succeed (T val { ctx & scopes: List.set ctx.scopes (List.len ctx.scopes - 1) newScope })
+            result <- Task.attempt (getCharScope scope)
+            when result is
+                Ok (T val newScope) ->
+                    last = List.len scopes - 1
+                    Task.succeed (T val { stack, state, vars, scopes: List.set scopes last newScope  })
+                Err EndOfData ->
+                    Task.fail (EndOfData { scopes, stack, state, vars })
+                Err NoScope ->
+                    Task.fail NoScope
         Err ListWasEmpty ->
             Task.fail NoScope
 
 getCharScope : Scope -> Task [T U8 Scope] [EndOfData, NoScope]*
-getCharScope = \scope ->
-    when List.get scope.buf scope.index is
+getCharScope = \{ data, index, buf, whileInfo } ->
+    when List.get buf index is
         Ok val ->
-            Task.succeed (T val { scope & index: scope.index + 1 })
+            Task.succeed (T val { data, buf, whileInfo, index: index + 1 })
         Err OutOfBounds ->
-            when scope.data is
+            when data is
                 Some h ->
                     bytes <- Task.await (File.chunk h)
                     when List.first bytes is
                         Ok val ->
                             # This starts at 1 because the first character is already being returned.
-                            Task.succeed (T val { scope & buf: bytes, index: 1 })
+                            Task.succeed (T val { data, whileInfo, buf: bytes, index: 1 })
                         Err ListWasEmpty ->
                             Task.fail EndOfData
                 None ->
                     Task.fail EndOfData
 
-inWhileScope : Context -> Bool
-inWhileScope = \ctx ->
-    when List.last ctx.scopes is
-        Ok scope ->
-            scope.whileInfo != None
+inWhileScope : List Scope -> Bool
+inWhileScope = \scopes ->
+    when List.last scopes is
+        Ok { whileInfo } ->
+            whileInfo != None
         Err ListWasEmpty ->
             False

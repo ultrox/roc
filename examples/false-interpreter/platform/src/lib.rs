@@ -29,8 +29,17 @@ extern "C" {
     fn size_Fx_result() -> i64;
 }
 
+static mut ALLOC: usize = 0;
+static mut REALLOC: usize = 0;
+static mut DEALLOC: usize = 0;
+static mut PRINT_ALLOC: bool = false;
+
 #[no_mangle]
 pub unsafe extern "C" fn roc_alloc(size: usize, _alignment: u32) -> *mut c_void {
+    ALLOC += 1;
+    if PRINT_ALLOC {
+        println!("ALLOC OF {}", size);
+    }
     libc::malloc(size)
 }
 
@@ -41,11 +50,14 @@ pub unsafe extern "C" fn roc_realloc(
     _old_size: usize,
     _alignment: u32,
 ) -> *mut c_void {
+    REALLOC += 1;
+    // println!("REALLOC OF {}", new_size);
     libc::realloc(c_ptr, new_size)
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn roc_dealloc(c_ptr: *mut c_void, _alignment: u32) {
+    DEALLOC += 1;
     libc::free(c_ptr)
 }
 
@@ -95,6 +107,10 @@ pub extern "C" fn rust_main() -> i32 {
         let result = call_the_closure(buffer);
 
         std::alloc::dealloc(buffer, layout);
+
+        println!("\n\nAllocation Count: {}", ALLOC);
+        println!("Reallocation Count: {}", REALLOC);
+        println!("Deallocation Count: {}", DEALLOC);
 
         result
     };
@@ -147,6 +163,11 @@ pub extern "C" fn roc_fx_getChar() -> u8 {
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn roc_fx_printAlloc(print_alloc: bool) {
+    PRINT_ALLOC = print_alloc;
+}
+
+#[no_mangle]
 pub extern "C" fn roc_fx_putLine(line: &RocStr) {
     let string = line.as_str();
     println!("{}", string);
@@ -174,7 +195,7 @@ pub extern "C" fn roc_fx_getFileLine(br_ptr: *mut BufReader<File>) -> RocStr {
 #[no_mangle]
 pub extern "C" fn roc_fx_getFileBytes(br_ptr: *mut BufReader<File>) -> RocList<u8> {
     let br = unsafe { &mut *br_ptr };
-    let mut buffer = [0; 0x10 /* This is intentionally small to ensure correct implementation */];
+    let mut buffer = [0; 0x4000 /* This is intentionally small to ensure correct implementation */];
 
     let count = br
         .read(&mut buffer[..])

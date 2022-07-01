@@ -80,51 +80,51 @@ interpretCtx = \ctx ->
     Task.loop ctx interpretCtxLoop
 
 interpretCtxLoop : Context -> Task [Step Context, Done Context] InterpreterErrors
-interpretCtxLoop = \ctx ->
-    when ctx.state is
-        Executing if Context.inWhileScope ctx ->
+interpretCtxLoop = \{ scopes, stack, state, vars } ->
+    # {} <- Task.await (Stdout.line (Context.toStr ctx))
+    when state is
+        Executing if Context.inWhileScope scopes ->
             # Deal with the current while loop potentially looping.
-            last = (List.len ctx.scopes - 1)
+            last = (List.len scopes - 1)
 
-            when List.get ctx.scopes last is
+            when List.get scopes last is
                 Ok scope ->
                     when scope.whileInfo is
                         Some { state: InCond, body, cond } ->
                             # Just ran condition. Check the top of stack to see if body should run.
-                            when popNumber ctx is
+                            when popNumber { scopes: [], stack, state, vars } is
                                 Ok (T popCtx n) ->
                                     if n == 0 then
                                         newScope = { scope & whileInfo: None }
 
-                                        Task.succeed (Step { popCtx & scopes: List.set ctx.scopes last newScope })
+                                        Task.succeed (Step { popCtx & scopes: List.set scopes last newScope })
                                     else
                                         newScope = { scope & whileInfo: Some { state: InBody, body, cond } }
 
-                                        Task.succeed (Step { popCtx & scopes: List.append (List.set ctx.scopes last newScope) { data: None, buf: body, index: 0, whileInfo: None } })
+                                        Task.succeed (Step { popCtx & scopes: List.append (List.set scopes last newScope) { data: None, buf: body, index: 0, whileInfo: None } })
                                 Err e ->
                                     Task.fail e
                         Some { state: InBody, body, cond } ->
                             # Just rand the body. Run the condition again.
                             newScope = { scope & whileInfo: Some { state: InCond, body, cond } }
 
-                            Task.succeed (Step { ctx & scopes: List.append (List.set ctx.scopes last newScope) { data: None, buf: cond, index: 0, whileInfo: None } })
+                            Task.succeed (Step { stack, state, vars, scopes: List.append (List.set scopes last newScope) { data: None, buf: cond, index: 0, whileInfo: None } })
                         None ->
                             Task.fail NoScope
                 Err OutOfBounds ->
                     Task.fail NoScope
         Executing ->
-            # {} <- Task.await (Stdout.line (Context.toStr ctx))
-            result <- Task.attempt (Context.getChar ctx)
+            result <- Task.attempt (Context.getChar { scopes, stack, state, vars })
             when result is
                 Ok (T val newCtx) ->
                     execCtx <- Task.await (stepExecCtx newCtx val)
                     Task.succeed (Step execCtx)
                 Err NoScope ->
                     Task.fail NoScope
-                Err EndOfData ->
+                Err (EndOfData { scopes: oldScopes, stack: oldStack, state: oldState, vars: oldVars }) ->
                     # Computation complete for this scope.
                     # Drop a scope.
-                    dropCtx = { ctx & scopes: List.dropAt ctx.scopes (List.len ctx.scopes - 1) }
+                    dropCtx = { stack: oldStack, state: oldState, vars: oldVars, scopes: List.dropAt oldScopes (List.len oldScopes - 1) }
 
                     # If no scopes left, all execution complete.
                     if List.isEmpty dropCtx.scopes then
@@ -132,7 +132,7 @@ interpretCtxLoop = \ctx ->
                     else
                         Task.succeed (Step dropCtx)
         InComment ->
-            result <- Task.attempt (Context.getChar ctx)
+            result <- Task.attempt (Context.getChar { scopes, stack, state, vars })
             when result is
                 Ok (T val newCtx) ->
                     if val == 0x7D then
@@ -142,10 +142,10 @@ interpretCtxLoop = \ctx ->
                         Task.succeed (Step { newCtx & state: InComment })
                 Err NoScope ->
                     Task.fail NoScope
-                Err EndOfData ->
+                Err (EndOfData _) ->
                     Task.fail UnexpectedEndOfData
         InNumber accum ->
-            result <- Task.attempt (Context.getChar ctx)
+            result <- Task.attempt (Context.getChar { scopes, stack, state, vars })
             when result is
                 Ok (T val newCtx) ->
                     if isDigit val then
@@ -164,33 +164,54 @@ interpretCtxLoop = \ctx ->
                         Task.succeed (Step execCtx)
                 Err NoScope ->
                     Task.fail NoScope
-                Err EndOfData ->
+                Err (EndOfData _) ->
                     Task.fail UnexpectedEndOfData
         InString bytes ->
-            result <- Task.attempt (Context.getChar ctx)
+            # Use a dummy state in the next line to avoid a reference to bytes and then a copy.
+            result <- Task.attempt (Context.getChar { scopes, stack, state: Executing, vars })
             when result is
                 Ok (T val newCtx) ->
                     if val == 0x22 then
                         # `"` end of string
+                        # creating a string must allocate, ignore.
+                        # {} <- Task.await (Stdout.printAlloc False)
                         when Str.fromUtf8 bytes is
                             Ok str ->
+                                # {} <- Task.await (Stdout.printAlloc True)
                                 {} <- Task.await (Stdout.raw str)
                                 Task.succeed (Step { newCtx & state: Executing })
                             Err _ ->
                                 Task.fail BadUtf8
                     else
-                        Task.succeed (Step { newCtx & state: InString (List.append bytes val) })
+                        if List.isEmpty bytes then
+                            # we are going to allocate here cause the list has not been initialized.
+                            # ignore it.
+                            # {} <- Task.await (Stdout.printAlloc False)
+                            newBytes = List.append bytes val
+                            # {} <- Task.await (Stdout.printAlloc True)
+                            Task.succeed (Step { newCtx & state: InString newBytes })
+                        else
+                            Task.succeed (Step { newCtx & state: InString (List.append bytes val) })
                 Err NoScope ->
                     Task.fail NoScope
-                Err EndOfData ->
+                Err (EndOfData _) ->
                     Task.fail UnexpectedEndOfData
         InLambda depth bytes ->
-            result <- Task.attempt (Context.getChar ctx)
+            # Use a dummy state in the next line to avoid a reference to bytes and then a copy.
+            result <- Task.attempt (Context.getChar { scopes, stack, state: Executing, vars })
             when result is
                 Ok (T val newCtx) ->
                     if val == 0x5B then
                         # start of a nested lambda `[`
-                        Task.succeed (Step { newCtx & state: InLambda (depth + 1) (List.append bytes val) })
+                        if List.isEmpty bytes then
+                            # we are going to allocate here cause the list has not been initialized.
+                            # ignore it.
+                            # {} <- Task.await (Stdout.printAlloc False)
+                            newBytes = List.append bytes val
+                            # {} <- Task.await (Stdout.printAlloc True)
+                            Task.succeed (Step { newCtx & state: InLambda (depth + 1) newBytes })
+                        else
+                            Task.succeed (Step { newCtx & state: InLambda (depth + 1) (List.append bytes val) })
                     else if val == 0x5D then
                         # `]` end of current lambda
                         if depth == 0 then
@@ -198,15 +219,31 @@ interpretCtxLoop = \ctx ->
                             Task.succeed (Step (Context.pushStack { newCtx & state: Executing } (Lambda bytes)))
                         else
                             # end of nested lambda
-                            Task.succeed (Step { newCtx & state: InLambda (depth - 1) (List.append bytes val) })
+                            if List.isEmpty bytes then
+                                # we are going to allocate here cause the list has not been initialized.
+                                # ignore it.
+                                # {} <- Task.await (Stdout.printAlloc False)
+                                newBytes = List.append bytes val
+                                # {} <- Task.await (Stdout.printAlloc True)
+                                Task.succeed (Step { newCtx & state: InLambda (depth - 1) newBytes })
+                            else
+                                Task.succeed (Step { newCtx & state: InLambda (depth - 1) (List.append bytes val) })
                     else
-                        Task.succeed (Step { newCtx & state: InLambda depth (List.append bytes val) })
+                        if List.isEmpty bytes then
+                            # we are going to allocate here cause the list has not been initialized.
+                            # ignore it.
+                            # {} <- Task.await (Stdout.printAlloc False)
+                            newBytes = List.append bytes val
+                            # {} <- Task.await (Stdout.printAlloc True)
+                            Task.succeed (Step { newCtx & state: InLambda depth newBytes })
+                        else
+                            Task.succeed (Step { newCtx & state: InLambda depth (List.append bytes val) })
                 Err NoScope ->
                     Task.fail NoScope
-                Err EndOfData ->
+                Err (EndOfData _) ->
                     Task.fail UnexpectedEndOfData
         InSpecialChar ->
-            result <- Task.attempt (Context.getChar { ctx & state: Executing })
+            result <- Task.attempt (Context.getChar { scopes, stack, vars, state: Executing })
             when result is
                 Ok (T 0xB8 newCtx) ->
                     result2 =
@@ -235,34 +272,38 @@ interpretCtxLoop = \ctx ->
                     Task.fail (InvalidChar data)
                 Err NoScope ->
                     Task.fail NoScope
-                Err EndOfData ->
+                Err (EndOfData _) ->
                     Task.fail UnexpectedEndOfData
         LoadChar ->
-            result <- Task.attempt (Context.getChar { ctx & state: Executing })
+            result <- Task.attempt (Context.getChar { scopes, stack, vars, state: Executing })
             when result is
                 Ok (T x newCtx) ->
                     Task.succeed (Step (Context.pushStack newCtx (Number (Num.intCast x))))
                 Err NoScope ->
                     Task.fail NoScope
-                Err EndOfData ->
+                Err (EndOfData _) ->
                     Task.fail UnexpectedEndOfData
 
 # If it weren't for reading stdin or writing to stdout, this could return a result.
 stepExecCtx : Context, U8 -> Task Context InterpreterErrors
-stepExecCtx = \ctx, char ->
+stepExecCtx = \{ scopes, stack, vars, state }, char ->
+    # {} <- Task.await (Stdout.printAlloc False)
+    # out = Num.toStr char
+    # {} <- Task.await (Stdout.line "========== \(out) ==========")
+    # {} <- Task.await (Stdout.printAlloc True)
     when char is
         0x21 ->
             # `!` execute lambda
             Task.fromResult
                 (
-                    (T popCtx bytes) <- Result.after (popLambda ctx)
+                    (T popCtx bytes) <- Result.after (popLambda { scopes, stack, vars, state })
                     Ok { popCtx & scopes: List.append popCtx.scopes { data: None, buf: bytes, index: 0, whileInfo: None } }
                 )
         0x3F ->
             # `?` if
             Task.fromResult
                 (
-                    (T popCtx1 bytes) <- Result.after (popLambda ctx)
+                    (T popCtx1 bytes) <- Result.after (popLambda { scopes, stack, vars, state })
                     (T popCtx2 n1) <- Result.after (popNumber popCtx1)
                     if n1 == 0 then
                         Ok popCtx2
@@ -273,17 +314,17 @@ stepExecCtx = \ctx, char ->
             # `#` while
             Task.fromResult
                 (
-                    (T popCtx1 body) <- Result.after (popLambda ctx)
+                    (T popCtx1 body) <- Result.after (popLambda { scopes, stack, vars, state })
                     (T popCtx2 cond) <- Result.after (popLambda popCtx1)
                     last = (List.len popCtx2.scopes - 1)
 
                     when List.get popCtx2.scopes last is
                         Ok scope ->
                             # set the current scope to be in a while loop.
-                            scopes = List.set popCtx2.scopes last { scope & whileInfo: Some { cond: cond, body: body, state: InCond } }
+                            newScopes = List.set popCtx2.scopes last { scope & whileInfo: Some { cond: cond, body: body, state: InCond } }
 
                             # push a scope to execute the condition.
-                            Ok { popCtx2 & scopes: List.append scopes { data: None, buf: cond, index: 0, whileInfo: None } }
+                            Ok { popCtx2 & scopes: List.append newScopes { data: None, buf: cond, index: 0, whileInfo: None } }
                         Err OutOfBounds ->
                             Err NoScope
                 )
@@ -291,56 +332,61 @@ stepExecCtx = \ctx, char ->
             # `$` dup
             # Switching this to List.last and changing the error to ListWasEmpty leads to a compiler bug.
             # Complains about the types eq not matching.
-            when List.get ctx.stack (List.len ctx.stack - 1) is
+            last = List.len stack - 1
+            when List.get stack last is
                 Ok dupItem ->
-                    Task.succeed (Context.pushStack ctx dupItem)
+                    Task.succeed (Context.pushStack { scopes, stack, vars, state } dupItem)
                 Err OutOfBounds ->
                     Task.fail EmptyStack
         0x25 ->
             # `%` drop
-            when Context.popStack ctx is
+            when Context.popStack { scopes, stack, vars, state } is
                 # Dropping with an empty stack, all results here are fine
                 Ok (T popCtx _) ->
                     Task.succeed popCtx
-                Err _ ->
-                    Task.succeed ctx
+                Err (EmpytStack oldCtx) ->
+                    Task.succeed oldCtx
         0x5C ->
             # `\` swap
+            # {} <- Task.await (Stdout.printAlloc False)
             result2 =
-                (T popCtx1 n1) <- Result.after (Context.popStack ctx)
+                (T popCtx1 n1) <- Result.after (Context.popStack { scopes, stack, vars, state })
                 (T popCtx2 n2) <- Result.after (Context.popStack popCtx1)
                 Ok (Context.pushStack (Context.pushStack popCtx2 n1) n2)
+            # {} <- Task.await (Stdout.printAlloc True)
 
             when result2 is
                 Ok a ->
                     Task.succeed a
                 # Being explicit with error type is required to stop the need to propogate the error parameters to Context.popStack
-                Err EmptyStack ->
+                Err (EmptyStack _) ->
                     Task.fail EmptyStack
         0x40 ->
             # `@` rot
+            # {} <- Task.await (Stdout.printAlloc False)
             result2 =
-                (T popCtx1 n1) <- Result.after (Context.popStack ctx)
+                (T popCtx1 n1) <- Result.after (Context.popStack { scopes, stack, vars, state })
                 (T popCtx2 n2) <- Result.after (Context.popStack popCtx1)
                 (T popCtx3 n3) <- Result.after (Context.popStack popCtx2)
                 Ok (Context.pushStack (Context.pushStack (Context.pushStack popCtx3 n2) n1) n3)
+            # {} <- Task.await (Stdout.printAlloc True)
 
             when result2 is
                 Ok a ->
                     Task.succeed a
                 # Being explicit with error type is required to stop the need to propogate the error parameters to Context.popStack
-                Err EmptyStack ->
+                Err (EmptyStack _) ->
                     Task.fail EmptyStack
         0xC3 ->
             # `ø` pick or `ß` flush
             # these are actually 2 bytes, 0xC3 0xB8 or  0xC3 0x9F
             # requires special parsing
-            Task.succeed { ctx & state: InSpecialChar }
+            Task.succeed { scopes, stack, vars, state: InSpecialChar }
         0x4F ->
             # `O` also treat this as pick for easier script writing
             Task.fromResult
                 (
-                    (T popCtx index) <- Result.after (popNumber ctx)
+                    (T popCtx index) <- Result.after (popNumber { scopes, stack, vars, state })
                     # I think Num.abs is too restrictive, it should be able to produce a natural number, but it seem to be restricted to signed numbers.
                     size = List.len popCtx.stack - 1
                     offset = Num.intCast size - index
@@ -354,40 +400,40 @@ stepExecCtx = \ctx, char ->
         0x42 ->
             # `B` also treat this as flush for easier script writing
             # This is supposed to flush io buffers. We don't buffer, so it does nothing
-            Task.succeed ctx
+            Task.succeed { scopes, stack, vars, state }
         0x27 ->
             # `'` load next char
-            Task.succeed { ctx & state: LoadChar }
+            Task.succeed { scopes, stack, vars, state: LoadChar }
         0x2B ->
             # `+` add
-            Task.fromResult (binaryOp ctx Num.addWrap)
+            Task.fromResult (binaryOp { scopes, stack, vars, state } Num.addWrap)
         0x2D ->
             # `-` sub
-            Task.fromResult (binaryOp ctx Num.subWrap)
+            Task.fromResult (binaryOp { scopes, stack, vars, state } Num.subWrap)
         0x2A ->
             # `*` mul
-            Task.fromResult (binaryOp ctx Num.mulWrap)
+            Task.fromResult (binaryOp { scopes, stack, vars, state } Num.mulWrap)
         0x2F ->
             # `/` div
             # Due to possible division by zero error, this must be handled specially.
             Task.fromResult
                 (
-                    (T popCtx1 numR) <- Result.after (popNumber ctx)
+                    (T popCtx1 numR) <- Result.after (popNumber { scopes, stack, vars, state })
                     (T popCtx2 numL) <- Result.after (popNumber popCtx1)
                     res <- Result.after (Num.divTruncChecked numL numR)
                     Ok (Context.pushStack popCtx2 (Number res))
                 )
         0x26 ->
             # `&` bitwise and
-            Task.fromResult (binaryOp ctx Num.bitwiseAnd)
+            Task.fromResult (binaryOp { scopes, stack, vars, state } Num.bitwiseAnd)
         0x7C ->
             # `|` bitwise or
-            Task.fromResult (binaryOp ctx Num.bitwiseOr)
+            Task.fromResult (binaryOp { scopes, stack, vars, state } Num.bitwiseOr)
         0x3D ->
             # `=` equals
             Task.fromResult
                 (
-                    a, b <- binaryOp ctx
+                    a, b <- binaryOp { scopes, stack, vars, state }
                     if a == b then
                         -1
                     else
@@ -397,7 +443,7 @@ stepExecCtx = \ctx, char ->
             # `>` greater than
             Task.fromResult
                 (
-                    a, b <- binaryOp ctx
+                    a, b <- binaryOp { scopes, stack, vars, state }
                     if a > b then
                         -1
                     else
@@ -405,17 +451,20 @@ stepExecCtx = \ctx, char ->
                 )
         0x5F ->
             # `_` negate
-            Task.fromResult (unaryOp ctx Num.neg)
+            Task.fromResult (unaryOp { scopes, stack, vars, state } Num.neg)
         0x7E ->
             # `~` bitwise not
-            Task.fromResult (unaryOp ctx (\x -> Num.bitwiseXor x -1))
+            Task.fromResult (unaryOp { scopes, stack, vars, state } (\x -> Num.bitwiseXor x -1))
         # xor with -1 should be bitwise not
         0x2C ->
             # `,` write char
-            when popNumber ctx is
+            when popNumber { scopes, stack, vars, state } is
                 Ok (T popCtx num) ->
+                    # creating a string must allocate, ignore.
+                    # {} <- Task.await (Stdout.printAlloc False)
                     when Str.fromUtf8 [Num.intCast num] is
                         Ok str ->
+                            # {} <- Task.await (Stdout.printAlloc True)
                             {} <- Task.await (Stdout.raw str)
                             Task.succeed popCtx
                         Err _ ->
@@ -424,7 +473,7 @@ stepExecCtx = \ctx, char ->
                     Task.fail e
         0x2E ->
             # `.` write int
-            when popNumber ctx is
+            when popNumber { scopes, stack, vars, state } is
                 Ok (T popCtx num) ->
                     {} <- Task.await (Stdout.raw (Num.toStr (Num.intCast num)))
                     Task.succeed popCtx
@@ -435,45 +484,45 @@ stepExecCtx = \ctx, char ->
             in <- Task.await Stdin.char
             if in == 255 then
                 # max char sent on EOF. Change to -1
-                Task.succeed (Context.pushStack ctx (Number -1))
+                Task.succeed (Context.pushStack { scopes, stack, vars, state } (Number -1))
             else
-                Task.succeed (Context.pushStack ctx (Number (Num.intCast in)))
+                Task.succeed (Context.pushStack { scopes, stack, vars, state } (Number (Num.intCast in)))
         0x3A ->
             # `:` store to variable
             Task.fromResult
                 (
-                    (T popCtx1 var) <- Result.after (popVariable ctx)
+                    (T popCtx1 var) <- Result.after (popVariable { scopes, stack, vars, state })
                     # The Result.mapErr on the next line maps from EmptyStack in Context.roc to the full InterpreterErrors union here.
-                    (T popCtx2 n1) <- Result.after (Result.mapErr (Context.popStack popCtx1) (\EmptyStack -> EmptyStack))
+                    (T popCtx2 n1) <- Result.after (Result.mapErr (Context.popStack popCtx1) (\EmptyStack _ -> EmptyStack))
                     Ok { popCtx2 & vars: List.set popCtx2.vars (Variable.toIndex var) n1 }
                 )
         0x3B ->
             # `;` load from variable
             Task.fromResult
                 (
-                    (T popCtx var) <- Result.after (popVariable ctx)
+                    (T popCtx var) <- Result.after (popVariable { scopes, stack, vars, state })
                     elem <- Result.after (List.get popCtx.vars (Variable.toIndex var))
                     Ok (Context.pushStack popCtx elem)
                 )
         0x22 ->
             # `"` string start
-            Task.succeed { ctx & state: InString [] }
+            Task.succeed { scopes, stack, vars, state: InString [] }
         0x5B ->
-            # `"` string start
-            Task.succeed { ctx & state: InLambda 0 [] }
+            # `[` lambda start
+            Task.succeed { scopes, stack, vars, state: InLambda 0 [] }
         0x7B ->
             # `{` comment start
-            Task.succeed { ctx & state: InComment }
+            Task.succeed { scopes, stack, vars, state: InComment }
         x if isDigit x ->
             # number start
-            Task.succeed { ctx & state: InNumber (Num.intCast (x - 0x30)) }
+            Task.succeed { scopes, stack, vars, state: InNumber (Num.intCast (x - 0x30)) }
         x if isWhitespace x ->
-            Task.succeed ctx
+            Task.succeed { scopes, stack, vars, state }
         x ->
             when Variable.fromUtf8 x is
                 # letters are variable names
                 Ok var ->
-                    Task.succeed (Context.pushStack ctx (Var var))
+                    Task.succeed (Context.pushStack { scopes, stack, vars, state } (Var var))
                 Err _ ->
                     data = Num.toStr (Num.intCast x)
 
@@ -497,7 +546,7 @@ popNumber = \ctx ->
             Ok (T popCtx num)
         Ok _ ->
             Err (NoNumberOnStack)
-        Err EmptyStack ->
+        Err (EmptyStack _) ->
             Err EmptyStack
 
 popLambda : Context -> Result [T Context (List U8)] InterpreterErrors
@@ -507,7 +556,7 @@ popLambda = \ctx ->
             Ok (T popCtx bytes)
         Ok _ ->
             Err NoLambdaOnStack
-        Err EmptyStack ->
+        Err (EmptyStack _) ->
             Err EmptyStack
 
 popVariable : Context -> Result [T Context Variable] InterpreterErrors
@@ -517,5 +566,5 @@ popVariable = \ctx ->
             Ok (T popCtx var)
         Ok _ ->
             Err NoVariableOnStack
-        Err EmptyStack ->
+        Err (EmptyStack _) ->
             Err EmptyStack
