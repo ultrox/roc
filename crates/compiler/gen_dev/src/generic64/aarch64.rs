@@ -1,10 +1,17 @@
 use crate::generic64::{storage::StorageManager, Assembler, CallConv, RegTrait};
-use crate::Relocation;
+use crate::{
+    single_register_floats, single_register_int_builtins, single_register_integers,
+    single_register_layouts, Relocation,
+};
 use bumpalo::collections::Vec;
 use packed_struct::prelude::*;
+use roc_builtins::bitcode::{FloatWidth, IntWidth};
 use roc_error_macros::internal_error;
 use roc_module::symbol::Symbol;
-use roc_mono::layout::Layout;
+use roc_mono::layout::{Builtin, Layout};
+use roc_target::TargetInfo;
+
+const TARGET_INFO: TargetInfo = TargetInfo::default_aarch64();
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 #[allow(dead_code)]
@@ -121,6 +128,13 @@ pub struct AArch64Assembler {}
 // windows specifics: https://docs.microsoft.com/en-us/cpp/build/arm64-windows-abi-conventions?view=msvc-170
 #[derive(Copy, Clone)]
 pub struct AArch64Call {}
+
+impl AArch64Call {
+    fn returns_via_arg_pointer(ret_layout: &Layout) -> bool {
+        // TODO: This will need to be more complex/extended to fully support the calling convention.
+        ret_layout.stack_size(TARGET_INFO) > 16
+    }
+}
 
 const STACK_ALIGNMENT: u8 = 16;
 
@@ -308,17 +322,58 @@ impl CallConv<AArch64GeneralReg, AArch64FloatReg, AArch64Assembler> for AArch64C
     #[inline(always)]
     fn load_args<'a>(
         _buf: &mut Vec<'a, u8>,
-        _storage_manager: &mut StorageManager<
+        storage_manager: &mut StorageManager<
             'a,
             AArch64GeneralReg,
             AArch64FloatReg,
             AArch64Assembler,
             AArch64Call,
         >,
-        _args: &'a [(Layout<'a>, Symbol)],
-        _ret_layout: &Layout<'a>,
+        args: &'a [(Layout<'a>, Symbol)],
+        ret_layout: &Layout<'a>,
     ) {
-        todo!("Loading args for AArch64");
+        let mut arg_offset = Self::SHADOW_SPACE_SIZE as i32 + 16; // 16 is the size of the pushed return address and base pointer.
+        let mut general_i = 0;
+        let mut float_i = 0;
+        if AArch64Call::returns_via_arg_pointer(ret_layout) {
+            storage_manager.ret_pointer_arg(AArch64GeneralReg::XR);
+            general_i += 1;
+        }
+        // TODO: This is mostly just copied from x86. When bugs arise, look here first.
+        for (layout, sym) in args.iter() {
+            let stack_size = layout.stack_size(TARGET_INFO);
+            match layout {
+                single_register_integers!() => {
+                    if general_i < Self::GENERAL_PARAM_REGS.len() {
+                        storage_manager.general_reg_arg(sym, Self::GENERAL_PARAM_REGS[general_i]);
+                        general_i += 1;
+                    } else {
+                        storage_manager.primitive_stack_arg(sym, arg_offset);
+                        arg_offset += 8;
+                    }
+                }
+                single_register_floats!() => {
+                    if float_i < Self::FLOAT_PARAM_REGS.len() {
+                        storage_manager.float_reg_arg(sym, Self::FLOAT_PARAM_REGS[float_i]);
+                        float_i += 1;
+                    } else {
+                        storage_manager.primitive_stack_arg(sym, arg_offset);
+                        arg_offset += 8;
+                    }
+                }
+                _ if stack_size == 0 => {
+                    storage_manager.no_data_arg(sym);
+                }
+                _ if stack_size > 16 => {
+                    // TODO: Double check this.
+                    storage_manager.complex_stack_arg(sym, arg_offset, stack_size);
+                    arg_offset += stack_size as i32;
+                }
+                x => {
+                    todo!("Loading args with layout {:?}", x);
+                }
+            }
+        }
     }
 
     #[inline(always)]
