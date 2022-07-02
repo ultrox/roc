@@ -116,8 +116,9 @@ impl std::fmt::Display for AArch64FloatReg {
 #[derive(Copy, Clone)]
 pub struct AArch64Assembler {}
 
-// AArch64Call may need to eventually be split by OS,
-// but I think with how we use it, they may all be the same.
+// TODO: there are definitely OS specifics that matter here.
+// apple specifics: https://developer.apple.com/documentation/xcode/writing-arm64-code-for-apple-platforms
+// windows specifics: https://docs.microsoft.com/en-us/cpp/build/arm64-windows-abi-conventions?view=msvc-170
 #[derive(Copy, Clone)]
 pub struct AArch64Call {}
 
