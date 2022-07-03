@@ -198,6 +198,10 @@ impl CallConv<X86_64GeneralReg, X86_64FloatReg, X86_64Assembler> for X86_64Syste
     ];
     const SHADOW_SPACE_SIZE: u8 = 0;
 
+    fn relocation_encoding() -> object::RelocationEncoding {
+        object::RelocationEncoding::X86Branch
+    }
+
     #[inline(always)]
     fn general_callee_saved(reg: &X86_64GeneralReg) -> bool {
         matches!(
@@ -588,6 +592,10 @@ impl CallConv<X86_64GeneralReg, X86_64FloatReg, X86_64Assembler> for X86_64Windo
         X86_64FloatReg::XMM0,
     ];
     const SHADOW_SPACE_SIZE: u8 = 32;
+
+    fn relocation_encoding() -> object::RelocationEncoding {
+        object::RelocationEncoding::X86Branch
+    }
 
     #[inline(always)]
     fn general_callee_saved(reg: &X86_64GeneralReg) -> bool {

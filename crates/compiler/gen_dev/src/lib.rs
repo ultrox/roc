@@ -80,6 +80,8 @@ trait Backend<'a> {
 
     fn helper_proc_symbols(&self) -> &Vec<'a, (Symbol, ProcLayout<'a>)>;
 
+    fn relocation_encoding() -> object::RelocationEncoding;
+
     /// reset resets any registers or other values that may be occupied at the end of a procedure.
     /// It also passes basic procedure information to the builder for setup of the next function.
     fn reset(&mut self, name: String, is_self_recursive: SelfRecursive);

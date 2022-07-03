@@ -73,16 +73,16 @@ pub fn helper(
     // You can comment and uncomment this block out to get more useful information
     // while you're working on the dev backend!
     {
-        // println!("=========== Procedures ==========");
-        // if pretty_print_ir_symbols() {
-        //     println!("");
-        //     for proc in procedures.values() {
-        //         println!("{}", proc.to_pretty(200));
-        //     }
-        // } else {
-        //     println!("{:?}", procedures.values());
-        // }
-        // println!("=================================\n");
+        println!("=========== Procedures ==========");
+        if pretty_print_ir_symbols() {
+            println!("");
+            for proc in procedures.values() {
+                println!("{}", proc.to_pretty(200));
+            }
+        } else {
+            println!("{:?}", procedures.values());
+        }
+        println!("=================================\n");
 
         // println!("=========== Interns    ==========");
         // println!("{:?}", interns);
