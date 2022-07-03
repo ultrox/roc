@@ -39,8 +39,6 @@ pub trait CallConv<GeneralReg: RegTrait, FloatReg: RegTrait, ASM: Assembler<Gene
 
     const SHADOW_SPACE_SIZE: u8;
 
-    fn relocation_encoding() -> object::RelocationEncoding;
-
     fn general_callee_saved(reg: &GeneralReg) -> bool;
     #[inline(always)]
     fn general_caller_saved(reg: &GeneralReg) -> bool {
@@ -357,10 +355,6 @@ impl<
     }
     fn helper_proc_symbols(&self) -> &Vec<'a, (Symbol, ProcLayout<'a>)> {
         &self.helper_proc_symbols
-    }
-
-    fn relocation_encoding() -> object::RelocationEncoding {
-        CC::relocation_encoding()
     }
 
     fn reset(&mut self, name: String, is_self_recursive: SelfRecursive) {

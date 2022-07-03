@@ -199,10 +199,6 @@ impl CallConv<AArch64GeneralReg, AArch64FloatReg, AArch64Assembler> for AArch64C
 
     const SHADOW_SPACE_SIZE: u8 = 0;
 
-    fn relocation_encoding() -> object::RelocationEncoding {
-        object::RelocationEncoding::Generic
-    }
-
     #[inline(always)]
     fn general_callee_saved(reg: &AArch64GeneralReg) -> bool {
         matches!(

@@ -147,11 +147,8 @@ fn generate_wrapper<'a, B: Backend<'a>>(
         let reloc = write::Relocation {
             offset: offset + proc_offset,
             size: 32,
-            kind: RelocationKind::MachO {
-                value: 3,
-                relative: true,
-            },
-            encoding: B::relocation_encoding(),
+            kind: RelocationKind::PltRelative,
+            encoding: RelocationEncoding::X86Branch,
             symbol: sym_id,
             addend: -4,
         };
@@ -185,12 +182,6 @@ fn build_object<'a, B: Backend<'a>>(
     */
 
     if backend.env().generate_allocators {
-        generate_wrapper(
-            &mut backend,
-            &mut output,
-            "roc_memcpy".into(),
-            "memcpy".into(),
-        );
         generate_wrapper(
             &mut backend,
             &mut output,
@@ -471,11 +462,8 @@ fn build_proc<'a, B: Backend<'a>>(
                     write::Relocation {
                         offset: offset + proc_offset,
                         size: 32,
-                        kind: RelocationKind::MachO {
-                            value: 3,
-                            relative: true,
-                        },
-                        encoding: B::relocation_encoding(),
+                        kind: RelocationKind::PltRelative,
+                        encoding: RelocationEncoding::X86Branch,
                         symbol: sym_id,
                         addend: -4,
                     }
