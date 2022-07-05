@@ -50,15 +50,25 @@ pub fn call_list_bitcode_fn<'a, 'ctx, 'env>(
         .unwrap();
 
     let list_type = super::convert::zig_list_type(env);
-    let result = create_entry_block_alloca(env, parent, list_type.into(), "list_alloca");
-    let mut arguments: Vec<BasicValueEnum> = Vec::with_capacity_in(args.len() + 1, env.arena);
 
-    arguments.push(result.into());
-    arguments.extend(args);
+    match env.target_info.ptr_width() {
+        roc_target::PtrWidth::Bytes4 => {
+            // 3 machine words actually fit into 2 registers
+            call_bitcode_fn(env, args, fn_name)
+        }
+        roc_target::PtrWidth::Bytes8 => {
+            let result = create_entry_block_alloca(env, parent, list_type.into(), "list_alloca");
+            let mut arguments: Vec<BasicValueEnum> =
+                Vec::with_capacity_in(args.len() + 1, env.arena);
 
-    call_void_bitcode_fn(env, &arguments, fn_name);
+            arguments.push(result.into());
+            arguments.extend(args);
 
-    env.builder.build_load(result, "load_list")
+            call_void_bitcode_fn(env, &arguments, fn_name);
+
+            env.builder.build_load(result, "load_list")
+        }
+    }
 }
 
 pub fn call_str_bitcode_fn<'a, 'ctx, 'env>(

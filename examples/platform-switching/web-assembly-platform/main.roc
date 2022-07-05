@@ -1,9 +1,9 @@
 platform "echo-in-web-assembly"
-    requires {} { main : Str }
+    requires {} { main : I32 }
     exposes []
     packages {}
     imports []
     provides [mainForHost]
 
-mainForHost : Str
+mainForHost : I32
 mainForHost = main

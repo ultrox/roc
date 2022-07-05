@@ -11,7 +11,7 @@ use inkwell::types::{BasicType, BasicTypeEnum, PointerType};
 use inkwell::values::{BasicValueEnum, FunctionValue, IntValue, PointerValue, StructValue};
 use inkwell::{AddressSpace, IntPredicate};
 use morphic_lib::UpdateMode;
-use roc_builtins::bitcode;
+use roc_builtins::bitcode::{self, IntWidth};
 use roc_module::symbol::Symbol;
 use roc_mono::layout::{Builtin, Layout, LayoutIds};
 
@@ -270,13 +270,44 @@ pub fn list_replace_unsafe<'a, 'ctx, 'env>(
         .builder
         .build_alloca(element_type, "output_element_as_opaque");
 
+    let list = list.into_struct_value();
+    // let len = list_len(env.builder, list.into_struct_value());
+    let ptr = env
+        .builder
+        .build_extract_value(list, Builtin::WRAPPER_PTR, "list_ptr")
+        .unwrap()
+        .into_pointer_value();
+    let ptr_type = ptr.get_type();
+    let ptr = env
+        .builder
+        .build_ptr_to_int(ptr, env.context.i32_type(), "ptr_to_i32");
+    let len = env
+        .builder
+        .build_extract_value(list, Builtin::WRAPPER_LEN, "list_len")
+        .unwrap()
+        .into_int_value();
+    let cap = env
+        .builder
+        .build_extract_value(list, Builtin::WRAPPER_CAPACITY, "list_cap")
+        .unwrap()
+        .into_int_value();
+
+    let int_64_type = env.context.i64_type();
+    let len = env.builder.build_int_cast(ptr, int_64_type, "list_len_64");
+    let ptr = env.builder.build_int_cast(len, int_64_type, "list_ptr_64");
+    let len_shift =
+        env.builder
+            .build_left_shift(len, int_64_type.const_int(32, false), "list_len_shift");
+    let ptr_len = env.builder.build_or(len_shift, ptr, "list_ptr_len");
     // Assume the bounds have already been checked earlier
     // (e.g. by List.replace or List.set, which wrap List.#replaceUnsafe)
     let new_list = match update_mode {
         UpdateMode::InPlace => call_list_bitcode_fn(
             env,
             &[
-                list_to_c_abi(env, list).into(),
+                ptr_len.into(),
+                cap.into(),
+                // list_to_c_abi(env, list).into(),
                 index.into(),
                 pass_element_as_opaque(env, element, *element_layout),
                 layout_width(env, element_layout),
@@ -287,7 +318,9 @@ pub fn list_replace_unsafe<'a, 'ctx, 'env>(
         UpdateMode::Immutable => call_list_bitcode_fn(
             env,
             &[
-                list_to_c_abi(env, list).into(),
+                ptr_len.into(),
+                cap.into(),
+                // list_to_c_abi(env, list).into(),
                 env.alignment_intvalue(element_layout),
                 index.into(),
                 pass_element_as_opaque(env, element, *element_layout),
@@ -297,6 +330,31 @@ pub fn list_replace_unsafe<'a, 'ctx, 'env>(
             bitcode::LIST_REPLACE,
         ),
     };
+    let new_list = new_list.into_struct_value();
+    let ptr_len = env
+        .builder
+        .build_extract_value(new_list, 0, "new_list_ptr_len")
+        .unwrap()
+        .into_int_value();
+    let cap = env
+        .builder
+        .build_extract_value(new_list, 1, "new_list_cap")
+        .unwrap()
+        .into_int_value();
+    let len = env.builder.build_right_shift(
+        ptr_len,
+        int_64_type.const_int(32, false),
+        false,
+        "new_list_len_shift",
+    );
+    let int_32_type = env.context.i32_type();
+    let len = env
+        .builder
+        .build_int_cast(len, int_32_type, "new_list_len_32");
+    let ptr = env
+        .builder
+        .build_int_cast(ptr_len, int_32_type, "new_list_ptr_32");
+    let ptr = env.builder.build_int_to_ptr(ptr, ptr_type, "i32_to_ptr");
 
     // Load the element and returned list into a struct.
     let old_element = env.builder.build_load(element_ptr, "load_element");
@@ -309,9 +367,27 @@ pub fn list_replace_unsafe<'a, 'ctx, 'env>(
         )
         .const_zero();
 
+    let result_list = env
+        .builder
+        .build_extract_value(result, 0, "load_result_list")
+        .unwrap()
+        .into_struct_value();
+    let result_list = env
+        .builder
+        .build_insert_value(result_list, ptr, 0, "insert_ptr")
+        .unwrap();
+    let result_list = env
+        .builder
+        .build_insert_value(result_list, len, 1, "insert_len")
+        .unwrap();
+    let result_list = env
+        .builder
+        .build_insert_value(result_list, cap, 2, "insert_cap")
+        .unwrap();
+
     let result = env
         .builder
-        .build_insert_value(result, new_list, 0, "insert_list")
+        .build_insert_value(result, result_list, 0, "insert_list")
         .unwrap();
 
     env.builder

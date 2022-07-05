@@ -54,21 +54,14 @@ export fn roc_memcpy(dest: *anyopaque, src: *anyopaque, count: usize) callconv(.
 const mem = std.mem;
 const Allocator = mem.Allocator;
 
-extern fn roc__mainForHost_1_exposed(*RocStr) void;
+extern fn roc__mainForHost_1_exposed() i32;
 
 const Unit = extern struct {};
 
-extern fn js_display_roc_string(str_bytes: ?[*]u8, str_len: usize) void;
+extern fn js_display_roc_string(i32) void;
 
 pub fn main() u8 {
-    // actually call roc to populate the callresult
-    var callresult = RocStr.empty();
-    roc__mainForHost_1_exposed(&callresult);
-
     // display the result using JavaScript
-    js_display_roc_string(callresult.asU8ptr(), callresult.len());
-
-    callresult.deinit();
-
+    js_display_roc_string(roc__mainForHost_1_exposed());
     return 0;
 }

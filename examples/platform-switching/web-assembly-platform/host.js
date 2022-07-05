@@ -3,10 +3,9 @@ async function roc_web_platform_run(wasm_filename, callback) {
   let memory_bytes;
   let exit_code;
 
-  function js_display_roc_string(str_bytes, str_len) {
-    const utf8_bytes = memory_bytes.subarray(str_bytes, str_bytes + str_len);
-    const js_string = decoder.decode(utf8_bytes);
-    callback(js_string);
+  function js_display_roc_string(val) {
+    console.log(val);
+    callback(val);
   }
 
   const importObj = {

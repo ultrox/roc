@@ -8,4 +8,13 @@ app "rocLovesPlatforms"
     imports []
     provides [main] to pf
 
-main = "Which platform am I running on now?\n"
+main = 
+    x: List I32
+    x = [0]
+    y = List.set x 0 12
+    val =
+        when List.get y 0 is
+            Ok v -> v
+            Err OutOfBounds -> -1
+    valStr = Num.toStr val
+    "Roc <3 Web Assembly!\nThe list has value: \(valStr)\n"
