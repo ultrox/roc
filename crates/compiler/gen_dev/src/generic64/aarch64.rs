@@ -492,12 +492,14 @@ impl Assembler<AArch64GeneralReg, AArch64FloatReg> for AArch64Assembler {
 
     #[inline(always)]
     fn jmp_imm32(buf: &mut Vec<'_, u8>, offset: i32) -> usize {
-        // If fits in 26 bits
-        // if (offset as u32) & 0x8F_FFFF == (offset as u32) {
-        jmp_imm26(buf, offset);
-        // } else {
-        // todo!("jump farther than 26 bits for AArch64");
-        // }
+        const SIGN_BITS: i32 = 0xFE00_0000u32 as i32;
+        // If fits in 26 bits (aka upper/sign bits are all 0 or 1)
+        if matches!(offset & SIGN_BITS, SIGN_BITS | 0) {
+            // TODO: figure out if we need to divide the offset by 4.
+            jmp_imm26(buf, offset);
+        } else {
+            todo!("jump farther than 26 bits for AArch64");
+        }
         buf.len() // TODO: double check this
     }
 
@@ -1072,10 +1074,10 @@ impl UnconditionalBranchRegister {
 
 #[derive(PackedStruct)]
 pub struct UnconditionalBranchImmediate {
-    #[packed_field(endian = "lsb")]
-    imm26: Integer<i32, packed_bits::Bits<26>>,
-    fixed: Integer<u8, packed_bits::Bits<5>>,
     op: bool,
+    fixed: Integer<u8, packed_bits::Bits<5>>,
+    #[packed_field(endian = "msb")]
+    imm26: Integer<i32, packed_bits::Bits<26>>,
 }
 
 impl Aarch64Bytes for UnconditionalBranchImmediate {}
@@ -1083,7 +1085,12 @@ impl Aarch64Bytes for UnconditionalBranchImmediate {}
 impl UnconditionalBranchImmediate {
     #[inline(always)]
     fn new(op: bool, imm26: i32) -> Self {
-        // debug_assert!((imm26 as u32) < (1 << 26));
+        // sssssssx_xxxxxxxx_xxxxxxxx_xxxxxxxx
+        // Bits 25 to 31 must all be the same, either 0 or 1.
+        // 1 will be negative number, 0 will be positive.
+        // Both will fit in 26 bits.
+        const SIGN_BITS: i32 = 0xFE00_0000u32 as i32;
+        debug_assert!(matches!(imm26 & SIGN_BITS, SIGN_BITS | 0));
 
         Self {
             op,
@@ -1372,6 +1379,15 @@ mod tests {
             ALL_GENERAL_REGS,
             ALL_GENERAL_REGS,
             [0x123]
+        );
+    }
+
+    #[test]
+    fn test_jmp_imm26() {
+        disassembler_test!(
+            jmp_imm26,
+            |imm26: i32| format!("b #0x{:x}", (imm26 << 2) as i64),
+            [-1, 0xFF_1234_56u32 as i32, 0x1_123456]
         );
     }
 
