@@ -579,7 +579,7 @@ impl<
             // Build unconditional jump to the end of this switch.
             // Since we don't know the offset yet, set it to 0 and overwrite later.
             let jmp_location = self.buf.len();
-            let jmp_offset = ASM::jmp_imm32(&mut self.buf, 0x1234_5678);
+            let jmp_offset = ASM::jmp_imm32(&mut self.buf, 0x0);
             ret_jumps.push((jmp_location, jmp_offset));
 
             // Overwrite the original jne with the correct offset.
@@ -663,7 +663,7 @@ impl<
             .setup_jump(&mut self.buf, id, args, arg_layouts);
 
         let jmp_location = self.buf.len();
-        let start_offset = ASM::jmp_imm32(&mut self.buf, 0x1234_5678);
+        let start_offset = ASM::jmp_imm32(&mut self.buf, 0x0);
 
         if let Some(vec) = self.join_map.get_mut(id) {
             vec.push((jmp_location as u64, start_offset as u64))
@@ -1225,7 +1225,7 @@ impl<
             CC::return_complex_symbol(&mut self.buf, &mut self.storage_manager, sym, layout)
         }
         let inst_loc = self.buf.len() as u64;
-        let offset = ASM::jmp_imm32(&mut self.buf, 0x1234_5678) as u64;
+        let offset = ASM::jmp_imm32(&mut self.buf, 0x0) as u64;
         self.relocs.push(Relocation::JmpToReturn {
             inst_loc,
             inst_size: self.buf.len() as u64 - inst_loc,

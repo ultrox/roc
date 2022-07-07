@@ -498,7 +498,11 @@ impl Assembler<AArch64GeneralReg, AArch64FloatReg> for AArch64Assembler {
             // TODO: figure out if we need to divide the offset by 4.
             jmp_imm26(buf, offset);
         } else {
-            todo!("jump farther than 26 bits for AArch64");
+            todo!(
+                "jump farther than 26 bits for AArch64: 0x{:x} which is {}",
+                offset,
+                offset
+            );
         }
         buf.len() // TODO: double check this
     }
