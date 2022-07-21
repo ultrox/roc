@@ -99,6 +99,10 @@ impl SketchedRows {
     fn reify_to_non_redundant(self, subs: &Subs) -> NonRedundantSummary {
         to_nonredundant_rows(subs, self)
     }
+
+    pub fn overall_region(&self) -> Region {
+        self.overall_region
+    }
 }
 
 fn sketch_pattern(var: Variable, pattern: &crate::pattern::Pattern) -> SketchedPattern {
