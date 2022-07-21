@@ -1356,7 +1356,7 @@ fn solve(
                 let snapshot = subs.snapshot();
                 let outcome = unify(&mut UEnv::new(subs), real_var, branches_var, Mode::EQ);
 
-                let should_check_exhaustiveness;
+                let check_pattern_exhaustiveness;
                 match outcome {
                     Success {
                         vars,
@@ -1388,15 +1388,13 @@ fn solve(
 
                         // Case 1: unify error types, but don't check exhaustiveness.
                         // Case 2: run exhaustiveness to check for redundant branches.
-                        should_check_exhaustiveness = !already_have_error;
+                        check_pattern_exhaustiveness = !already_have_error;
                     }
                     Failure(..) => {
                         // Rollback and check for almost-equality.
                         subs.rollback_to(snapshot);
 
                         let almost_eq_snapshot = subs.snapshot();
-                        // TODO: turn this on for bidirectional exhaustiveness checking
-                        // open_tag_union(subs, real_var);
                         open_tag_union(subs, branches_var);
                         let almost_eq = matches!(
                             unify(&mut UEnv::new(subs), real_var, branches_var, Mode::EQ),
@@ -1407,7 +1405,7 @@ fn solve(
 
                         if almost_eq {
                             // Case 3: almost equal, check exhaustiveness.
-                            should_check_exhaustiveness = true;
+                            check_pattern_exhaustiveness = true;
                         } else {
                             // Case 4: incompatible types, report type error.
                             // Re-run first failed unification to get the type diff.
@@ -1443,7 +1441,7 @@ fn solve(
                                     };
 
                                     problems.push(problem);
-                                    should_check_exhaustiveness = false;
+                                    check_pattern_exhaustiveness = false;
                                 }
                                 _ => internal_error!("Must be failure"),
                             }
@@ -1456,13 +1454,13 @@ fn solve(
 
                         problems.push(TypeError::BadType(problem));
 
-                        should_check_exhaustiveness = false;
+                        check_pattern_exhaustiveness = false;
                     }
                 }
 
                 let sketched_rows = constraints.sketched_rows[sketched_rows.index()].clone();
 
-                if should_check_exhaustiveness {
+                if check_pattern_exhaustiveness {
                     use roc_can::exhaustive::{check, ExhaustiveSummary};
 
                     let ExhaustiveSummary {
