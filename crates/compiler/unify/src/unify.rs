@@ -1925,6 +1925,10 @@ fn maybe_mark_union_recursive(subs: &mut Subs, union_var: Variable) {
                     subs.mark_tag_union_recursive(v, tags, ext_var);
                     continue 'outer;
                 }
+                Content::Structure(FlatType::RecursiveTagUnion(..)) => {
+                    // TODO: how does this happen??? Is this okay???
+                    return;
+                }
                 LambdaSet(self::LambdaSet {
                     solved,
                     recursion_var: OptVariable::NONE,
