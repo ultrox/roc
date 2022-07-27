@@ -3426,6 +3426,10 @@ fn check_for_infinite_type(
             &Content::Structure(FlatType::TagUnion(tags, ext_var)) => {
                 subs.mark_tag_union_recursive(recursive, tags, ext_var);
             }
+            &Content::Structure(FlatType::RecursiveTagUnion(..)) => {
+                // TODO: how does this happen??? Is this okay???
+                return;
+            }
             &Content::LambdaSet(subs::LambdaSet {
                 solved,
                 recursion_var: _,
