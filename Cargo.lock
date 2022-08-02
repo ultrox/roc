@@ -3408,6 +3408,7 @@ dependencies = [
  "bitvec 1.0.1",
  "bumpalo",
  "indoc",
+ "insta",
  "pretty_assertions",
  "roc_collections",
  "roc_error_macros",
