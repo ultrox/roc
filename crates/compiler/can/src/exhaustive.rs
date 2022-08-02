@@ -4,7 +4,8 @@ use roc_collections::all::HumanIndex;
 use roc_collections::VecSet;
 use roc_error_macros::internal_error;
 use roc_exhaustive::{
-    is_useful, Ctor, CtorName, Error, Guard, Literal, Pattern, RenderAs, TagId, Union,
+    is_useful, Ctor, CtorName, Error, Guard, IncludeNonExhaustiveCtors, Literal, Pattern, RenderAs,
+    TagId, Union,
 };
 use roc_module::ident::{TagIdIntType, TagName};
 use roc_module::symbol::{Interns, ModuleId};
@@ -30,6 +31,33 @@ pub fn check(
     sketched_rows: SketchedRows,
     context: ExhaustiveContext,
 ) -> ExhaustiveSummary {
+    check_help(
+        subs,
+        sketched_rows,
+        context,
+        IncludeNonExhaustiveCtors(true),
+    )
+}
+
+pub fn check_without_non_exhaustive_rows(
+    subs: &Subs,
+    sketched_rows: SketchedRows,
+    context: ExhaustiveContext,
+) -> ExhaustiveSummary {
+    check_help(
+        subs,
+        sketched_rows,
+        context,
+        IncludeNonExhaustiveCtors(false),
+    )
+}
+
+fn check_help(
+    subs: &Subs,
+    sketched_rows: SketchedRows,
+    context: ExhaustiveContext,
+    include_non_exhaustive_ctors: IncludeNonExhaustiveCtors,
+) -> ExhaustiveSummary {
     let overall_region = sketched_rows.overall_region;
     let mut all_errors = Vec::with_capacity(1);
 
@@ -37,7 +65,7 @@ pub fn check(
         non_redundant_rows,
         errors,
         redundancies,
-    } = sketched_rows.reify_to_non_redundant(subs);
+    } = sketched_rows.reify_to_non_redundant(subs, include_non_exhaustive_ctors);
     all_errors.extend(errors);
 
     let exhaustive = match roc_exhaustive::check(overall_region, context, non_redundant_rows) {
@@ -64,21 +92,32 @@ enum SketchedPattern {
 }
 
 impl SketchedPattern {
-    fn reify(self, subs: &Subs) -> Pattern {
+    fn reify(
+        self,
+        subs: &Subs,
+        include_non_exhaustive_ctors: IncludeNonExhaustiveCtors,
+    ) -> Pattern {
         match self {
             Self::Anything => Pattern::Anything,
             Self::Literal(lit) => Pattern::Literal(lit),
             Self::KnownCtor(union, tag_id, patterns) => Pattern::Ctor(
                 union,
                 tag_id,
-                patterns.into_iter().map(|pat| pat.reify(subs)).collect(),
+                patterns
+                    .into_iter()
+                    .map(|pat| pat.reify(subs, include_non_exhaustive_ctors))
+                    .collect(),
             ),
             Self::Ctor(var, tag_name, patterns) => {
-                let (union, tag_id) = convert_tag(subs, var, &tag_name);
+                let (union, tag_id) =
+                    convert_tag(subs, var, &tag_name, include_non_exhaustive_ctors);
                 Pattern::Ctor(
                     union,
                     tag_id,
-                    patterns.into_iter().map(|pat| pat.reify(subs)).collect(),
+                    patterns
+                        .into_iter()
+                        .map(|pat| pat.reify(subs, include_non_exhaustive_ctors))
+                        .collect(),
                 )
             }
         }
@@ -168,8 +207,12 @@ pub struct SketchedRows {
 }
 
 impl SketchedRows {
-    fn reify_to_non_redundant(self, subs: &Subs) -> NonRedundantSummary {
-        to_nonredundant_rows(subs, self)
+    fn reify_to_non_redundant(
+        self,
+        subs: &Subs,
+        include_non_exhaustive_ctors: IncludeNonExhaustiveCtors,
+    ) -> NonRedundantSummary {
+        to_nonredundant_rows(subs, self, include_non_exhaustive_ctors)
     }
 
     pub fn overall_region(&self) -> Region {
@@ -400,7 +443,11 @@ struct NonRedundantSummary {
 }
 
 /// INVARIANT: Produces a list of rows where (forall row. length row == 1)
-fn to_nonredundant_rows(subs: &Subs, rows: SketchedRows) -> NonRedundantSummary {
+fn to_nonredundant_rows(
+    subs: &Subs,
+    rows: SketchedRows,
+    include_non_exhaustive_ctors: IncludeNonExhaustiveCtors,
+) -> NonRedundantSummary {
     let SketchedRows {
         rows,
         overall_region,
@@ -419,7 +466,7 @@ fn to_nonredundant_rows(subs: &Subs, rows: SketchedRows) -> NonRedundantSummary 
     {
         let next_row: Vec<Pattern> = patterns
             .into_iter()
-            .map(|pattern| pattern.reify(subs))
+            .map(|pattern| pattern.reify(subs, include_non_exhaustive_ctors))
             .collect();
 
         if matches!(guard, Guard::HasGuard) || is_useful(checked_rows.clone(), next_row.clone()) {
@@ -441,7 +488,12 @@ fn to_nonredundant_rows(subs: &Subs, rows: SketchedRows) -> NonRedundantSummary 
     }
 }
 
-fn convert_tag(subs: &Subs, whole_var: Variable, this_tag: &TagName) -> (Union, TagId) {
+fn convert_tag(
+    subs: &Subs,
+    whole_var: Variable,
+    this_tag: &TagName,
+    include_non_exhaustive_ctors: IncludeNonExhaustiveCtors,
+) -> (Union, TagId) {
     let content = subs.get_content_without_compacting(whole_var);
 
     use {Content::*, FlatType::*};
@@ -456,9 +508,13 @@ fn convert_tag(subs: &Subs, whole_var: Variable, this_tag: &TagName) -> (Union, 
             // be matched unless there's an `Anything` pattern.
             let opt_openness_tag = match subs.get_content_without_compacting(ext) {
                 FlexVar(_) | RigidVar(_) => {
-                    let openness_tag = TagName(NONEXHAUSIVE_CTOR.into());
-                    num_tags += 1;
-                    Some((openness_tag, &[] as _))
+                    if include_non_exhaustive_ctors.0 {
+                        let openness_tag = TagName(NONEXHAUSIVE_CTOR.into());
+                        num_tags += 1;
+                        Some((openness_tag, &[] as _))
+                    } else {
+                        None
+                    }
                 }
                 Structure(EmptyTagUnion) => None,
                 // Anything else is erroneous and we ignore
@@ -702,7 +758,7 @@ fn sketch_variable_help(ctx: &mut Ctx, var: Variable) -> Vec<SketchedPattern> {
                 vec![SketchedPattern::KnownCtor(union, tag_id, vec![])]
             }
             FlatType::Erroneous(_) => vec![SketchedPattern::Anything],
-            FlatType::EmptyTagUnion => internal_error!("unreachable"),
+            FlatType::EmptyTagUnion => vec![],
         },
         Content::LambdaSet(_) => internal_error!("unreachable"),
     }
