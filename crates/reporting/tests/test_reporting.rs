@@ -10327,4 +10327,32 @@ All branches in an `if` must have the same type!
     implementation or `has Decode.Decoding` to the definition of `A`.
     "###
     );
+
+    test_report!(
+        record_with_optional_field_types_cannot_derive_decoding,
+        indoc!(
+            r#"
+            app "test" imports [Decode.{Decoder, DecoderFormatting, decoder}] provides [main] to "./platform"
+
+            main =
+                myDecoder : Decoder {x : Str, y ? Str} fmt | fmt has DecoderFormatting
+                myDecoder = decoder
+
+                myDecoder
+            "#
+        ),
+        @r###"
+    ── TYPE MISMATCH ───────────────────────────────────────── /code/proj/Main.roc ─
+
+    This expression has a type that does not implement the abilities it's expected to:
+
+    5│      myDecoder = decoder
+                        ^^^^^^^
+
+    Roc can't generate an implementation of the `Decode.Decoding` ability
+    for
+
+        { x : Str, y ? Str }
+    "###
+    );
 }
