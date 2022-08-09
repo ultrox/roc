@@ -10353,6 +10353,15 @@ All branches in an `if` must have the same type!
     for
 
         { x : Str, y ? Str }
+
+    Note: Roc cannot derive decoding for a record with an optional field,
+    which in this case is `.y`. Optional record fields are polymorphic over
+    records that may or may not contain them at compile time, but are not
+    a concept that extends to runtime!
+    That means Roc cannot derive a decoder for a record with an optional
+    value by way of an optional record field. If you want to model the
+    idea that a field may or may not be present at runtime, consider using
+    a `Result`.
     "###
     );
 }
