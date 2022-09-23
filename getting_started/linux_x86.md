@@ -7,6 +7,12 @@ which includes the Roc compiler and various helpful utilities.
 
 1. Download the latest nightly from the assets [here](https://github.com/roc-lang/roc/releases).
 
+2. Alternativly if you have [jq](https://github.com/stedolan/jq) use this:
+
+    ```sh
+     curl -s https://api.github.com/repos/roc-lang/roc/releases|jq -r '.[0].assets [0].browser_download_url' \
+     | xargs -n1 -I % curl -L % --output roc_nightly.tar.gz
+    ```
 1. Untar the archive:
 
     ```sh
