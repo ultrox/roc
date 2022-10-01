@@ -1,53 +1,74 @@
 # Roc installation guide for x86 Linux systems
 
 ## How to install Roc
+> **Note**:
+> In order to develop in Roc, you need to install the Roc CLI, which includes the Roc compiler and various helpful utilities.
 
-In order to develop in Roc, you need to install the Roc CLI,
-which includes the Roc compiler and various helpful utilities.
+1. Download Latest nightly Roc
+```sh
+curl -s https://api.github.com/repos/roc-lang/roc/releases|jq -r '.[0].assets [0].browser_download_url'|xargs -n1 -I % curl -L % --output roc_nightly.tar.gz
+```
+2. Unpack
 
-1. Download the latest nightly from the assets [here](https://github.com/roc-lang/roc/releases).
-
-1. Untar the archive:
-
-    ```sh
-    tar -xf roc_nightly-linux_x86_64-<VERSION>.tar.gz --one-top-level
-    cd roc_night<TAB TO AUTOCOMPLETE>
-    ```
+```sh
+tar xf roc_nightly.tar.gz --one-top-level
+```
 
 ## How to install Roc platform dependencies
 
-In order to compile Roc apps (either in `examples/` or in your own projects),
-you need to install one or more of these platform language compilers, too.
+> **Note**:
+> In order to compile Roc apps (either in examples/ or in your own projects), 
+> you need to install one or more of these platform language compilers, too.
 
-1. Install the Rust compiler, for apps with Rust-based platforms:
 
-    ```sh
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-    ```
+<details>
+<summary>
+Install the Rust compiler, for apps with Rust-based platforms:
+</summary>
 
-1. Install the Zig compiler, for apps with Zig-based platforms:
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+</details>
 
-    ```sh
-    wget https://ziglang.org/download/0.9.1/zig-linux-x86_64-0.9.1.tar.xz
-    tar -xf zig-linux-x86_64-0.9.1.tar.xz
-    sudo ln -s  $(pwd)/zig-linux-x86_64-0.9.1/zig /usr/local/bin/zig
-    ```
 
-1. Install a C compiler, for apps with C-based platforms:
+<details>
+<summary>
+Install the Zig compiler, for apps with Zig-based platforms:
+</summary>
+<br>
 
-    ```sh
-    # On a Debian-based distro like Ubuntu
-    sudo apt update && sudo apt install build-essential clang
-    
-    # On an RPM-based distro like Fedora
-    sudo dnf check-update && sudo dnf install clang
-    ```
+1. Download zig 
+```sh
+curl -Ls  https://ziglang.org/download/0.9.1/zig-linux-x86_64-0.9.1.tar.xz -o zig-0.9.1.tar.xz
+```
 
-    ```sh
-    # Note: If you installed Rust in this terminal session, you'll need to open a new one first!
-    ./roc examples/platform-switching/rocLovesRust.roc
+2. Unpack
+```sh
+tar xf zig-0.9.1.tar.xz
+```
+3. Move To Path
 
-    ./roc examples/platform-switching/rocLovesZig.roc
+```sh
+cp zig-linux-x86_64-0.9.1/zig /usr/local/bin/zig
+```
+</details>
 
-    ./roc examples/platform-switching/rocLovesC.roc
-    ```
+<details>
+<summary>
+Install a C compiler, for apps with C-based platforms:
+</summary>
+
+### On a Debian-based distro like Ubuntu
+```sh
+sudo apt update && sudo apt install build-essential clang
+```
+
+### On an RPM-based distro like Fedora
+```sh
+sudo dnf check-update && sudo dnf install clang
+```
+
+</details>
+
+
