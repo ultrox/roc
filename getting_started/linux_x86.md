@@ -71,6 +71,17 @@ sudo apt update && sudo apt install build-essential clang
 sudo dnf check-update && sudo dnf install clang
 ```
 
+
 </details>
+
+> **Note**: 
+> If you installed Rust in this terminal session, you'll need to open a new one first!
+```sh
+./roc examples/platform-switching/rocLovesRust.roc
+
+./roc examples/platform-switching/rocLovesZig.roc
+
+./roc examples/platform-switching/rocLovesC.roc
+```
 
 
