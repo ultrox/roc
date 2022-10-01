@@ -4,7 +4,7 @@
 > **Note**:
 > In order to develop in Roc, you need to install the Roc CLI, which includes the Roc compiler and various helpful utilities.
 
-1. Download Latest nightly Roc
+1. Download Latest nightly Roc (or mranually [here](https://github.com/roc-lang/roc/releases))
 ```sh
 curl -s https://api.github.com/repos/roc-lang/roc/releases|jq -r '.[0].assets [0].browser_download_url'|xargs -n1 -I % curl -L % --output roc_nightly.tar.gz
 ```
